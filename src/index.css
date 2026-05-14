@@ -1,0 +1,73 @@
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,500;1,8..60,300;1,8..60,400;1,8..60,500&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 195 28% 16%;
+    --foreground: 185 60% 90%;
+    --card: 195 30% 13%;
+    --card-foreground: 185 60% 90%;
+    --popover: 195 30% 13%;
+    --popover-foreground: 185 60% 90%;
+    --primary: 185 80% 60%;
+    --primary-foreground: 195 30% 10%;
+    --secondary: 195 25% 20%;
+    --secondary-foreground: 185 50% 85%;
+    --muted: 195 25% 18%;
+    --muted-foreground: 185 30% 55%;
+    --accent: 185 90% 55%;
+    --accent-foreground: 195 30% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 185 40% 25%;
+    --input: 195 25% 20%;
+    --ring: 185 80% 60%;
+    --chart-1: 185 80% 60%;
+    --chart-2: 195 50% 50%;
+    --chart-3: 160 50% 50%;
+    --chart-4: 280 50% 60%;
+    --chart-5: 350 60% 60%;
+    --radius: 0.75rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+
+    --font-serif: 'Source Serif 4', Georgia, serif;
+    --font-sans: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* KaTeX color theming */
+.katex-chunk .katex,
+.katex-chunk .katex * {
+  color: var(--katex-color, hsl(185, 60%, 88%)) !important;
+}
+.katex-chunk .katex {
+  font-size: 1em !important;
+}
+.katex-panel-badge .katex,
+.katex-panel-badge .katex * {
+  color: #a5f3fc !important;
+}
+.katex-panel-badge .katex {
+  font-size: 1.2em !important;
+}

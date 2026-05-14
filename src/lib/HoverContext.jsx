@@ -14,7 +14,7 @@ export function HoverProvider({ children }) {
   const [pinnedChunkData, setPinnedChunkData] = useState(null);
   const [pinnedStepId, setPinnedStepId] = useState(null);
   const [difficultyMode, setDifficultyMode] = useState("intermediate");
-  const timerRefs = useRef({});
+  const timerRefs = useRef({ short: null, medium: null, deep: null });
 
   const startTimers = useCallback((mode) => {
     const max = DIFFICULTY_MAX_LEVEL[mode] ?? 3;
@@ -25,8 +25,10 @@ export function HoverProvider({ children }) {
   }, []);
 
   const handleChunkEnter = useCallback((chunk, stepId) => {
-    Object.values(timerRefs.current).forEach(clearTimeout);
-    timerRefs.current = {};
+    Object.values(timerRefs.current).forEach((timer) => {
+      if (timer) clearTimeout(timer);
+    });
+    timerRefs.current = { short: null, medium: null, deep: null };
     setActiveChunkId(chunk.id);
     setActiveChunkData(chunk);
     setActiveStepId(stepId);
@@ -34,8 +36,10 @@ export function HoverProvider({ children }) {
   }, [startTimers, difficultyMode]);
 
   const handleChunkLeave = useCallback(() => {
-    Object.values(timerRefs.current).forEach(clearTimeout);
-    timerRefs.current = {};
+    Object.values(timerRefs.current).forEach((timer) => {
+      if (timer) clearTimeout(timer);
+    });
+    timerRefs.current = { short: null, medium: null, deep: null };
     if (pinnedChunkId) {
       setActiveChunkId(pinnedChunkId);
       setActiveChunkData(pinnedChunkData);
@@ -51,8 +55,10 @@ export function HoverProvider({ children }) {
 
   const handleChunkRightClick = useCallback((chunk, stepId, e) => {
     e.preventDefault();
-    Object.values(timerRefs.current).forEach(clearTimeout);
-    timerRefs.current = {};
+    Object.values(timerRefs.current).forEach((timer) => {
+      if (timer) clearTimeout(timer);
+    });
+    timerRefs.current = { short: null, medium: null, deep: null };
     setPinnedChunkId(chunk.id);
     setPinnedChunkData(chunk);
     setPinnedStepId(stepId);

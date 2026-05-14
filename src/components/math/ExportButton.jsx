@@ -10,7 +10,7 @@ export default function ExportButton({ targetRef, filename = "math-problem" }) {
   const capture = async () => {
     const el = targetRef.current;
     return await html2canvas(el, {
-      backgroundColor: "#162028",
+      backgroundColor: "#061116",
       scale: 2,
       useCORS: true,
       logging: false,
@@ -46,42 +46,28 @@ export default function ExportButton({ targetRef, filename = "math-problem" }) {
   return (
     <div className="relative">
       <button
-        onClick={() => setMenuOpen((v) => !v)}
+        type="button"
+        onClick={() => setMenuOpen((value) => !value)}
         disabled={loading}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-sans font-semibold transition-all duration-200"
-        style={{
-          fontSize: 11,
-          background: "rgba(34,211,238,0.08)",
-          color: loading ? "rgba(34,211,238,0.3)" : "rgba(34,211,238,0.75)",
-          border: "1px solid rgba(34,211,238,0.2)",
-        }}
+        className="omni-button flex min-h-10 items-center gap-2 rounded-2xl px-4 text-sm font-semibold transition-all duration-200"
       >
-        {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
         Export
       </button>
 
       {menuOpen && (
         <>
-          {/* backdrop to close */}
           <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-          <div
-            className="absolute right-0 mt-1 rounded-lg overflow-hidden z-50 flex flex-col"
-            style={{
-              background: "rgba(10,24,30,0.97)",
-              border: "1px solid rgba(34,211,238,0.25)",
-              minWidth: 120,
-              boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-            }}
-          >
+          <div className="omni-panel absolute right-0 z-50 mt-2 flex min-w-36 flex-col overflow-hidden rounded-2xl p-1.5">
             {[
               { label: "Save as PNG", action: exportPNG },
               { label: "Save as PDF", action: exportPDF },
             ].map(({ label, action }) => (
               <button
                 key={label}
+                type="button"
                 onClick={action}
-                className="px-4 py-2 text-left font-sans transition-all hover:bg-white/5"
-                style={{ fontSize: 12, color: "rgba(185,230,240,0.85)" }}
+                className="rounded-xl px-3 py-2 text-left text-sm text-slate-200/80 transition-colors hover:bg-white/[0.06]"
               >
                 {label}
               </button>
@@ -91,4 +77,4 @@ export default function ExportButton({ targetRef, filename = "math-problem" }) {
       )}
     </div>
   );
-}   
+}

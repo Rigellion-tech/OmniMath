@@ -1,54 +1,46 @@
 import React from "react";
 import { History, X } from "lucide-react";
+import InlineMath from "./InlineMath";
 
 export default function RecentProblems({ recents, onSelect, onClear }) {
   if (recents.length === 0) return null;
 
   return (
-    <div
-      className="rounded-lg overflow-hidden"
-      style={{
-        background: "rgba(10, 24, 30, 0.75)",
-        border: "1px solid rgba(34,211,238,0.15)",
-      }}
-    >
-      {/* Header */}
-      <div
-        className="flex items-center justify-between px-3 py-2"
-        style={{ borderBottom: "1px solid rgba(34,211,238,0.1)" }}
-      >
-        <div className="flex items-center gap-1.5">
-          <History className="w-3 h-3" style={{ color: "rgba(34,211,238,0.5)" }} />
-          <span className="font-sans font-semibold uppercase tracking-widest"
-            style={{ fontSize: 9, color: "rgba(34,211,238,0.5)" }}>
+    <aside className="omni-surface overflow-hidden rounded-2xl">
+      <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-3">
+        <div className="flex items-center gap-2">
+          <History className="h-3.5 w-3.5 text-teal-200/70" />
+          <span className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-teal-200/70">
             Recent
           </span>
         </div>
-        <button onClick={onClear} className="transition-opacity hover:opacity-70">
-          <X className="w-3 h-3" style={{ color: "rgba(150,200,210,0.35)" }} />
+        <button
+          type="button"
+          onClick={onClear}
+          className="rounded-lg p-1 text-slate-400/60 transition-colors hover:bg-white/[0.06] hover:text-slate-100"
+          aria-label="Clear recent problems"
+        >
+          <X className="h-3.5 w-3.5" />
         </button>
       </div>
 
-      {/* List */}
-      <div className="flex flex-col">
-        {recents.map((item, i) => (
+      <div className="flex flex-col p-2">
+        {recents.map((item, index) => (
           <button
-            key={i}
+            key={`${item.expression}-${index}`}
+            type="button"
             onClick={() => onSelect(item)}
-            className="flex flex-col items-start px-3 py-2 text-left transition-all duration-150 hover:bg-white/5"
-            style={{ borderBottom: i < recents.length - 1 ? "1px solid rgba(34,211,238,0.07)" : "none" }}
+            className="rounded-xl px-3 py-3 text-left transition-all duration-200 hover:bg-white/[0.055]"
           >
-            <span className="font-sans uppercase tracking-widest"
-              style={{ fontSize: 9, color: "rgba(34,211,238,0.4)" }}>
+            <span className="block truncate font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-200/50">
               {item.title}
             </span>
-            <span className="font-serif italic truncate w-full mt-0.5"
-              style={{ fontSize: 12, color: "hsl(185,60%,80%)" }}>
-              {item.expression}
+            <span className="mt-1 block truncate font-serif text-sm italic text-cyan-50/80">
+              <InlineMath math={item.expression} />
             </span>
           </button>
         ))}
       </div>
-    </div>
+    </aside>
   );
 }

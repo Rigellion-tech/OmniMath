@@ -1,0 +1,14 @@
+{
+  "framework": "vite",
+  "installCommand": "npm install",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/explain.js": {
+      "maxDuration": 60
+    },
+    "api/explain-image.js": {
+      "maxDuration": 60
+    }
+  }
+}

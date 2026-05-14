@@ -1,38 +1,59 @@
-import React from "react";
-import { InlineMath } from "react-katex";
+import React, { useEffect, useState } from "react";
+import { MousePointer2 } from "lucide-react";
+import InlineMath from "./InlineMath";
 import MathStep from "./MathStep";
-import ConnectorLine from "./ConnectorLine";
 
 export default function ProblemBlock({ problem }) {
+  const [selectedStepId, setSelectedStepId] = useState(problem.steps?.[0]?.id ?? null);
+  const steps = problem.steps ?? [];
+
+  useEffect(() => {
+    setSelectedStepId(problem.steps?.[0]?.id ?? null);
+  }, [problem]);
+
   return (
-    <div
-      className="rounded-xl p-4"
-      style={{
-        background: "rgba(10, 22, 30, 0.5)",
-        border: "1px solid rgba(34,211,238,0.12)",
-      }}
-    >
-      {/* Problem title row */}
-      <div className="flex items-baseline gap-3 mb-3 pb-2.5" style={{ borderBottom: "1px solid rgba(34,211,238,0.1)" }}>
-        <span className="font-sans font-semibold uppercase tracking-widest" style={{ fontSize: 10, color: "rgba(34,211,238,0.5)" }}>
-          {problem.title}
-        </span>
-        <span style={{ fontSize: 15, color: "hsl(185,60%,85%)" }}>
-          <InlineMath math={problem.expression} />
-        </span>
+    <section className="solution-board min-w-0">
+      <div className="mb-5 flex flex-col gap-4 rounded-2xl border border-white/[0.08] bg-white/[0.035] p-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] md:flex-row md:items-end md:justify-between">
+        <div className="min-w-0">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-teal-200/70">
+              Current problem
+            </span>
+            <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] text-slate-300/60">
+              {steps.length} steps
+            </span>
+          </div>
+          <h2 className="text-2xl font-semibold tracking-normal text-cyan-50 md:text-3xl">
+            {problem.title}
+          </h2>
+          <div className="mt-3 max-w-full overflow-x-auto rounded-xl border border-teal-300/[0.12] bg-teal-300/[0.045] px-4 py-3 font-serif text-xl italic text-cyan-50/90 omni-scrollbar">
+            <InlineMath math={problem.expression} />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 rounded-full border border-teal-300/[0.14] bg-teal-300/[0.055] px-3 py-1.5 text-xs text-slate-300/60">
+          <MousePointer2 className="h-3.5 w-3.5 text-teal-200/70" />
+          Select a step or inspect any token.
+        </div>
       </div>
 
-      {/* Steps */}
-      <div className="flex flex-col">
-        {problem.steps.map((step, index) => (
-          <React.Fragment key={step.id}>
-            <MathStep step={step} index={index} totalSteps={problem.steps.length} />
-            {index < problem.steps.length - 1 && (
-              <ConnectorLine flip={index % 2 === 0} />
-            )}
-          </React.Fragment>
-        ))}
-      </div>
-    </div>
+      {steps.length === 0 ? (
+        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-8 text-center text-sm text-slate-300/60">
+          No solution steps are available yet.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {steps.map((step, index) => (
+            <MathStep
+              key={step.id}
+              step={step}
+              index={index}
+              selected={selectedStepId === step.id}
+              onSelect={setSelectedStepId}
+            />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }

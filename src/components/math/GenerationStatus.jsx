@@ -1,11 +1,12 @@
 import React from "react";
 import { AlertTriangle, CheckCircle2, Clock3, Loader2 } from "lucide-react";
+import { cleanLatexSnippet } from "@/lib/problemLabels";
 import { cn } from "@/lib/utils";
 
 const statusConfig = {
   empty: {
     icon: Clock3,
-    label: "Demo problem loaded",
+    label: "Ready",
     className: "border-white/[0.08] bg-white/[0.035] text-slate-300/70",
     iconClassName: "text-slate-300/60",
   },
@@ -39,6 +40,7 @@ const statusConfig = {
 export default function GenerationStatus({ status }) {
   const config = statusConfig[status.type] ?? statusConfig.empty;
   const Icon = config.icon;
+  const detail = status.detail ? cleanLatexSnippet(status.detail, "", 80) : "";
 
   return (
     <div
@@ -58,9 +60,9 @@ export default function GenerationStatus({ status }) {
             <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em]">
               {status.label || config.label}
             </span>
-            {status.detail && (
+            {detail && (
               <span className="truncate text-xs text-slate-300/60">
-                {status.detail}
+                {status.type === "success" ? `· ${detail}` : detail}
               </span>
             )}
           </div>

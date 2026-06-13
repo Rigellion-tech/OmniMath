@@ -1,8 +1,8 @@
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate, useLocation } from "react-router-dom";
 import { LockKeyhole, Loader2 } from "lucide-react";
-import { SignInButton, useAuth } from "@clerk/react";
-import { isClerkConfigured } from "@/lib/auth";
+import { useAuth } from "@clerk/react";
+import { CLERK_SIGN_IN_URL, isClerkConfigured, isMockAuthMode } from "@/lib/auth";
 
 function AuthRequiredPanel({ configured = true }) {
   return (
@@ -13,26 +13,20 @@ function AuthRequiredPanel({ configured = true }) {
       <div>
         <h1 className="text-xl font-semibold text-cyan-50">Sign in required</h1>
         <p className="mt-2 text-sm leading-6 text-slate-300/65">
-          This page is for your OmniMath account. The solver still works in signed-out demo mode.
+          This page is for your OmniMath account. Configure Clerk locally to continue.
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-3">
-        {configured ? (
-          <SignInButton mode="modal">
-            <button type="button" className="omni-button min-h-10 rounded-xl px-4 text-sm font-semibold">
-              Sign in with Google
-            </button>
-          </SignInButton>
-        ) : (
+        {!configured && (
           <span className="rounded-xl border border-amber-300/20 bg-amber-300/10 px-4 py-2 text-sm text-amber-100/80">
             Clerk is not configured locally.
           </span>
         )}
         <Link
-          to="/"
+          to={CLERK_SIGN_IN_URL}
           className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-4 py-2 text-sm font-medium text-slate-200/70 transition-colors hover:text-slate-100"
         >
-          Back to demo
+          Go to sign in
         </Link>
       </div>
     </div>
@@ -40,6 +34,10 @@ function AuthRequiredPanel({ configured = true }) {
 }
 
 export default function ProtectedRoute({ children }) {
+  if (isMockAuthMode()) {
+    return <>{children}</>;
+  }
+
   if (!isClerkConfigured()) {
     return <AuthRequiredPanel configured={false} />;
   }
@@ -49,6 +47,7 @@ export default function ProtectedRoute({ children }) {
 
 function ClerkProtectedRoute({ children }) {
   const { isLoaded, isSignedIn } = useAuth();
+  const location = useLocation();
 
   if (!isLoaded) {
     return (
@@ -60,7 +59,7 @@ function ClerkProtectedRoute({ children }) {
   }
 
   if (!isSignedIn) {
-    return <AuthRequiredPanel />;
+    return <Navigate to={CLERK_SIGN_IN_URL} replace state={{ from: location }} />;
   }
 
   return (

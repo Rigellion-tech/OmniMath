@@ -1,0 +1,133 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import katex from "katex";
+import { convertFastSolveToMathExplanation, convertImageSolveToMathExplanation } from "../server/mathExplanationSchema.js";
+import { normalizeDisplayText, renderMathLatex } from "../src/lib/mathAnnotator.js";
+
+const REGRESSION_INTEGRAL = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+
+describe("fast solve pipeline", () => {
+  it("keeps the regression integral as the first rendered line and removes filler steps", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Evaluate Integral",
+      problemLatex: REGRESSION_INTEGRAL,
+      steps: [
+        {
+          id: "step-1",
+          heading: "Define integral",
+          latex: REGRESSION_INTEGRAL,
+          reasoning: "Start from the original integral.",
+        },
+        {
+          id: "step-2",
+          heading: "dx",
+          latex: "dx",
+          reasoning: "Differential.",
+        },
+        {
+          id: "step-3",
+          heading: "Use the substitution t = arctan x",
+          latex: "t=\\arctan x",
+          reasoning: "This substitution uses dt=\\frac{1}{1+x^2}\\,dx.",
+          anchors: [
+            {
+              id: "a1",
+              latex: "t=\\arctan x",
+              type: "substitution",
+              priority: "high",
+            },
+            {
+              id: "bad-dx",
+              latex: "dx",
+              type: "differential",
+              priority: "low",
+            },
+          ],
+        },
+      ],
+      finalAnswerLatex: "\\frac{\\pi^3}{16}",
+      numericCheck: "",
+    }, { originalProblem: REGRESSION_INTEGRAL });
+
+    assert.equal(explanation.steps[0].math, renderMathLatex(REGRESSION_INTEGRAL));
+    assert.equal(explanation.steps.some((step) => step.math === "dx"), false);
+    assert.equal(explanation.steps.some((step) => /Define integral/i.test(step.label)), false);
+
+    const rendered = renderMathLatex(explanation.steps[0].math);
+    const html = katex.renderToString(rendered, { throwOnError: false });
+    assert.equal(html.includes("merror"), false);
+    assert.equal(html.includes("katex-error"), false);
+    assert.ok(rendered.includes("\\,dx"));
+    assert.ok(rendered.includes("\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}"));
+
+    const substitutionStep = explanation.steps.find((step) => step.label.includes("substitution"));
+    const anchorParts = substitutionStep.chunks[0].parts;
+    assert.equal(anchorParts.length, 1);
+    assert.equal(anchorParts[0].anchorId, "a1");
+    assert.equal(anchorParts[0].display, "t=\\arctan x");
+    assert.equal(substitutionStep.lines[0].tokens[0].parts.length, 1);
+  });
+
+  it("repairs joined prose artifacts without splitting ordinary function words", () => {
+    assert.equal(normalizeDisplayText("dsointegrandbecomes"), "so the integrand becomes");
+    assert.equal(normalizeDisplayText("Use the cosine identity"), "Use the cosine identity");
+    assert.equal(normalizeDisplayText("Use \\quad only inside math"), "Use only inside math");
+  });
+
+  it("corrects the regression integral final answer when the exact form fails the numeric check", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Evaluate Integral",
+      problemLatex: REGRESSION_INTEGRAL,
+      steps: [{
+        id: "step-1",
+        heading: "Start",
+        latex: REGRESSION_INTEGRAL,
+        reasoning: "Start with the integral.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "\\frac{7\\pi}{8}\\zeta(3)",
+      numericCheck: "0.7546938294602481",
+    }, { originalProblem: REGRESSION_INTEGRAL });
+
+    assert.equal(explanation.finalAnswer, "\\frac{\\pi}{2}\\ln^2(2)");
+    assert.equal(explanation.numericCheck, "0.7546938294602481");
+    assert.equal(explanation.steps.at(-1).math, "\\frac{\\pi}{2}\\ln^2(2)");
+  });
+
+  it("uses extracted image problem fields instead of the generic upload prompt", () => {
+    const explanation = convertImageSolveToMathExplanation({
+      title: "Differentiate",
+      extractedProblemLatex: "\\frac{d}{dx} x^2",
+      extractedProblemText: "Differentiate x squared with respect to x.",
+      steps: [
+        {
+          title: "Read the problem",
+          equationLatex: "\\frac{d}{dx} x^2",
+          explanation: "The image asks for the derivative of x squared.",
+          tokens: [],
+        },
+        {
+          title: "Apply the power rule",
+          equationLatex: "\\frac{d}{dx}x^2=2x",
+          explanation: "The power rule lowers the exponent and multiplies by it.",
+          tokens: [{
+            id: "power-rule",
+            text: "x squared",
+            latex: "x^2",
+            role: "power",
+            subtokens: [],
+          }],
+        },
+      ],
+      finalAnswerLatex: "2x",
+      numericCheck: "",
+    });
+
+    assert.equal(explanation.originalProblem, "\\frac{d}{dx} x^2");
+    assert.equal(explanation.extractedProblemText, "Differentiate x squared with respect to x.");
+    assert.equal(explanation.extractedProblemLatex, "\\frac{d}{dx} x^2");
+    assert.equal(explanation.problem.includes("Please solve"), false);
+    assert.equal(explanation.steps[0].math, "\\frac{d}{dx}x^2");
+    assert.equal(explanation.finalAnswerLatex, "2x");
+  });
+});

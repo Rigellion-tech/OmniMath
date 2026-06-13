@@ -1,75 +1,278 @@
 import React from "react";
-import { CheckCircle2 } from "lucide-react";
+import { ChevronDown } from "lucide-react";
+import MathRenderer, { looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
 import MathChunk from "./MathChunk";
+import MathText from "./MathText";
 import { useHover } from "@/lib/HoverContext";
 import { cn } from "@/lib/utils";
 
-export default function MathStep({ step, index, selected, onSelect }) {
-  const { activeStepId, pinnedChunkId, handleUnpin } = useHover();
+function lineHasRenderableToken(line) {
+  return Array.isArray(line?.tokens)
+    && line.tokens.some((token) => String(token?.display || token?.latex || token?.text || "").trim());
+}
+
+function normalizeEquationText(value) {
+  return String(value || "")
+    .replace(/\\left|\\right/g, "")
+    .replace(/[{}]/g, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function shouldRenderLineText(line, tokens) {
+  if (!line?.text) return false;
+
+  const text = String(line.text).trim();
+  const tokenText = tokens
+    .map((token) => token?.display || token?.latex || token?.text || "")
+    .join(" ");
+
+  if (normalizeEquationText(text) === normalizeEquationText(tokenText)) return false;
+  return !looksLikeMathExpression(text);
+}
+
+function fallbackLineFromStep(step) {
+  if (Array.isArray(step?.chunks) && step.chunks.length > 0) {
+    return {
+      id: `${step.id || "step"}-line-1`,
+      kind: "math",
+      tokens: step.chunks,
+    };
+  }
+
+  if (step?.math) {
+    return {
+      id: `${step.id || "step"}-line-1`,
+      kind: "math",
+      latex: step.math,
+      tokens: [],
+    };
+  }
+
+  if (step?.summary) {
+    return {
+      id: `${step.id || "step"}-line-1`,
+      kind: "text",
+      text: step.summary,
+      tokens: [],
+    };
+  }
+
+  return null;
+}
+
+function solutionLinesForStep(step) {
+  const structuredLines = Array.isArray(step?.lines)
+    ? step.lines.filter((line) => line?.text || line?.latex || lineHasRenderableToken(line))
+    : [];
+
+  if (structuredLines.length > 0) return structuredLines;
+
+  const fallback = fallbackLineFromStep(step);
+  return fallback ? [fallback] : [];
+}
+
+function MathLineShell({ children }) {
+  return (
+    <div className="omni-solution-line max-w-full overflow-x-auto font-serif text-[18px] italic leading-8 text-cyan-50/90 omni-scrollbar md:text-[20px]">
+      {children}
+    </div>
+  );
+}
+
+function MathProseLine({ children }) {
+  return (
+    <p className="omni-solution-line max-w-3xl text-sm leading-7 text-slate-300/72">
+      {children}
+    </p>
+  );
+}
+
+function SplitMathBlocks({ blocks, componentName, displayMode }) {
+  if (blocks.length === 1 && blocks[0].type === "math") {
+    return (
+      <MathLineShell>
+        <MathRenderer
+          math={blocks[0].latex}
+          displayMode={displayMode}
+          componentName={componentName}
+        />
+      </MathLineShell>
+    );
+  }
+
+  return (
+    <div className="grid gap-1.5">
+      {blocks.map((block, blockIndex) => (
+        block.type === "math" ? (
+          <MathLineShell key={`${block.idHint || "math"}-${blockIndex}`}>
+            <MathRenderer
+              math={block.latex}
+              displayMode
+              componentName={`${componentName}.split`}
+            />
+          </MathLineShell>
+        ) : (
+          <MathProseLine key={`${block.idHint || "text"}-${blockIndex}`}>
+            {block.text}
+          </MathProseLine>
+        )
+      ))}
+    </div>
+  );
+}
+
+export function InteractiveMathLine({ line, stepId }) {
+  const tokens = Array.isArray(line?.tokens) ? line.tokens : [];
+  const hasTokens = lineHasRenderableToken(line);
+  const showLineText = shouldRenderLineText(line, tokens);
+  const textAsMath = !hasTokens && !line?.latex && line?.text && looksLikeMathExpression(line.text);
+
+  if (hasTokens) {
+    return (
+      <div
+        className="omni-solution-line omni-equation-line flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[18px] leading-[1.7] md:text-[20px]"
+        data-line-role={line.role || "other"}
+      >
+        {showLineText && (
+          <span className="text-sm leading-7 text-slate-300/70">
+            {line.text}
+          </span>
+        )}
+        {tokens.map((token, tokenIndex) => (
+          <MathChunk
+            key={token.id || `${line.id || stepId}-token-${tokenIndex}`}
+            chunk={token}
+            stepId={stepId}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (line?.latex) {
+    const blocks = splitLatexRenderBlocks(line.latex);
+    return (
+      <SplitMathBlocks
+        blocks={blocks}
+        displayMode={line.kind === "block" || line.displayMode === true}
+        componentName="InteractiveMathLine.latex"
+      />
+    );
+  }
+
+  if (textAsMath) {
+    const blocks = splitLatexRenderBlocks(line.text);
+    return (
+      <SplitMathBlocks
+        blocks={blocks}
+        displayMode
+        componentName="InteractiveMathLine.textAsMath"
+      />
+    );
+  }
+
+  if (line?.text) {
+    return <MathProseLine>{line.text}</MathProseLine>;
+  }
+
+  return null;
+}
+
+export function SolutionStep({ step, index, selected, expanded, onSelect, onToggleExpanded }) {
+  const {
+    activeStepId,
+    clearSelectedConcept,
+    openReferenceIds = [],
+  } = useHover();
+  const lines = solutionLinesForStep(step);
   const isActiveStep = activeStepId === step.id;
-  const isOtherStepActive = activeStepId && activeStepId !== step.id;
+  const hasWindow = openReferenceIds.includes(step.id);
   const state = isActiveStep ? "active" : selected ? "selected" : "idle";
 
   const handleSelect = () => {
+    clearSelectedConcept();
     onSelect?.(step.id);
-    if (pinnedChunkId) handleUnpin();
   };
 
   const handleKeyDown = (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      handleSelect();
+      if (event.key === " ") onToggleExpanded?.(step.id);
+      else handleSelect();
     }
   };
 
   return (
-    <div className={cn("transition-all duration-300 ease-out", isOtherStepActive && !selected && "opacity-55")}>
-      <div
-        role="button"
-        tabIndex={0}
-        data-state={state}
-        onClick={handleSelect}
-        onKeyDown={handleKeyDown}
-        className="step-card group relative overflow-hidden rounded-2xl p-4 transition-all duration-300 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-300/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116]"
-      >
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-teal-200/40 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+    <article
+      data-state={state}
+      className="step-card notebook-step group relative px-0 py-2.5 transition-colors duration-200"
+    >
+      <div className="flex min-w-0 items-start gap-2.5">
+        <button
+          type="button"
+          onClick={handleSelect}
+          onKeyDown={handleKeyDown}
+          className={cn(
+            "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm font-mono text-[10px] transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116]",
+            selected || isActiveStep || hasWindow
+              ? "text-teal-100"
+              : "text-slate-500/70 hover:text-teal-100"
+          )}
+          aria-label={`Select step ${index + 1}`}
+        >
+          {index + 1}
+        </button>
 
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-teal-300/[0.18] bg-teal-300/[0.075] font-mono text-xs font-semibold text-teal-100">
-              {index + 1}
-            </span>
-            <div className="min-w-0">
-              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-teal-200/60">
-                Step {index + 1}
-              </p>
-              <h3 className="truncate text-sm font-semibold tracking-normal text-cyan-50/92">
-                {step.label}
-              </h3>
-            </div>
-          </div>
-
-          <div
-            className={cn(
-              "flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors",
-              isActiveStep
-                ? "border-teal-300/[0.35] bg-teal-300/[0.12] text-teal-100"
-                : selected
-                  ? "border-teal-300/[0.24] bg-teal-300/[0.08] text-teal-200/75"
-                  : "border-white/[0.08] bg-white/[0.035] text-slate-400/70"
-            )}
+        <div className="min-w-0 flex-1">
+          <button
+            type="button"
+            onClick={handleSelect}
+            className="block min-w-0 rounded-sm text-left text-[15px] font-semibold leading-6 tracking-normal text-cyan-50/90 transition-colors hover:text-teal-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116] sm:text-base"
           >
-            {(isActiveStep || selected) && <CheckCircle2 className="h-3 w-3" />}
-            {isActiveStep ? "Inspecting" : selected ? "Selected" : "Select"}
-          </div>
-        </div>
+            <MathText>{step.label || step.title || `Step ${index + 1}`}</MathText>
+          </button>
 
-        <div className="flex flex-wrap items-baseline gap-x-1 gap-y-1.5 leading-relaxed text-[17px] md:text-[18px]">
-          {step.chunks.map((chunk) => (
-            <MathChunk key={chunk.id} chunk={chunk} stepId={step.id} />
-          ))}
+          <div className="mt-1.5 grid gap-1.5">
+            {lines.map((line, lineIndex) => (
+              <InteractiveMathLine
+                key={line.id || `${step.id}-line-${lineIndex}`}
+                line={line}
+                stepId={step.id}
+              />
+            ))}
+          </div>
+
+          {selected && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleExpanded?.(step.id);
+                }}
+                className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-[11px] text-slate-500/72 transition-colors hover:text-teal-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45"
+                aria-expanded={expanded}
+              >
+                <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+                Reasoning
+              </button>
+            </div>
+          )}
+
+          {selected && expanded && (
+            <div className="mt-2 grid gap-2">
+              {step.summary && (
+                <p className="max-w-3xl border-l border-teal-300/20 pl-3 text-sm leading-7 text-slate-300/72">
+                  <MathText>{step.summary}</MathText>
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
-    </div>
+    </article>
   );
 }
+
+export default SolutionStep;

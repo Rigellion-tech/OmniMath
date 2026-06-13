@@ -28,6 +28,9 @@ Backend-only variables currently expected by the app:
 - `CLERK_JWT_KEY`: optional Clerk JWT public key for networkless verification.
 - `CLERK_AUTHORIZED_PARTIES`: optional comma-separated frontend origins allowed to send Clerk tokens.
 - `CLERK_TIER_CLAIM`: optional Clerk session claim used to identify pro users.
+- `DATABASE_URL`: optional Postgres connection string for persistent user profiles and saved explanation history.
+- `DATABASE_SSL`: optional Postgres SSL override, usually `true` in production and `false` for local Postgres.
+- `DATABASE_POOL_MAX`: optional Postgres pool size.
 - `PORT`: optional backend server port.
 - `DEV_API_TARGET`: optional Vite dev proxy target for local development only.
 - `USAGE_KV_REST_API_URL`: production usage-counter REST store URL.
@@ -61,6 +64,7 @@ Do not read these values directly from browser code.
 - Keep all OpenAI calls in the backend.
 - Prefer routing frontend AI requests through `/api/explain` and `/api/explain-image`.
 - Verify Clerk session tokens on the backend before using Clerk user ids for usage tracking.
+- Keep user profile and history data behind verified Clerk sessions.
 - Validate request input on the server before calling external APIs.
 - Return user-safe error messages from API routes.
 - Keep payload limits and file validation in place for uploads.

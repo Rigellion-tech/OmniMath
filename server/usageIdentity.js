@@ -17,6 +17,79 @@ function getBearerToken(req) {
   return type?.toLowerCase() === "bearer" && token ? token : null;
 }
 
+function decodeJwtPayload(token) {
+  try {
+    const payload = token?.split(".")?.[1];
+    if (!payload) return null;
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function summarizeTokenClaims(token) {
+  const claims = decodeJwtPayload(token);
+  if (!claims || typeof claims !== "object") return null;
+
+  return {
+    userId: claims.sub || null,
+    sessionId: claims.sid || claims.session_id || null,
+    issuer: claims.iss || null,
+    authorizedParty: claims.azp || null,
+    audience: claims.aud || null,
+    issuedAt: claims.iat || null,
+    expiresAt: claims.exp || null,
+    notBefore: claims.nbf || null,
+  };
+}
+
+function summarizeRequestHeaders(req) {
+  const authorization = readHeader(req, "authorization");
+  const [authScheme, authToken] = authorization?.split(/\s+/) || [];
+
+  return {
+    host: readHeader(req, "host") || null,
+    origin: readHeader(req, "origin") || null,
+    referer: readHeader(req, "referer") || null,
+    forwardedHost: readHeader(req, "x-forwarded-host") || null,
+    forwardedProto: readHeader(req, "x-forwarded-proto") || null,
+    userAgent: readHeader(req, "user-agent") || null,
+    contentType: readHeader(req, "content-type") || null,
+    contentLength: readHeader(req, "content-length") || null,
+    authorization: authorization
+      ? {
+          present: true,
+          scheme: authScheme || null,
+          tokenChars: authToken?.length || 0,
+        }
+      : { present: false },
+    cookie: { present: Boolean(readHeader(req, "cookie")) },
+  };
+}
+
+function getAuthRuntimeConfig() {
+  return {
+    hasClerkSecretKey: Boolean(process.env.CLERK_SECRET_KEY),
+    hasClerkJwtKey: Boolean(process.env.CLERK_JWT_KEY),
+    authorizedParties: getAuthorizedParties(),
+  };
+}
+
+export function getClerkAuthRuntimeConfig() {
+  return getAuthRuntimeConfig();
+}
+
+function logAuthAttempt(req, status, details = {}) {
+  console.info("[omnimath:clerk-auth]", {
+    status,
+    method: req.method,
+    path: req.url,
+    headers: summarizeRequestHeaders(req),
+    clerk: getAuthRuntimeConfig(),
+    ...details,
+  });
+}
+
 function hmac(value, secret) {
   return crypto.createHmac("sha256", secret).update(value).digest("hex");
 }
@@ -45,7 +118,8 @@ function getClientIp(req) {
 
 function getAnonymousIdentity(req) {
   const salt = process.env.USAGE_IDENTITY_HMAC_SECRET
-    || process.env.OPENAI_API_KEY
+    || process.env.CLERK_SECRET_KEY
+    || process.env.CLERK_JWT_KEY
     || DEFAULT_ANON_SALT;
   const userAgent = readHeader(req, "user-agent") || "unknown";
   const fingerprint = `anonymous:${getClientIp(req)}:${userAgent}`;
@@ -87,13 +161,74 @@ function getTierFromClaims(claims) {
   return tier === "pro" ? "pro" : "free";
 }
 
-async function getClerkIdentity(req) {
+function getProfileFromClaims(claims) {
+  return {
+    email: claims.email || claims.primary_email_address,
+    displayName: claims.name || claims.full_name,
+    imageUrl: claims.image_url || claims.picture,
+  };
+}
+
+function createAuthError(message, statusCode = 401, code = "AUTH_REQUIRED") {
+  return Object.assign(new Error(message), {
+    statusCode,
+    code,
+    publicMessage: message,
+  });
+}
+
+function createAuthDebug(req, status, token, error = null) {
+  return {
+    status,
+    tokenClaims: summarizeTokenClaims(token),
+    headers: summarizeRequestHeaders(req),
+    clerk: getAuthRuntimeConfig(),
+    error: error
+      ? {
+          name: error.name,
+          code: error.code,
+          reason: error.reason,
+          message: error.message,
+        }
+      : null,
+  };
+}
+
+async function getClerkIdentity(req, { requireValid = false } = {}) {
   const token = getBearerToken(req);
   const secretKey = process.env.CLERK_SECRET_KEY;
   const jwtKey = process.env.CLERK_JWT_KEY;
-  if (!token || (!secretKey && !jwtKey)) return null;
+  if (!token) {
+    if (requireValid) {
+      logAuthAttempt(req, "missing_token", {
+        tokenClaims: null,
+        authRequired: true,
+      });
+      const error = createAuthError("Sign in is required.");
+      error.authDebug = createAuthDebug(req, "missing_token", token);
+      throw error;
+    }
+    return null;
+  }
+  if (!secretKey && !jwtKey) {
+    if (requireValid) {
+      logAuthAttempt(req, "server_not_configured", {
+        tokenClaims: summarizeTokenClaims(token),
+        authRequired: true,
+      });
+      const error = createAuthError("Authentication is not configured.", 500, "SERVER_CONFIG_ERROR");
+      error.authDebug = createAuthDebug(req, "server_not_configured", token);
+      throw error;
+    }
+    return null;
+  }
 
   try {
+    logAuthAttempt(req, "verifying", {
+      tokenClaims: summarizeTokenClaims(token),
+      authRequired: requireValid,
+    });
+
     const options = {
       secretKey,
       jwtKey,
@@ -106,6 +241,12 @@ async function getClerkIdentity(req) {
     const claims = await verifyToken(token, options);
     if (!claims?.sub) return null;
 
+    logAuthAttempt(req, "verified", {
+      userId: claims.sub,
+      sessionId: claims.sid || claims.session_id || null,
+      authRequired: requireValid,
+    });
+
     const salt = process.env.USAGE_IDENTITY_HMAC_SECRET
       || secretKey
       || jwtKey
@@ -116,10 +257,35 @@ async function getClerkIdentity(req) {
       tier: getTierFromClaims(claims),
       subject: "clerk",
       clerkUserId: claims.sub,
+      profile: getProfileFromClaims(claims),
     };
-  } catch {
+  } catch (error) {
+    logAuthAttempt(req, "verification_failed", {
+      tokenClaims: summarizeTokenClaims(token),
+      authRequired: requireValid,
+      error: {
+        name: error.name,
+        code: error.code,
+        reason: error.reason,
+        message: error.message,
+        stack: error.stack,
+      },
+    });
+    if (requireValid) {
+      const authError = createAuthError("Your session could not be verified.", 401, "AUTH_INVALID");
+      authError.authDebug = createAuthDebug(req, "verification_failed", token, error);
+      throw authError;
+    }
     return null;
   }
+}
+
+export async function requireClerkIdentity(req) {
+  return getClerkIdentity(req, { requireValid: true });
+}
+
+export async function resolveClerkIdentity(req) {
+  return getClerkIdentity(req);
 }
 
 export async function resolveUsageIdentity(req) {

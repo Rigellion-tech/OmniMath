@@ -4,14 +4,29 @@ import { explainProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
-export default function ProblemInput({ onProblemGenerated, onGenerationStart, onGenerationError }) {
+export default function ProblemInput({
+  history: controlledHistory,
+  onHistoryChange,
+  onProblemGenerated,
+  onGenerationStart,
+  onGenerationError,
+}) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [history, setHistory] = useState([]);
+  const [localHistory, setLocalHistory] = useState([]);
   const [expanded, setExpanded] = useState(false);
   const inputRef = useRef(null);
   const historyEndRef = useRef(null);
   const { getToken } = useAuthToken();
+  const history = controlledHistory ?? localHistory;
+  const setHistory = (updater) => {
+    const nextHistory = typeof updater === "function" ? updater(history) : updater;
+    if (onHistoryChange) {
+      onHistoryChange(nextHistory);
+    } else {
+      setLocalHistory(nextHistory);
+    }
+  };
 
   useEffect(() => {
     if (expanded && historyEndRef.current) {
@@ -39,7 +54,7 @@ export default function ProblemInput({ onProblemGenerated, onGenerationStart, on
         getToken,
       });
 
-      setHistory((prev) => [...prev, { role: "tutor", text: result.title || "Updated explanation" }]);
+      setHistory([...newHistory, { role: "tutor", text: result.title || "Updated explanation" }]);
       onProblemGenerated(result);
     } catch (error) {
       console.error("Problem generation failed:", error);

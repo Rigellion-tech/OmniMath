@@ -1,6 +1,7 @@
 import React from "react";
 import { History, X } from "lucide-react";
 import InlineMath from "./InlineMath";
+import { getProblemLabel } from "@/lib/problemLabels";
 
 export default function RecentProblems({ recents, onSelect, onClear }) {
   if (recents.length === 0) return null;
@@ -33,7 +34,7 @@ export default function RecentProblems({ recents, onSelect, onClear }) {
             className="rounded-xl px-3 py-3 text-left transition-all duration-200 hover:bg-white/[0.055]"
           >
             <span className="block truncate font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-200/50">
-              {item.title}
+              {getProblemLabel(item, "Recent problem")}
             </span>
             <span className="mt-1 block truncate font-serif text-sm italic text-cyan-50/80">
               <InlineMath math={item.expression} />

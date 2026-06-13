@@ -1,7 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
+let envLoaded = false;
+let envLoadStatus = {
+  cwd: process.cwd(),
+  loadedFiles: [],
+  dotenvPackage: "not installed",
+};
+
 export function loadEnvFiles(cwd = process.cwd()) {
+  if (envLoaded) return envLoadStatus;
+
+  const loadedFiles = [];
   for (const fileName of [".env.local", ".env"]) {
     const filePath = path.join(cwd, fileName);
     if (!fs.existsSync(filePath)) continue;
@@ -27,5 +37,20 @@ export function loadEnvFiles(cwd = process.cwd()) {
 
       process.env[key] = value;
     }
+
+    loadedFiles.push(fileName);
   }
+
+  envLoaded = true;
+  envLoadStatus = {
+    cwd,
+    loadedFiles,
+    dotenvPackage: "not installed",
+  };
+
+  return envLoadStatus;
+}
+
+export function getEnvLoadStatus() {
+  return envLoadStatus;
 }

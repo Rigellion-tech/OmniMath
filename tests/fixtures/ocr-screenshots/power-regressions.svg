@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-label="OCR power regression screenshot fixtures">
+  <rect width="900" height="420" fill="#071318"/>
+  <text x="48" y="58" fill="#b9fff8" font-family="Times New Roman, serif" font-size="26">OCR regression screenshot fixtures</text>
+  <g fill="#f4ffff" font-family="Times New Roman, serif" font-size="34">
+    <text x="72" y="126" data-expected="e^{x^2}">e^{x^2}</text>
+    <text x="72" y="176" data-expected="e^{x^3}">e^{x^3}</text>
+    <text x="72" y="226" data-expected="x^3z">x^3z</text>
+    <text x="420" y="126" data-expected="x^{10}">x^{10}</text>
+    <text x="420" y="176" data-expected="y^2z^2">y^2z^2</text>
+    <text x="420" y="226" data-expected="\cos(xy)">\cos(xy)</text>
+  </g>
+</svg>

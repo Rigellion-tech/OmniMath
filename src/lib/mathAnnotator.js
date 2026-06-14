@@ -60,6 +60,10 @@ const SQUISHED_PROSE_REPLACEMENTS = new Map([
   ["powerrule", "power rule"],
   ["dsointegrandbecomes", "so the integrand becomes"],
   ["sointegrandbecomes", "so the integrand becomes"],
+  ["isthesolidregioninside", "is the solid region inside"],
+  ["isthesolidregioninsi de", "is the solid region inside"],
+  ["solidregioninside", "solid region inside"],
+  ["solidregioninsi de", "solid region inside"],
   ["cosine", "cosine"],
 ]);
 
@@ -180,6 +184,51 @@ function normalizeLatexFunctionSpacing(text) {
   return output;
 }
 
+function normalizeTextCommandContent(value = "") {
+  let text = String(value || "")
+    .replace(/\\[,;!]/g, " ")
+    .replace(/\\quad/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  for (const [squished, readable] of SQUISHED_PROSE_REPLACEMENTS) {
+    text = text.replace(new RegExp(squished, "gi"), readable);
+  }
+
+  if (/^(and|where)$/i.test(text)) return `${text.toLowerCase()} `;
+  if (/^is the\b/i.test(text)) return ` ${text} `;
+  return text;
+}
+
+function spaceAfterTextCommands(value = "") {
+  return String(value || "").replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ");
+}
+
+function protectTextCommands(value = "") {
+  let text = String(value || "");
+  const replacements = [];
+  let index = text.indexOf("\\text{");
+
+  while (index !== -1) {
+    const braced = readBraced(text, index + "\\text".length);
+    if (!braced) break;
+    const placeholder = `@@OMNI_TEXT_${replacements.length}@@`;
+    replacements.push(`\\text{${normalizeTextCommandContent(braced.value)}}`);
+    text = `${text.slice(0, index)}${placeholder}${text.slice(braced.endIndex)}`;
+    index = text.indexOf("\\text{", index + placeholder.length);
+  }
+
+  return {
+    text,
+    restore(output = "") {
+      return replacements.reduce(
+        (current, replacement, replacementIndex) => current.replace(`@@OMNI_TEXT_${replacementIndex}@@`, replacement),
+        String(output || "")
+      );
+    },
+  };
+}
+
 export function normalizeDisplayText(value = "") {
   let text = normalizeEscapedLatexInput(value)
     .replace(/\r?\n+/g, " ")
@@ -200,7 +249,8 @@ export function normalizeDisplayText(value = "") {
 }
 
 export function normalizeMathText(value = "") {
-  let text = normalizeEscapedLatexInput(value)
+  const protectedText = protectTextCommands(normalizeEscapedLatexInput(value));
+  let text = protectedText.text
     .replace(/\r?\n+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -217,14 +267,16 @@ export function normalizeMathText(value = "") {
     .replace(/θ/g, "\\theta")
     .replace(/φ/g, "\\phi")
     .replace(/ρ/g, "\\rho")
-    .replace(/π/g, "\\pi");
+    .replace(/π/g, "\\pi")
+    .replace(/\\([xyz])\b/g, "$1")
+    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}");
 
   for (const [word, command] of GREEK_COMMANDS) {
     text = text.replace(new RegExp(`(?<!\\\\)\\b${word}\\b`, "gi"), command);
   }
 
   text = text.replace(/\^\(([^)]+)\)/g, "^{$1}");
-  return text.replace(/\s+/g, "");
+  return spaceAfterTextCommands(protectedText.restore(text.replace(/\s+/g, "")));
 }
 
 function displayText(latex) {
@@ -491,6 +543,7 @@ function splitTopLevelProducts(text) {
   const pieces = [];
   let depth = 0;
   let tokenStart = 0;
+  let pendingSeparator = "";
   const separators = ["\\,", "\\;", "\\cdot", "·"];
 
   for (let index = 0; index < text.length; index += 1) {
@@ -501,13 +554,14 @@ function splitTopLevelProducts(text) {
 
     const separator = separators.find((item) => text.startsWith(item, index));
     if (!separator) continue;
-    if (tokenStart < index) pieces.push({ value: text.slice(tokenStart, index), start: tokenStart });
+    if (tokenStart < index) pieces.push({ value: text.slice(tokenStart, index), start: tokenStart, separator: pendingSeparator });
+    pendingSeparator = separator;
     index += separator.length - 1;
     tokenStart = index + 1;
   }
 
   if (pieces.length > 0 && tokenStart < text.length) {
-    pieces.push({ value: text.slice(tokenStart), start: tokenStart });
+    pieces.push({ value: text.slice(tokenStart), start: tokenStart, separator: pendingSeparator });
   }
 
   return pieces;
@@ -734,12 +788,16 @@ function renderFunctionName(name) {
 }
 
 function normalizeExistingLatexForRender(value) {
-  return normalizeLatexFunctionSpacing(normalizeEscapedLatexInput(value))
+  const protectedText = protectTextCommands(normalizeLatexFunctionSpacing(normalizeEscapedLatexInput(value))
     .replace(/\r?\n+/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
+    .trim());
+
+  const normalized = protectedText.text
     .replace(/<=/g, "\\le")
     .replace(/>=/g, "\\ge")
+    .replace(/\\([xyz])\b/g, "$1")
+    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
     .replace(/\\sqrt(?=([0-9]|\\[a-zA-Z]))(\\[a-zA-Z]+|[0-9]+)/g, "\\sqrt{$2}")
     .replace(/(?<!\\)\bd(theta|phi|rho|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/gi, (match, name) => `d\\${name.toLowerCase()}`)
     .replace(/(?<!\\)\b(sin|cos|tan|sec|csc|cot|log|ln|exp)\(([^()]+)\)/gi, (_, fn, arg) => `\\${fn.toLowerCase()}{${renderMathLatex(arg)}}`)
@@ -750,11 +808,14 @@ function normalizeExistingLatexForRender(value) {
     .replace(/(?<!\\)([a-zA-Z0-9}])d([a-zA-Z])\b/g, "$1\\,d$2")
     .replace(/\s+/g, "")
     .replace(/\\int(?=[a-zA-Z0-9\\])/g, "\\int ")
+    .replace(/\\(cdot|times)(?=[A-Za-z0-9])/g, "\\$1 ")
     .replace(new RegExp(`\\\\(${FUNCTION_NAME_PATTERN})([a-zA-Z0-9])`, "g"), "\\$1 $2");
+
+  return spaceAfterTextCommands(protectedText.restore(normalized));
 }
 
 function isLikelyExistingLatex(value) {
-  return /\\(int|iint|iiint|frac|sqrt|left|right|sin|cos|tan|sec|csc|cot|log|ln|exp|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega|,|;|!)/.test(normalizeEscapedLatexInput(value));
+  return /\\(int|iint|iiint|frac|sqrt|left|right|sin|cos|tan|sec|csc|cot|log|ln|exp|nabla|cdot|times|mathbf|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega|,|;|!)/.test(normalizeEscapedLatexInput(value));
 }
 
 function shouldPreserveExistingLatex(value) {
@@ -771,6 +832,8 @@ function renderImplicitProduct(parts, depth) {
     const value = part.value || part;
     const rendered = renderLatexForKatex(value, depth + 1);
     if (index === 0) return rendered;
+    if (part.separator === "\\cdot" || part.separator === "·") return `${output}\\cdot ${rendered}`;
+    if (part.separator === "\\;" || part.separator === "\\,") return `${output}${part.separator}${rendered}`;
 
     return /^d(\\[a-zA-Z]+|[a-zA-Z]+)$/.test(normalizeMathText(value))
       ? `${output}\\,${rendered}`

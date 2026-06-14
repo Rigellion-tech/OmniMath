@@ -343,6 +343,19 @@ export default function Home() {
     });
   };
 
+  const handleExtractionReview = (extraction) => {
+    handleUsageUpdate(extraction?.usage);
+    const tier = extraction?.confidenceTier || extraction?.extractionValidation?.tier || "medium";
+    setGenerationStatus({
+      type: tier === "low" ? "limit" : "empty",
+      label: "Review extracted problem",
+      detail: tier === "low"
+        ? "Confidence is low or a critical math mismatch was detected."
+        : "Confirm or edit the extracted problem before solving.",
+      meta: extraction?.confidence !== undefined ? `${extraction.confidence}% confidence` : "",
+    });
+  };
+
   const handleGenerationError = ({ source, message, status, code, usage }) => {
     handleUsageUpdate(usage);
     const isLimitError = status === 429 && code === "USAGE_LIMIT_EXCEEDED";
@@ -493,6 +506,8 @@ export default function Home() {
                   onProblemGenerated={handleProblemGenerated}
                   onGenerationStart={handleGenerationStart}
                   onGenerationError={handleGenerationError}
+                  onExtractionReview={handleExtractionReview}
+                  onUsageUpdate={handleUsageUpdate}
                 />
               </div>
 

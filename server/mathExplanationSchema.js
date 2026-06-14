@@ -133,6 +133,36 @@ export const imageSolveSchema = {
   },
 };
 
+const imageExtractionIssueSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "message", "severity"],
+  properties: {
+    type: { type: "string" },
+    message: { type: "string" },
+    severity: {
+      type: "string",
+      enum: ["low", "medium", "high"],
+    },
+  },
+};
+
+export const imageExtractionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["extractedProblemLatex", "extractedProblemText", "confidence", "issues"],
+  properties: {
+    extractedProblemLatex: { type: "string" },
+    extractedProblemText: { type: "string" },
+    confidence: { type: "number" },
+    issues: {
+      type: "array",
+      maxItems: 8,
+      items: imageExtractionIssueSchema,
+    },
+  },
+};
+
 export const lazyTokenExplanationSchema = {
   type: "object",
   additionalProperties: false,
@@ -477,6 +507,7 @@ export function validateMathExplanationSchema(schema = mathExplanationSchema) {
 validateMathExplanationSchema();
 validateMathExplanationSchema(fastSolveSchema);
 validateMathExplanationSchema(imageSolveSchema);
+validateMathExplanationSchema(imageExtractionSchema);
 validateMathExplanationSchema(lazyTokenExplanationSchema);
 validateMathExplanationSchema(compareMethodsSchema);
 
@@ -496,8 +527,56 @@ function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function stripGeneratedLatexWrappers(value = "") {
+  let text = safeString(value);
+  let previous = "";
+
+  while (text !== previous) {
+    previous = text;
+    text = text.trim();
+    const wrappers = [
+      { pattern: /^```(?:latex|tex|math)?\s*([\s\S]*?)\s*```$/iu, replacement: "$1" },
+      { pattern: /^\\\(([\s\S]*)\\\)$/u, replacement: "$1" },
+      { pattern: /^\\\[([\s\S]*)\\\]$/u, replacement: "$1" },
+      { pattern: /^\$\$([\s\S]*)\$\$$/u, replacement: "$1" },
+      { pattern: /^\$([\s\S]*)\$$/u, replacement: "$1" },
+    ];
+
+    for (const { pattern, replacement } of wrappers) {
+      if (pattern.test(text)) {
+        text = text.replace(pattern, replacement).trim();
+        break;
+      }
+    }
+  }
+
+  return text.replace(/^\\displaystyle\s*/, "").trim();
+}
+
+function normalizeGeneratedTextContent(value = "") {
+  let text = String(value || "")
+    .replace(/\\[,;!]/g, " ")
+    .replace(/\\quad/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/isthesolidregioninsi\s*de/gi, "is the solid region inside")
+    .replace(/isthesolidregioninside/gi, "is the solid region inside")
+    .replace(/solidregioninsi\s*de/gi, "solid region inside")
+    .replace(/solidregioninside/gi, "solid region inside");
+
+  if (/^(and|where)$/i.test(text)) return `${text.toLowerCase()} `;
+  if (/^is the\b/i.test(text)) return ` ${text} `;
+  return text;
+}
+
+function normalizeGeneratedTextCommands(value = "") {
+  return String(value || "")
+    .replace(/\\text\{([^}]*)\}/g, (_, content) => `\\text{${normalizeGeneratedTextContent(content)}}`)
+    .replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ");
+}
+
 export function sanitizeGeneratedLatex(value = "") {
-  return safeString(value)
+  return normalizeGeneratedTextCommands(stripGeneratedLatexWrappers(value))
     .replace(/\\\\(?=([a-zA-Z]+|[,;!]))/g, () => "\\")
     .replace(/∭/g, "\\iiint")
     .replace(/∬/g, "\\iint")
@@ -513,6 +592,8 @@ export function sanitizeGeneratedLatex(value = "") {
     .replace(/θ/g, "\\theta")
     .replace(/φ/g, "\\phi")
     .replace(/ρ/g, "\\rho")
+    .replace(/\\([xyz])\b/g, "$1")
+    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
     .replace(/(?<!\\)\bln(?=\s*\()/gi, "\\ln")
     .replace(/(?<!\\)\bsin(?=\s*\()/gi, "\\sin")
     .replace(/(?<!\\)\bcos(?=\s*\()/gi, "\\cos")
@@ -522,6 +603,7 @@ export function sanitizeGeneratedLatex(value = "") {
     .replace(/(?<!\\)\bint_/gi, "\\int_")
     .replace(/(?<!\\)\biiint_/gi, "\\iiint_")
     .replace(/(?<!\\)\biint_/gi, "\\iint_")
+    .replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -629,7 +711,16 @@ function correctRegressionFinalAnswerIfNeeded(solve) {
   };
 }
 
-export function assertFastSolveResponse(value, originalProblem = "") {
+function isDuplicateProblemStep(step, problemLatex, index = 0) {
+  if (index !== 0) return false;
+  const stepLatex = sanitizeGeneratedLatex(step?.latex);
+  if (!stepLatex || !problemLatex) return false;
+  if (compactLatex(stepLatex) === compactLatex(problemLatex)) return true;
+  return /^(start|read|state|write)\b|original problem|the problem/i.test(safeString(step?.heading))
+    && compactLatex(stepLatex).includes(compactLatex(problemLatex).slice(0, 32));
+}
+
+export function assertFastSolveResponse(value, originalProblem = "", { includeProblemStep = true } = {}) {
   if (!value || typeof value !== "object") {
     throw createInvalidResponseError("Model returned an invalid solve response.");
   }
@@ -660,7 +751,7 @@ export function assertFastSolveResponse(value, originalProblem = "") {
   }
 
   const firstStep = steps[0];
-  if (firstStep.latex !== problemLatex) {
+  if (includeProblemStep && firstStep.latex !== problemLatex) {
     steps.unshift({
       id: "step-1",
       heading: "Start with the problem",
@@ -735,8 +826,40 @@ export function assertImageSolveResponse(value) {
   };
 }
 
-export function convertFastSolveToMathExplanation(value, { originalProblem = "" } = {}) {
-  const solve = correctRegressionFinalAnswerIfNeeded(assertFastSolveResponse(value, originalProblem));
+export function assertImageExtractionResponse(value) {
+  if (!value || typeof value !== "object") {
+    throw createInvalidResponseError("Model returned an invalid image extraction response.");
+  }
+
+  const extractedProblemLatex = sanitizeGeneratedLatex(value.extractedProblemLatex);
+  const extractedProblemText = safeString(value.extractedProblemText);
+  if (!extractedProblemLatex || !extractedProblemText) {
+    throw createInvalidResponseError("Image extraction response is missing extracted problem fields.");
+  }
+
+  const confidence = Math.max(0, Math.min(100, Math.round(Number(value.confidence) || 0)));
+  const issues = Array.isArray(value.issues)
+    ? value.issues.map((issue) => ({
+        type: safeString(issue?.type) || "ocr_unclear",
+        message: safeString(issue?.message) || "Review this extracted problem.",
+        severity: ["low", "medium", "high"].includes(issue?.severity) ? issue.severity : "medium",
+      })).filter((issue) => issue.message).slice(0, 8)
+    : [];
+
+  return {
+    extractedProblemLatex,
+    extractedProblemText,
+    confidence,
+    issues,
+  };
+}
+
+export function convertFastSolveToMathExplanation(value, {
+  originalProblem = "",
+  includeProblemStep = true,
+  preserveProblemLatex = false,
+} = {}) {
+  const solve = correctRegressionFinalAnswerIfNeeded(assertFastSolveResponse(value, originalProblem, { includeProblemStep }));
   let anchorBudget = 8;
   const anchorsByStepId = new Map();
   const steps = solve.steps.map((step, index) => {
@@ -820,7 +943,7 @@ export function convertFastSolveToMathExplanation(value, { originalProblem = "" 
     tokens,
     steps,
   });
-  annotated.expression = renderMathLatex(solve.problemLatex);
+  annotated.expression = preserveProblemLatex ? solve.problemLatex : renderMathLatex(solve.problemLatex);
   annotated.finalAnswer = renderMathLatex(solve.finalAnswerLatex);
   annotated.finalAnswerLatex = renderMathLatex(solve.finalAnswerLatex);
   annotated.numericCheck = getVerifiedNumericCheck(
@@ -883,16 +1006,24 @@ export function convertImageSolveToMathExplanation(value) {
   const imageSolve = value?.problemLatex && Array.isArray(value?.steps)
     ? value
     : assertImageSolveResponse(value);
+  const steps = imageSolve.steps.filter((step, index) => !isDuplicateProblemStep(step, imageSolve.extractedProblemLatex || imageSolve.problemLatex, index));
   const annotated = convertFastSolveToMathExplanation({
     title: imageSolve.title,
-    problemLatex: imageSolve.problemLatex,
-    steps: imageSolve.steps,
+    problemLatex: imageSolve.extractedProblemLatex || imageSolve.problemLatex,
+    steps: steps.length > 0 ? steps : imageSolve.steps,
     finalAnswerLatex: imageSolve.finalAnswerLatex,
     numericCheck: imageSolve.numericCheck,
-  }, { originalProblem: imageSolve.extractedProblemLatex });
+  }, {
+    originalProblem: imageSolve.extractedProblemLatex,
+    includeProblemStep: false,
+    preserveProblemLatex: true,
+  });
 
   annotated.extractedProblemLatex = imageSolve.extractedProblemLatex;
   annotated.extractedProblemText = imageSolve.extractedProblemText;
+  annotated.originalProblem = imageSolve.extractedProblemLatex;
+  annotated.expression = imageSolve.extractedProblemLatex;
+  annotated.problem = imageSolve.extractedProblemLatex;
   return annotated;
 }
 

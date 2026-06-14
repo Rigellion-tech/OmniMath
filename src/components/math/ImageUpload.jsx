@@ -1,8 +1,9 @@
 import React, { useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, ImagePlus, Loader2, Sparkles, X, XCircle } from "lucide-react";
-import { explainImageProblem } from "@/api/mathClient";
+import { AlertTriangle, CheckCircle2, ImagePlus, Loader2, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
+import { extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import MathText from "./MathText";
 import {
   analyzeImageQuality,
   canSubmitImageForAi,
@@ -80,10 +81,133 @@ function QualityDiagnostics({ quality }) {
   );
 }
 
-function QualityPanel({ preview, quality, analyzing, submitting, onCancel, onSubmit }) {
+function ExtractionReviewPanel({
+  extraction,
+  editedText,
+  editedLatex,
+  solving,
+  onTextChange,
+  onLatexChange,
+  onSolve,
+  onSolveAnyway,
+  onCancel,
+}) {
+  if (!extraction) return null;
+
+  const issues = Array.isArray(extraction.issues) ? extraction.issues : [];
+  const tier = extraction.confidenceTier || extraction.extractionValidation?.tier || "medium";
+  const confidence = Number(extraction.confidence ?? extraction.extractionValidation?.confidence ?? 0);
+  const isLow = tier === "low";
+
+  return (
+    <div className="grid gap-3">
+      <div className={cn(
+        "rounded-xl border px-3 py-2.5",
+        isLow ? "border-amber-300/24 bg-amber-300/[0.07]" : "border-teal-300/[0.18] bg-teal-300/[0.055]"
+      )}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-100/80">
+            Review extracted problem
+          </p>
+          <span className="rounded-full border border-white/[0.09] bg-white/[0.045] px-2 py-0.5 font-mono text-[10px] text-slate-200/70">
+            {confidence}% · {tier}
+          </span>
+        </div>
+        <p className="mt-1.5 text-xs leading-4 text-slate-200/72">
+          {isLow
+            ? "OmniMath needs confirmation before solving this image."
+            : "Review the extraction or solve anyway if it matches the image."}
+        </p>
+        {issues.length > 0 && (
+          <ul className="mt-2 grid gap-1 text-xs leading-4 text-amber-50/82">
+            {issues.slice(0, 5).map((issue, index) => (
+              <li key={`${issue.type || "issue"}-${index}`} className="flex gap-2">
+                <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-amber-200/75" />
+                <span>{issue.message || "Review this extraction."}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <label className="grid gap-1.5">
+        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+          Extracted text
+        </span>
+        <textarea
+          value={editedText}
+          onChange={(event) => onTextChange(event.target.value)}
+          rows={3}
+          className="min-h-20 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 text-sm leading-5 text-slate-100 outline-none transition-colors focus:border-teal-200/35"
+        />
+      </label>
+
+      <label className="grid gap-1.5">
+        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+          Extracted LaTeX
+        </span>
+        <textarea
+          value={editedLatex}
+          onChange={(event) => onLatexChange(event.target.value)}
+          rows={3}
+          className="min-h-20 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 font-mono text-sm leading-5 text-cyan-50 outline-none transition-colors focus:border-teal-200/35"
+        />
+      </label>
+
+      <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2 text-sm text-cyan-50/90">
+        <MathText>{`\\(${editedLatex || "\\text{No extraction}"}\\)`}</MathText>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-3">
+        <button
+          type="button"
+          disabled={solving || !editedLatex.trim()}
+          onClick={() => onSolve("edited")}
+          className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          Solve
+        </button>
+        <button
+          type="button"
+          disabled={solving}
+          onClick={onSolveAnyway}
+          className="flex min-h-10 items-center justify-center gap-2 rounded-xl border border-amber-200/20 bg-amber-300/[0.07] px-3 text-sm font-semibold text-amber-50/90 transition-colors hover:bg-amber-300/[0.1] disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          Solve Anyway
+        </button>
+        <button
+          type="button"
+          disabled={solving}
+          onClick={onCancel}
+          className="flex min-h-10 items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 text-sm font-semibold text-slate-200/78 transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          <RotateCcw className="h-4 w-4" />
+          Re-upload Image
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function QualityPanel({
+  preview,
+  quality,
+  analyzing,
+  submitting,
+  extraction,
+  editedText,
+  editedLatex,
+  onTextChange,
+  onLatexChange,
+  onCancel,
+  onSubmit,
+  onSolve,
+  onSolveAnyway,
+}) {
   if (!preview) return null;
 
-  const canSubmit = quality?.passes && !analyzing && !submitting;
+  const canSubmit = quality?.passes && !analyzing && !submitting && !extraction;
 
   return (
     <div className="omni-panel absolute right-0 top-14 z-50 flex max-h-[80vh] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl p-2.5 shadow-[0_22px_60px_rgba(0,0,0,0.35)]">
@@ -134,6 +258,20 @@ function QualityPanel({ preview, quality, analyzing, submitting, onCancel, onSub
         </div>
 
         <div className="mt-2.5 grid gap-2">
+          {extraction ? (
+            <ExtractionReviewPanel
+              extraction={extraction}
+              editedText={editedText}
+              editedLatex={editedLatex}
+              solving={submitting}
+              onTextChange={onTextChange}
+              onLatexChange={onLatexChange}
+              onSolve={onSolve}
+              onSolveAnyway={onSolveAnyway}
+              onCancel={onCancel}
+            />
+          ) : (
+            <>
           <QualityDiagnostics quality={quality} />
 
           <QualityChecklist quality={quality} />
@@ -168,9 +306,12 @@ function QualityPanel({ preview, quality, analyzing, submitting, onCancel, onSub
               {quality.strictIssues?.[0] || "This image looks unreadable. Try a sharper, upright, higher-resolution image."}
             </div>
           )}
+            </>
+          )}
         </div>
       </div>
 
+      {!extraction && (
       <div className="sticky bottom-0 z-10 mt-2 border-t border-white/[0.07] bg-[#061116]/95 pt-2">
         <button
           type="button"
@@ -185,16 +326,26 @@ function QualityPanel({ preview, quality, analyzing, submitting, onCancel, onSub
           {submitting ? "Analyzing..." : "Analyze with AI"}
         </button>
       </div>
+      )}
     </div>
   );
 }
 
-export default function ImageUpload({ onProblemGenerated, onGenerationStart, onGenerationError }) {
+export default function ImageUpload({
+  onProblemGenerated,
+  onGenerationStart,
+  onGenerationError,
+  onExtractionReview,
+  onUsageUpdate,
+}) {
   const [preview, setPreview] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [quality, setQuality] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [extraction, setExtraction] = useState(null);
+  const [editedText, setEditedText] = useState("");
+  const [editedLatex, setEditedLatex] = useState("");
   const fileRef = useRef(null);
   const previewRef = useRef(null);
   const { getToken } = useAuthToken();
@@ -205,6 +356,9 @@ export default function ImageUpload({ onProblemGenerated, onGenerationStart, onG
     setPreview(null);
     setSelectedFile(null);
     setQuality(null);
+    setExtraction(null);
+    setEditedText("");
+    setEditedLatex("");
     setAnalyzing(false);
     setSubmitting(false);
     if (fileRef.current) fileRef.current.value = "";
@@ -260,16 +414,66 @@ export default function ImageUpload({ onProblemGenerated, onGenerationStart, onG
     onGenerationStart?.({ source: "image" });
 
     try {
-      const result = await explainImageProblem({
+      const result = await extractImageProblem({
         file: selectedFile,
-        prompt: "Please solve and explain the math problem shown in this image.",
+        prompt: "Please extract the math problem shown in this image.",
         getToken,
+        quality,
       });
 
-      onProblemGenerated(result);
-      resetSelection();
+      onUsageUpdate?.(result.usage);
+      setExtraction(result);
+      setEditedText(result.extractedProblemText || "");
+      setEditedLatex(result.extractedProblemLatex || "");
+
+      if (result.confidenceTier === "high" && !result.extractionValidation?.critical) {
+        const solved = await solveExtractedProblem({
+          problemLatex: result.extractedProblemLatex,
+          problemText: result.extractedProblemText,
+          extraction: result,
+          solveDecision: "direct",
+          getToken,
+        });
+        onProblemGenerated(solved);
+        resetSelection();
+        return;
+      }
+
+      onExtractionReview?.(result);
+      setSubmitting(false);
     } catch (error) {
       console.error("Image problem generation failed:", error);
+      onGenerationError?.({
+        source: "image",
+        message: error.message,
+        status: error.status,
+        code: error.body?.code,
+        usage: error.body?.usage,
+      });
+      setSubmitting(false);
+    }
+  };
+
+  const solveReviewedExtraction = async (decision) => {
+    if (!extraction || !editedLatex.trim()) return;
+    setSubmitting(true);
+    onGenerationStart?.({ source: "image" });
+
+    try {
+      const rawLatex = extraction.extractedProblemLatex || "";
+      const rawText = extraction.extractedProblemText || "";
+      const edited = editedLatex.trim() !== rawLatex.trim() || editedText.trim() !== rawText.trim();
+      const solved = await solveExtractedProblem({
+        problemLatex: decision === "anyway" ? rawLatex : editedLatex,
+        problemText: decision === "anyway" ? rawText : editedText,
+        extraction,
+        solveDecision: decision === "anyway" ? "anyway" : edited ? "edited" : "direct",
+        getToken,
+      });
+      onProblemGenerated(solved);
+      resetSelection();
+    } catch (error) {
+      console.error("Confirmed image problem solve failed:", error);
       onGenerationError?.({
         source: "image",
         message: error.message,
@@ -319,8 +523,15 @@ export default function ImageUpload({ onProblemGenerated, onGenerationStart, onG
         quality={quality}
         analyzing={analyzing}
         submitting={submitting}
+        extraction={extraction}
+        editedText={editedText}
+        editedLatex={editedLatex}
+        onTextChange={setEditedText}
+        onLatexChange={setEditedLatex}
         onCancel={resetSelection}
         onSubmit={handleSubmit}
+        onSolve={solveReviewedExtraction}
+        onSolveAnyway={() => solveReviewedExtraction("anyway")}
       />
     </div>
   );

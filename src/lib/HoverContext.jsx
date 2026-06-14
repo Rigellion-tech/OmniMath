@@ -8,6 +8,7 @@ import {
   getRectSnapshot,
   getTooltipPositionFromRect,
 } from "@/lib/tooltipPosition";
+import { userFacingText, userFacingTooltipTitle } from "@/lib/presentationLabels";
 
 const HoverContext = createContext(null);
 
@@ -64,6 +65,15 @@ function createChunkWindow(chunk, stepId, event, pinned, index, defaultDepth = "
     pinned ? WINDOW_SIZE : DEFAULT_QUICK_TOOLTIP_SIZE
   );
   const concept = getConceptForChunk(chunk);
+  const title = userFacingTooltipTitle({
+    title: chunk.short,
+    selectedText: chunk.display || chunk.text || chunk.latex,
+    display: chunk.display,
+    latex: chunk.latex,
+    role: chunk.role,
+  });
+  const medium = userFacingText(chunk.medium, title);
+  const deep = userFacingText(chunk.deep, medium);
 
   return {
     id: `chunk-${chunk.id}-${Date.now()}-${index}`,
@@ -76,18 +86,18 @@ function createChunkWindow(chunk, stepId, event, pinned, index, defaultDepth = "
     anchor: anchor.rect,
     pinned,
     depth: defaultDepth,
-    title: chunk.short || "Token",
+    title,
     display: chunk.display,
     selectedText: chunk.display || chunk.text || "",
     selectedTokens: [chunk],
     context: chunk.context || null,
     content: {
-      beginner: chunk.short,
-      intermediate: chunk.medium,
-      advanced: chunk.deep,
-      exam: concept?.lensContent?.exam || chunk.short,
-      intuition: concept?.lensContent?.intuition || chunk.medium,
-      professor: concept?.lensContent?.professor || chunk.deep,
+      beginner: userFacingText(chunk.short, title),
+      intermediate: medium,
+      advanced: deep,
+      exam: userFacingText(concept?.lensContent?.exam, title),
+      intuition: userFacingText(concept?.lensContent?.intuition, medium),
+      professor: userFacingText(concept?.lensContent?.professor, deep),
     },
   };
 }
@@ -157,7 +167,12 @@ function createStepWindow(step, event, pinned, index, defaultDepth = "intermedia
     anchor: anchor.rect,
     pinned,
     depth: defaultDepth,
-    title: step.label || "Solution step",
+    title: userFacingTooltipTitle({
+      title: step.label || step.title,
+      selectedText: step.math,
+      display: step.math,
+      fallback: "Solution Step",
+    }),
     display: step.math,
     selectedText: step.math || step.label || "",
     selectedTokens: [],
@@ -193,7 +208,11 @@ function createConceptWindow(conceptId, event, pinned, index, defaultDepth = "in
     anchor: anchor.rect,
     pinned,
     depth: defaultDepth,
-    title: concept?.label || "Related concept",
+    title: userFacingTooltipTitle({
+      title: concept?.label,
+      selectedText: concept?.shortLabel || concept?.label,
+      fallback: "Related Concept",
+    }),
     display: null,
     content: {
       beginner: concept?.lensContent?.exam || concept?.shortLabel || concept?.label,

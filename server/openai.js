@@ -2,12 +2,14 @@ import { loadEnvFiles } from "./env.js";
 import {
   assertCompareMethods,
   assertFastSolveResponse,
+  assertImageExtractionResponse,
   assertImageSolveResponse,
   assertLazyTokenExplanation,
   compareMethodsSchema,
   convertFastSolveToMathExplanation,
   convertImageSolveToMathExplanation,
   fastSolveSchema,
+  imageExtractionSchema,
   imageSolveSchema,
   lazyTokenExplanationSchema,
 } from "./mathExplanationSchema.js";
@@ -19,6 +21,7 @@ export const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
 const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 2200;
 const DEFAULT_LAZY_MAX_OUTPUT_TOKENS = 700;
+const DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1700;
 const DEFAULT_INPUT_COST_PER_1M_TOKENS = 5;
 const DEFAULT_OUTPUT_COST_PER_1M_TOKENS = 30;
@@ -68,6 +71,10 @@ export function getLazyMaxOutputTokens() {
   return readPositiveNumber("OPENAI_LAZY_MAX_OUTPUT_TOKENS", DEFAULT_LAZY_MAX_OUTPUT_TOKENS);
 }
 
+export function getImageExtractionMaxOutputTokens() {
+  return readPositiveNumber("OPENAI_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS", DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS);
+}
+
 function getOptionalOpenAiHeaders() {
   const headers = {};
   const organization = process.env.OPENAI_ORG_ID || process.env.OPENAI_ORGANIZATION;
@@ -87,6 +94,7 @@ export function getOpenAiRuntimeConfig() {
     maxOutputTokens: getMaxOutputTokens(),
     solveMaxOutputTokens: getSolveMaxOutputTokens(),
     lazyMaxOutputTokens: getLazyMaxOutputTokens(),
+    imageExtractionMaxOutputTokens: getImageExtractionMaxOutputTokens(),
     organizationConfigured: Boolean(process.env.OPENAI_ORG_ID || process.env.OPENAI_ORGANIZATION),
     projectConfigured: Boolean(process.env.OPENAI_PROJECT_ID || process.env.OPENAI_PROJECT),
   };
@@ -459,6 +467,44 @@ export async function createMathExplanation({ prompt, image, originalProblem = "
       finalAnswerLatex: result.finalAnswerLatex || result.finalAnswer || "",
     });
   }
+
+  Object.defineProperty(result, "_aiUsage", {
+    enumerable: false,
+    value: usage,
+  });
+  Object.defineProperty(result, "_aiCallCount", {
+    enumerable: false,
+    value: 1,
+  });
+  return result;
+}
+
+export async function createImageProblemExtraction({ prompt, image }) {
+  const content = [{ type: "input_text", text: prompt }];
+  content.push({
+    type: "input_image",
+    image_url: `data:${image.contentType};base64,${image.buffer.toString("base64")}`,
+    detail: "high",
+  });
+
+  console.info("[omnimath:image-openai-forward]", {
+    forwarded: true,
+    purpose: "math_image_extract",
+    filename: image.filename || null,
+    contentType: image.contentType,
+    bytes: image.buffer?.length || 0,
+    dataUrlChars: `data:${image.contentType};base64,`.length + image.buffer.toString("base64").length,
+  });
+
+  const responseBody = await requestOpenAi({
+    content,
+    purpose: "math_image_extract",
+    schema: imageExtractionSchema,
+    schemaName: "math_image_extract",
+    maxOutputTokens: getImageExtractionMaxOutputTokens(),
+  });
+  const usage = responseBody.usage || null;
+  const result = parseJsonResponse(responseBody, assertImageExtractionResponse);
 
   Object.defineProperty(result, "_aiUsage", {
     enumerable: false,

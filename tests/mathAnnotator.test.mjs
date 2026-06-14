@@ -24,6 +24,18 @@ describe("mathAnnotator", () => {
     assert.equal(normalizeMathText("rho^2 + pi"), "\\rho^2+\\pi");
   });
 
+  it("preserves text command spacing and repairs malformed generated commands", () => {
+    const malformed = "\\text{and}V\\text{isthesolidregioninsi\\,de}\\z=9";
+
+    assert.equal(normalizeMathText("\\text{and } V"), "\\text{and } V");
+    assert.equal(normalizeMathText("\\text{ is the solid region inside }"), "\\text{ is the solid region inside }");
+    assert.equal(normalizeMathText(malformed), "\\text{and } V\\text{ is the solid region inside } z=9");
+    assert.equal(renderMathLatex("z = 9 - x^2 - y^2"), "z=9-x^{2}-y^{2}");
+    assert.equal(renderMathLatex("x^2 \\cosz"), "x^2\\cos z");
+    assert.equal(renderMathLatex(malformed).includes("\\z"), false);
+    assert.equal(renderMathLatex(malformed).includes("isthesolidregioninside"), false);
+  });
+
   it("normalizes visual render math into valid KaTeX latex", () => {
     assert.equal(renderMathLatex("z = 2/3"), "z=\\frac{2}{3}");
     assert.equal(renderMathLatex("rho = (2/3) / cos(phi)"), "\\rho=\\frac{\\frac{2}{3}}{\\cos \\phi}");

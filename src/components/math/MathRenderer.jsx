@@ -33,9 +33,11 @@ export function normalizeMathRendererInput(value = "") {
     previous = text;
     text = text.trim();
     const wrappers = [
+      { pattern: /^```(?:latex|tex|math)?\s*([\s\S]*?)\s*```$/iu, replacement: "$1" },
       { pattern: /^\\\(([\s\S]*)\\\)$/u, replacement: "$1" },
       { pattern: /^\\\[([\s\S]*)\\\]$/u, replacement: "$1" },
       { pattern: /^\$\$([\s\S]*)\$\$$/u, replacement: "$1" },
+      { pattern: /^\$([\s\S]*)\$$/u, replacement: "$1" },
     ];
     for (const { pattern, replacement } of wrappers) {
       if (pattern.test(text)) {
@@ -86,7 +88,7 @@ export function sanitizeLatex(input = "") {
     .replace(/φ/g, "\\phi")
     .replace(/ρ/g, "\\rho")
     .replace(/\\([xyz])\b/g, "$1")
-    .replace(/\\mathbf\s+([A-Za-z])/g, "\\mathbf{$1}")
+    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
     .replace(/(?<!\\)\bln(?=\s*\()/gi, "\\ln")
     .replace(/(?<!\\)\bsin(?=\s*\()/gi, "\\sin")
     .replace(/(?<!\\)\bcos(?=\s*\()/gi, "\\cos")
@@ -256,7 +258,6 @@ export function splitLatexRenderBlocks(value = "") {
 }
 
 function logMathRender(details) {
-  if (!import.meta.env.DEV) return;
   console.info("[omnimath:math-render]", details);
 }
 
@@ -301,6 +302,8 @@ export default function MathRenderer({
       return undefined;
     }
 
+    console.debug("[omnimath:katex-input]", renderMath);
+
     try {
       katex.render(renderMath, host, {
         throwOnError: true,
@@ -312,18 +315,17 @@ export default function MathRenderer({
       setRenderError(message);
       host.textContent = renderMath || sanitizedMath || fallback;
       host.setAttribute("data-math-fallback", "true");
-      if (import.meta.env.DEV) {
-        console.error("[omnimath:math-render-error]", {
-          componentName,
-          rawEquation: rawMath,
-          normalizedEquation: normalizedMath,
-          sanitizedEquation: sanitizedMath,
-          katexInput: renderMath,
-          displayMode,
-          message,
-          error,
-        });
-      }
+      console.error("[omnimath:math-render-error]", {
+        componentName,
+        originalInput: rawMath,
+        rawEquation: rawMath,
+        normalizedEquation: normalizedMath,
+        sanitizedEquation: sanitizedMath,
+        katexInput: renderMath,
+        displayMode,
+        message,
+        error,
+      });
     }
 
     return () => {

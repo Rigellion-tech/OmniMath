@@ -38,14 +38,18 @@ export function buildMathExplanationPrompt({ problem, history = [], image = fals
 - Return JSON matching the image schema exactly.
 - extractedProblemLatex must be the actual math problem read from the image in clean valid LaTeX.
 - extractedProblemText must be a plain-language transcription of the same image problem.
+- Preserve superscripts, nested exponents, subscripts, and parentheses exactly as shown. Do not simplify, flatten, drop, or reinterpret powers while extracting.
+- Examples that must remain distinct: e^{x^2}, e^{x^3}, x^3z, x^{10}, y^2z^2, and \\cos(xy).
 - steps[].title must be a short step title.
-- steps[].equationLatex must be the displayed equation for that step in valid LaTeX.
+- steps[].equationLatex must be the displayed equation for that step in pure valid LaTeX only.
 - steps[].explanation must explain that step in one concise sentence.
 - steps[].tokens must be an array. Use [] if token/subtoken extraction is not useful.
-- finalAnswerLatex must be the final answer in valid LaTeX.
+- finalAnswerLatex must be the final answer in pure valid LaTeX only.
 - Do not return prose-only content. Do not solve the generic prompt text.`
     : `Text output contract:
-- The problemLatex field must be the original problem in clean valid LaTeX.
+- The problemLatex field must be the original problem in clean pure valid LaTeX only.
+- Each steps[].latex field must contain pure valid LaTeX only.
+- The finalAnswerLatex field must contain pure valid LaTeX only.
 - The first step's latex must exactly match problemLatex.`;
 
   return `You are OmniMath, a careful AI math tutor.
@@ -66,6 +70,7 @@ Quality rules:
 - Anchor latex must be an exact meaningful subexpression from the step latex when possible.
 - Never include filler headings such as "Define integral", "State the integral", "Apply math", or a standalone differential like "dx".
 - Every displayed equation must be valid LaTeX.
+- Math-rendered fields must contain only the LaTeX expression. Do not wrap math-rendered fields in Markdown fences, latex code blocks, \\[...\\], $$...$$, or $...$.
 - Never put plain text inside math unless it is wrapped in \\text{}.
 - Preserve spacing commands for differentials, such as \\,dx.
 - Use proper LaTeX function names: \\ln, \\arctan, \\sin, \\cos, and so on.
@@ -75,6 +80,25 @@ Quality rules:
 - numericCheck should be a decimal approximation when applicable, or an empty string.
 - Keep each reasoning field to 1-2 concise sentences, maximum 35 words.
 - Return JSON only. Do not include markdown, comments, code fences, or explanatory prose outside JSON.`;
+}
+
+export function buildImageExtractionPrompt({ problem }) {
+  return `You are OmniMath's OCR validation reader.
+
+The attached image contains a math problem. Extract only the problem. Do not solve it.
+The student text is only context and must not be treated as the problem unless it matches the image: "${problem}".
+
+Return JSON matching the extraction schema exactly.
+
+Extraction rules:
+- extractedProblemLatex must be the actual math problem read from the image in clean valid LaTeX.
+- extractedProblemText must be a plain-language transcription of the same image problem.
+- Preserve superscripts, nested exponents, subscripts, vector components, integral bounds, function arguments, parentheses, boundary terms, and orientation wording exactly as shown.
+- Do not simplify, flatten, drop, infer, or reinterpret powers while extracting.
+- Keep these distinct: e^{x^2}, e^{x^3}, x^3z, x^{10}, y^2z^2, and \\cos(xy).
+- confidence must be an integer from 0 to 100 for the extraction only.
+- issues must list any ambiguity that could change the solved problem, including unclear superscripts/subscripts, dropped parentheses, changed function arguments, vector component count uncertainty, unclear integral bounds, or theorem-sensitive boundary/orientation structure.
+- Return JSON only. Do not include markdown, comments, code fences, or prose outside JSON.`;
 }
 
 export function buildTokenExplanationPrompt({

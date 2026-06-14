@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef } from "react";
 import InlineMath from "./InlineMath";
 import { getConceptForChunk } from "@/data/conceptGraph";
 import { useHover } from "@/lib/HoverContext";
+import { userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { cn } from "@/lib/utils";
 
 const OPERATOR_PATTERN = /^(=|\+|-|\\le|\\ge|<=|>=|<|>|\\cdot|\u00b7|,|\(|\)|\\Rightarrow|\\to)$/;
@@ -140,6 +141,13 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
       : null;
     return closestToken === event.currentTarget;
   };
+  const accessibleTitle = userFacingTooltipTitle({
+    title: safePart.short,
+    selectedText: safePart.display || safePart.text,
+    display: safePart.display,
+    latex: safePart.latex,
+    role: safePart.role,
+  });
 
   const handleEnter = (event) => {
     event.stopPropagation();
@@ -181,7 +189,7 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
       data-explainable="true"
       data-inspectable="math-subtoken"
       tabIndex={0}
-      aria-label={safePart.short}
+      aria-label={accessibleTitle}
       onMouseEnter={handleEnter}
       onMouseMove={handleMove}
       onMouseLeave={handleLeave}
@@ -356,6 +364,13 @@ function MathChunk({ chunk, stepId }) {
   const isPinned = safeList(pinnedChunkIds).includes(safeChunk.id);
   const hasWindow = safeList(openReferenceIds).includes(safeChunk.id);
   const isSelected = safeList(selectedTokenIds).includes(safeChunk.id);
+  const accessibleTitle = userFacingTooltipTitle({
+    title: safeChunk.short,
+    selectedText: safeChunk.display || safeChunk.text,
+    display: safeChunk.display,
+    latex: safeChunk.latex,
+    role: safeChunk.role,
+  });
   const isSiblingActive = activeChunkId && activeChunkId !== safeChunk.id;
   const mathColor = isActive || isConceptActive || isPinned || hasWindow ? "#ccfbf1" : "rgba(224, 242, 254, 0.9)";
   const parts = safeChunk.parts;
@@ -451,7 +466,7 @@ function MathChunk({ chunk, stepId }) {
       data-token-role={safeChunk.role || (isOperator ? "operator" : "other")}
       data-hover-active="false"
       tabIndex={0}
-      aria-label={safeChunk.short}
+      aria-label={accessibleTitle}
       onMouseEnter={hasParts ? handleAnnotatedEnter : undefined}
       onMouseMove={hasParts ? handleAnnotatedMove : undefined}
       onMouseLeave={hasParts ? handleAnnotatedLeave : undefined}

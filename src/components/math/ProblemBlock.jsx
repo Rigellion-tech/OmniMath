@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Columns2, LayoutPanelTop } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Columns2, Eye, LayoutPanelTop } from "lucide-react";
 import KeyboardShortcutsModal from "./KeyboardShortcutsModal";
 import { InteractiveMathLine } from "./MathStep";
 import { normalizeMathRendererInput } from "./MathRenderer";
@@ -69,6 +69,85 @@ function problemStatementLines(problem) {
   }
 
   return lines;
+}
+
+function ExtractionReview({ problem }) {
+  const extractedText = problem.extractedProblemText || "";
+  const extractedLatex = problem.extractedProblemLatex || "";
+  if (!extractedText && !extractedLatex) return null;
+
+  const validation = problem.extractionValidation || {};
+  const issues = Array.isArray(validation.issues) ? validation.issues : [];
+  const status = validation.status || "ok";
+  const confidence = Number.isFinite(validation.confidence) ? validation.confidence : null;
+  const isDanger = status === "danger";
+  const isWarning = status === "warning";
+  const StatusIcon = isDanger || isWarning ? AlertTriangle : CheckCircle2;
+  const statusLabel = isDanger ? "Review required" : isWarning ? "Review suggested" : "Extraction checked";
+  const latexLine = extractedLatex
+    ? {
+        id: "extracted-problem-latex",
+        kind: "block",
+        latex: extractedLatex,
+        displayMode: false,
+        role: "problem",
+      }
+    : null;
+
+  return (
+    <div className={cn(
+      "mt-4 rounded-2xl border px-4 py-3",
+      isDanger
+        ? "border-amber-300/25 bg-amber-300/[0.06]"
+        : isWarning
+          ? "border-teal-200/20 bg-teal-300/[0.045]"
+          : "border-white/[0.08] bg-white/[0.035]"
+    )}>
+      <div className="flex flex-wrap items-center gap-2 text-xs font-medium uppercase tracking-[0.12em] text-slate-300/72">
+        <Eye className="h-3.5 w-3.5 text-teal-200/75" />
+        Extracted from image
+        <span className={cn(
+          "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 normal-case tracking-normal",
+          isDanger
+            ? "border-amber-200/25 text-amber-100/90"
+            : isWarning
+              ? "border-teal-200/20 text-teal-100/85"
+              : "border-emerald-200/20 text-emerald-100/85"
+        )}>
+          <StatusIcon className="h-3 w-3" />
+          {statusLabel}
+        </span>
+        {confidence !== null && (
+          <span className="font-mono text-[11px] normal-case tracking-normal text-slate-300/60">
+            confidence {confidence}%
+          </span>
+        )}
+      </div>
+
+      {extractedText && (
+        <p className="mt-3 text-sm leading-6 text-slate-200/82">
+          {extractedText}
+        </p>
+      )}
+
+      {latexLine && (
+        <div className="mt-2 max-w-full overflow-x-auto rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 font-serif italic text-cyan-50/92 omni-scrollbar">
+          <InteractiveMathLine line={latexLine} stepId="extracted-problem" />
+        </div>
+      )}
+
+      {issues.length > 0 && (
+        <ul className="mt-3 grid gap-1.5 text-xs leading-5 text-amber-50/80">
+          {issues.slice(0, 4).map((issue, index) => (
+            <li key={`${issue.type || "issue"}-${index}`} className="flex gap-2">
+              <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-amber-200/70" />
+              <span>{issue.message || "Review this extraction before trusting the solution."}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 export default function ProblemBlock({ problem: rawProblem, loading = false }) {
@@ -201,6 +280,7 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
                 Enter a problem or upload an image to begin.
               </div>
             )}
+            <ExtractionReview problem={problem} />
           </div>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import { getEnvLoadStatus, loadEnvFiles } from "./env.js";
 import {
+  buildImageExtractionPrompt,
   buildCompareMethodsPrompt,
   buildMathExplanationPrompt,
   buildTokenExplanationPrompt,
@@ -7,6 +8,7 @@ import {
 import { parseMultipartForm } from "./multipart.js";
 import {
   createMathExplanation,
+  createImageProblemExtraction,
   createFollowupAnswer,
   createCompareMethods,
   createLazyTokenExplanation,
@@ -17,6 +19,7 @@ import {
   getOpenAiModel,
   getOpenAiRuntimeConfig,
   getLazyMaxOutputTokens,
+  getImageExtractionMaxOutputTokens,
   isOpenAiConfigured,
   normalizeOpenAiUsage,
   getSolveMaxOutputTokens,
@@ -33,6 +36,7 @@ import { throttleRequest } from "./requestThrottle.js";
 import { runDeduplicatedRequest } from "./duplicateRequests.js";
 import { applyLocalRulesToExplanation, createLocalRuleExplanation } from "./localRules.js";
 import { annotateMathExplanation } from "./mathAnnotator.js";
+import { validateExtraction } from "./extractionValidation.js";
 import {
   createExplanationCacheKey,
   createImageHash,
@@ -842,6 +846,253 @@ export async function handleExplainRequest(req, res) {
   });
 }
 
+export async function handleExtractImageProblemRequest(req, res) {
+  if (req.method !== "POST") {
+    sendMethodNotAllowed(res, ["POST"]);
+    return;
+  }
+
+  await runHandler(res, async () => {
+    const startedAt = Date.now();
+    const identity = await requireClerkIdentity(req);
+    throttleRequest(req, identity, "ai");
+    assertAiEnabled();
+    let body;
+    try {
+      body = await readBody(req, MAX_IMAGE_BYTES + MAX_JSON_BYTES);
+    } catch (error) {
+      logRejectedUpload({ reason: "multipart_body_too_large" });
+      throw error;
+    }
+    const { fields, files } = parseMultipartForm(body, req.headers["content-type"]);
+    const problem = requireTextProblem(fields.prompt || "Extract the math problem shown in this image.");
+    const image = requireImage(files.file);
+    const imageHash = createImageHash(image);
+    const prompt = buildImageExtractionPrompt({ problem });
+    const estimatedTokens = estimateOpenAiTokenBudget({
+      prompt,
+      image,
+      maxOutputTokens: getImageExtractionMaxOutputTokens(),
+    });
+    const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({
+      prompt,
+      image,
+      maxOutputTokens: getImageExtractionMaxOutputTokens(),
+    }));
+
+    logImageUploadDebug("extract-input", {
+      filename: image.filename || null,
+      contentType: image.contentType,
+      bytes: image.buffer.length,
+      promptChars: prompt.length,
+      imageHash,
+    });
+
+    const { reservation } = await checkAndReserveUsage({
+      req,
+      identity,
+      kind: "image",
+      estimatedTokens: isOpenAiConfigured() ? estimatedTokens : 0,
+      estimatedCostMicros: isOpenAiConfigured() ? estimatedCostMicros : 0,
+    });
+    let extraction;
+    let usage;
+
+    try {
+      if (!isOpenAiConfigured()) {
+        throw createOpenAiRequiredError();
+      }
+      extraction = await createImageProblemExtraction({ prompt, image });
+      extraction.extractionValidation = validateExtraction({
+        extractedProblemText: extraction.extractedProblemText,
+        extractedProblemLatex: extraction.extractedProblemLatex,
+        ocrConfidence: fields.ocrConfidence,
+        modelConfidence: extraction.confidence,
+        modelIssues: extraction.issues,
+      });
+      extraction.confidence = extraction.extractionValidation.confidence;
+      extraction.confidenceTier = extraction.extractionValidation.tier;
+      extraction.issues = extraction.extractionValidation.issues;
+      extraction.imageSource = {
+        imageHash,
+        filename: image.filename || null,
+        contentType: image.contentType,
+        bytes: image.buffer.length,
+        rawExtractedText: extraction.extractedProblemText,
+        rawExtractedLatex: extraction.extractedProblemLatex,
+        confidence: extraction.confidence,
+        confidenceTier: extraction.confidenceTier,
+        issues: extraction.issues,
+      };
+
+      const normalizedUsage = normalizeOpenAiUsage(extraction._aiUsage, estimatedTokens);
+      usage = await settleTokenUsage(
+        reservation,
+        normalizedUsage.totalTokens,
+        dollarsToMicros(estimateOpenAiCost(extraction._aiUsage))
+      );
+    } catch (error) {
+      try {
+        await releaseTokenReservation(reservation);
+      } catch (releaseError) {
+        console.warn("Could not release token reservation:", releaseError.message);
+      }
+      throw error;
+    }
+
+    logSolveTiming({
+      endpoint: "/api/extract-image-problem",
+      startedAt,
+      source: "live AI extraction",
+      identity,
+      prompt,
+      aiUsage: extraction._aiUsage,
+      apiCallCount: extraction._aiCallCount || 1,
+    });
+
+    sendJson(res, 200, {
+      ...extraction,
+      usage,
+      runtime: {
+        source: "live AI extraction",
+        demoMode: !isOpenAiConfigured(),
+      },
+    }, createUsageHeaders(usage));
+  });
+}
+
+export async function handleSolveExtractedProblemRequest(req, res) {
+  if (req.method !== "POST") {
+    sendMethodNotAllowed(res, ["POST"]);
+    return;
+  }
+
+  await runHandler(res, async () => {
+    const startedAt = Date.now();
+    const identity = await requireClerkIdentity(req);
+    throttleRequest(req, identity, "ai");
+    assertAiEnabled();
+    const body = requireObject(await readJson(req));
+    const problemLatex = requireTextProblem(body.problemLatex || body.problem || body.extractedProblemLatex);
+    const problemText = optionalShortText(body.problemText || body.extractedProblemText || "", "Problem text", MAX_PROBLEM_CHARS);
+    const extraction = requireObject(body.extraction || {}, "Extraction");
+    const solveDecision = ["direct", "anyway", "edited"].includes(body.solveDecision)
+      ? body.solveDecision
+      : "direct";
+    const prompt = buildMathExplanationPrompt({
+      problem: problemLatex,
+      history: [{
+        role: "student",
+        text: problemText ? `Confirmed image extraction text: ${problemText}` : "Confirmed image extraction.",
+      }],
+    });
+    const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: getSolveMaxOutputTokens() });
+    const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: getSolveMaxOutputTokens() }));
+    const cacheKey = createExplanationCacheKey({
+      userId: identity.clerkUserId,
+      problem: problemLatex,
+      reference: [
+        "solve-extracted",
+        extraction.imageSource?.imageHash || extraction.imageHash || "",
+        solveDecision,
+      ].join(":"),
+      depth: "intermediate",
+      type: "image-confirmed",
+    });
+
+    const { duplicate, value } = await runDeduplicatedRequest(cacheKey, async () => {
+      let result = createLocalRuleExplanation(problemLatex, { source: "image" });
+      let source = "local rule";
+      const willCallOpenAi = !result && isOpenAiConfigured();
+      const { reservation } = await checkAndReserveUsage({
+        req,
+        identity,
+        kind: "image",
+        estimatedTokens: willCallOpenAi ? estimatedTokens : 0,
+        estimatedCostMicros: willCallOpenAi ? estimatedCostMicros : 0,
+      });
+      let usage;
+
+      try {
+        if (!result) {
+          if (!isOpenAiConfigured()) {
+            throw createOpenAiRequiredError();
+          }
+          result = await createMathExplanation({ prompt, originalProblem: problemLatex });
+          result = applyLocalRulesToExplanation(result);
+          source = "live AI call";
+        }
+        result = annotateMathExplanation(result);
+        result.imageSource = {
+          ...(extraction.imageSource || {}),
+          imageHash: extraction.imageSource?.imageHash || extraction.imageHash || null,
+          filename: extraction.imageSource?.filename || null,
+          contentType: extraction.imageSource?.contentType || null,
+          bytes: extraction.imageSource?.bytes || null,
+          rawExtractedText: extraction.rawExtractedText || extraction.extractedProblemText || extraction.imageSource?.rawExtractedText || "",
+          rawExtractedLatex: extraction.rawExtractedLatex || extraction.extractedProblemLatex || extraction.imageSource?.rawExtractedLatex || "",
+          finalProblemText: problemText,
+          finalProblemLatex: problemLatex,
+          confidence: Number(extraction.confidence ?? extraction.extractionValidation?.confidence ?? extraction.imageSource?.confidence ?? 0),
+          confidenceTier: extraction.confidenceTier || extraction.extractionValidation?.tier || extraction.imageSource?.confidenceTier || "",
+          issues: Array.isArray(extraction.issues)
+            ? extraction.issues
+            : extraction.extractionValidation?.issues || extraction.imageSource?.issues || [],
+          solveDecision,
+          editedBeforeSolving: solveDecision === "edited",
+        };
+        result.extractedProblemText = result.imageSource.rawExtractedText;
+        result.extractedProblemLatex = result.imageSource.rawExtractedLatex;
+        result.extractionValidation = extraction.extractionValidation || {
+          confidence: result.imageSource.confidence,
+          tier: result.imageSource.confidenceTier,
+          issues: result.imageSource.issues,
+        };
+
+        const normalizedUsage = normalizeOpenAiUsage(result._aiUsage, 0);
+        usage = await settleTokenUsage(
+          reservation,
+          normalizedUsage.totalTokens,
+          dollarsToMicros(estimateOpenAiCost(result._aiUsage))
+        );
+      } catch (error) {
+        try {
+          await releaseTokenReservation(reservation);
+        } catch (releaseError) {
+          console.warn("Could not release token reservation:", releaseError.message);
+        }
+        throw error;
+      }
+
+      setCachedExplanation(cacheKey, result);
+      const saved = await saveExplanationBestEffort(req, { source: "image", problem: problemLatex, result });
+      return { result, usage, saved, source };
+    });
+
+    const { result, usage, saved, source } = value;
+    logSolveTiming({
+      endpoint: "/api/solve-extracted-problem",
+      startedAt,
+      source,
+      identity,
+      prompt,
+      aiUsage: result._aiUsage,
+      apiCallCount: result._aiCallCount || 0,
+    });
+    sendJson(
+      res,
+      200,
+      buildResponse(result, {
+        usage,
+        saved,
+        source: duplicate ? `${source} (deduplicated)` : source,
+        demoMode: !isOpenAiConfigured(),
+      }),
+      createUsageHeaders(usage)
+    );
+  });
+}
+
 export async function handleExplainImageRequest(req, res) {
   if (req.method !== "POST") {
     sendMethodNotAllowed(res, ["POST"]);
@@ -932,12 +1183,18 @@ export async function handleExplainImageRequest(req, res) {
           }
         }
         result = annotateMathExplanation(result);
+        result.extractionValidation = validateExtraction({
+          extractedProblemText: result.extractedProblemText,
+          extractedProblemLatex: result.extractedProblemLatex || result.expression,
+          ocrConfidence: fields.ocrConfidence,
+        });
         logImageUploadDebug("extracted", {
           extractedProblemText: result.extractedProblemText || "",
           extractedProblemLatex: result.extractedProblemLatex || result.expression || "",
           generatedProblemLatex: result.expression || "",
           firstStepLatex: result.steps?.[0]?.math || "",
           finalAnswerLatex: result.finalAnswerLatex || result.finalAnswer || "",
+          extractionValidation: result.extractionValidation,
         });
 
         const normalizedUsage = normalizeOpenAiUsage(result._aiUsage, 0);
@@ -1035,67 +1292,72 @@ async function handleLazyExplanationRequest(req, res, mode) {
       return;
     }
 
-    const prompt = buildTokenExplanationPrompt({
-      problemContext,
-      stepLatex,
-      selectedLatex,
-      parentExpression,
-      stepHeading,
-      mode,
-    });
-    const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: getLazyMaxOutputTokens() });
-    const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: getLazyMaxOutputTokens() }));
-    const { reservation } = await checkAndReserveUsage({
-      req,
-      identity,
-      kind: "explanation",
-      estimatedTokens: isOpenAiConfigured() ? estimatedTokens : 0,
-      estimatedCostMicros: isOpenAiConfigured() ? estimatedCostMicros : 0,
-    });
-    let result;
-    let usage;
+    const { duplicate, value } = await runDeduplicatedRequest(cacheKey, async () => {
+      const prompt = buildTokenExplanationPrompt({
+        problemContext,
+        stepLatex,
+        selectedLatex,
+        parentExpression,
+        stepHeading,
+        mode,
+      });
+      const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: getLazyMaxOutputTokens() });
+      const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: getLazyMaxOutputTokens() }));
+      const { reservation } = await checkAndReserveUsage({
+        req,
+        identity,
+        kind: "explanation",
+        estimatedTokens: isOpenAiConfigured() ? estimatedTokens : 0,
+        estimatedCostMicros: isOpenAiConfigured() ? estimatedCostMicros : 0,
+      });
+      let result;
+      let usage;
 
-    try {
-      if (!isOpenAiConfigured()) {
-        result = {
-          title: mode === "pin" ? "Pinned explanation" : "Token explanation",
-          explanation: mode === "pin"
-            ? `${selectedLatex} matters in this step because it is part of ${stepHeading || "the displayed transformation"}. Configure OPENAI_API_KEY for deeper live explanations.`
-            : `${selectedLatex} is the selected part of this step. Configure OPENAI_API_KEY for live hover explanations.`,
-          usage: null,
-        };
-      } else {
-        result = await createLazyTokenExplanation({ prompt, mode });
-      }
-      const normalizedUsage = normalizeOpenAiUsage(result.usage, isOpenAiConfigured() ? estimateTokens(prompt) : 0);
-      usage = await settleTokenUsage(
-        reservation,
-        normalizedUsage.totalTokens,
-        dollarsToMicros(estimateOpenAiCost(result.usage))
-      );
-    } catch (error) {
       try {
-        await releaseTokenReservation(reservation);
-      } catch (releaseError) {
-        console.warn("Could not release token reservation:", releaseError.message);
+        if (!isOpenAiConfigured()) {
+          result = {
+            title: mode === "pin" ? "Pinned explanation" : "Token explanation",
+            explanation: mode === "pin"
+              ? `${selectedLatex} matters in this step because it is part of ${stepHeading || "the displayed transformation"}. Configure OPENAI_API_KEY for deeper live explanations.`
+              : `${selectedLatex} is the selected part of this step. Configure OPENAI_API_KEY for live hover explanations.`,
+            usage: null,
+          };
+        } else {
+          result = await createLazyTokenExplanation({ prompt, mode });
+        }
+        const normalizedUsage = normalizeOpenAiUsage(result.usage, isOpenAiConfigured() ? estimateTokens(prompt) : 0);
+        usage = await settleTokenUsage(
+          reservation,
+          normalizedUsage.totalTokens,
+          dollarsToMicros(estimateOpenAiCost(result.usage))
+        );
+      } catch (error) {
+        try {
+          await releaseTokenReservation(reservation);
+        } catch (releaseError) {
+          console.warn("Could not release token reservation:", releaseError.message);
+        }
+        throw error;
       }
-      throw error;
-    }
 
-    const payload = {
-      title: result.title,
-      explanation: result.explanation,
-    };
-    setCachedExplanation(cacheKey, payload);
-    logExplanationSource({
-      source: isOpenAiConfigured() ? "live AI call" : "local fallback",
-      kind: mode,
-      endpoint: mode === "pin" ? "/api/explain-pin" : "/api/explain-token",
-      identity,
-      prompt,
-      aiUsage: result.usage,
+      const payload = {
+        title: result.title,
+        explanation: result.explanation,
+      };
+      setCachedExplanation(cacheKey, payload);
+      logExplanationSource({
+        source: isOpenAiConfigured() ? "live AI call" : "local fallback",
+        kind: mode,
+        endpoint: mode === "pin" ? "/api/explain-pin" : "/api/explain-token",
+        identity,
+        prompt,
+        aiUsage: result.usage,
+      });
+      return { payload, usage };
     });
-    sendJson(res, 200, { ...payload, usage, cached: false }, createUsageHeaders(usage));
+
+    const responseUsage = duplicate ? await getUsageForKind(req, "explanation", identity) : value.usage;
+    sendJson(res, 200, { ...value.payload, usage: responseUsage, cached: duplicate }, createUsageHeaders(responseUsage));
   });
 }
 
@@ -1356,6 +1618,16 @@ export async function handleApiRequest(req, res) {
 
   if (url.pathname === "/api/explain-image") {
     await handleExplainImageRequest(req, res);
+    return;
+  }
+
+  if (url.pathname === "/api/extract-image-problem") {
+    await handleExtractImageProblemRequest(req, res);
+    return;
+  }
+
+  if (url.pathname === "/api/solve-extracted-problem") {
+    await handleSolveExtractedProblemRequest(req, res);
     return;
   }
 

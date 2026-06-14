@@ -90,16 +90,62 @@ export async function explainProblem({ problem, history, getToken }) {
   return parseResponse(response);
 }
 
-export async function explainImageProblem({ file, prompt, getToken }) {
+export async function explainImageProblem({ file, prompt, getToken, quality }) {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("prompt", prompt);
+  if (Number.isFinite(quality?.metrics?.ocrConfidence)) {
+    formData.append("ocrConfidence", String(quality.metrics.ocrConfidence));
+  }
 
   const authHeaders = await getAuthHeaders(getToken, "/api/explain-image");
   const response = await fetch("/api/explain-image", {
     method: "POST",
     headers: authHeaders,
     body: formData,
+  });
+
+  return parseResponse(response);
+}
+
+export async function extractImageProblem({ file, prompt, getToken, quality }) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("prompt", prompt);
+  if (Number.isFinite(quality?.metrics?.ocrConfidence)) {
+    formData.append("ocrConfidence", String(quality.metrics.ocrConfidence));
+  }
+
+  const authHeaders = await getAuthHeaders(getToken, "/api/extract-image-problem");
+  const response = await fetch("/api/extract-image-problem", {
+    method: "POST",
+    headers: authHeaders,
+    body: formData,
+  });
+
+  return parseResponse(response);
+}
+
+export async function solveExtractedProblem({
+  problemLatex,
+  problemText,
+  extraction,
+  solveDecision,
+  getToken,
+}) {
+  const authHeaders = await getAuthHeaders(getToken, "/api/solve-extracted-problem");
+  const response = await fetch("/api/solve-extracted-problem", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders,
+    },
+    body: JSON.stringify({
+      problemLatex,
+      problemText,
+      extraction,
+      solveDecision,
+    }),
   });
 
   return parseResponse(response);

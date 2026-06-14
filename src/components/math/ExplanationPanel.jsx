@@ -6,6 +6,7 @@ import MathText from "./MathText";
 import { explainFollowup, explainPin, explainToken } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { useHover } from "@/lib/HoverContext";
+import { userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { getProblemLabel } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
@@ -23,7 +24,6 @@ const HOVER_DEBOUNCE_MS = 400;
 const HOVER_RATE_LIMIT_MS = 1000;
 const HOVER_TIMEOUT_MS = 6500;
 const PIN_TIMEOUT_MS = 12000;
-const PREFETCH_TOKEN_LIMIT = 6;
 const RATE_LIMIT_MESSAGE = "Explanation paused. Try again in a few seconds.";
 const TIMEOUT_MESSAGE = "Explanation took too long. Try pinning or retry.";
 const lazyExplanationCache = new Map();
@@ -34,6 +34,16 @@ const pinRequestLocks = new Set();
 const requestCooldownUntil = new Map();
 let activeHoverRequest = null;
 let nextHoverRequestAt = 0;
+
+function stableHash(value = "") {
+  let hash = 2166136261;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
 
 function logLazyExplanation(event, details = {}) {
   if (!import.meta.env.DEV) return;
@@ -103,6 +113,12 @@ function getLazyCacheKey(item, problem, mode, explanationLevel = "default") {
   const anchorId = getAnchorId(item);
   const selected = item?.selectedText || item?.display || "";
   const parentExpression = getParentExpression(item);
+  const contextHash = stableHash([
+    getProblemLatex(problem, item?.context),
+    getStepLatex(item),
+    parentExpression,
+    item?.stepTitle || item?.context?.stepTitle || "",
+  ].join("\n"));
 
   return [
     mode,
@@ -110,7 +126,7 @@ function getLazyCacheKey(item, problem, mode, explanationLevel = "default") {
     stepId,
     cleanKeyPart(anchorId, "anchor"),
     cleanKeyPart(selected, "selected"),
-    cleanKeyPart(parentExpression, "parent"),
+    contextHash,
     mode === "pin" ? "pin" : explanationLevel,
   ].join("::");
 }
@@ -195,7 +211,13 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal }) 
   const promise = request({ payload: createLazyPayload(item, problem), getToken, signal })
     .then((data) => {
       const resolved = {
-        title: data.title || item.title,
+        title: userFacingTooltipTitle({
+          title: data.title || item.title,
+          selectedText: item.selectedText || item.display,
+          display: item.display,
+          latex: item.latex,
+          role: item.role,
+        }),
         explanation: data.explanation || "",
       };
       cache.set(cacheKey, resolved);
@@ -412,94 +434,6 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
   return state;
 }
 
-function collectPrefetchItems(problem) {
-  if (!Array.isArray(problem?.steps)) return [];
-  const items = [];
-
-  for (const step of problem.steps) {
-    const chunks = Array.isArray(step.chunks) ? step.chunks : [];
-    for (const chunk of chunks) {
-      const selectedText = chunk.display || chunk.latex || chunk.text || "";
-      if (!selectedText || /^[=+\-(),.]+$/.test(selectedText.trim())) continue;
-      items.push({
-        id: `prefetch-${step.id}-${chunk.id}`,
-        referenceId: chunk.id,
-        referenceType: "token",
-        stepId: step.id,
-        stepTitle: step.label || step.title || "",
-        title: chunk.short || "Token",
-        display: selectedText,
-        selectedText,
-        selectedTokens: [chunk],
-        parentExpression: chunk.parentExpression || selectedText,
-        context: {
-          problem,
-          solution: problem,
-          stepId: step.id,
-          stepTitle: step.label || step.title || "",
-          currentStep: step,
-        },
-      });
-      if (items.length >= PREFETCH_TOKEN_LIMIT) return items;
-    }
-  }
-
-  return items;
-}
-
-function prefetchVisibleHoverExplanations(problem, getToken) {
-  const items = collectPrefetchItems(problem);
-  if (items.length === 0) return () => {};
-
-  const controllers = [];
-  let cancelled = false;
-  let timerId = null;
-  let index = 0;
-
-  const runNext = () => {
-    if (cancelled || index >= items.length) return;
-    const item = items[index];
-    index += 1;
-    const cacheKey = getLazyCacheKey(item, problem, "hover", "beginner");
-    const cached = lazyExplanationCache.get(cacheKey) || readSessionCache(cacheKey);
-    if (cached || inFlightExplanations.has(cacheKey)) {
-      timerId = window.setTimeout(runNext, 250);
-      return;
-    }
-
-    const controller = new AbortController();
-    controllers.push(controller);
-    createLazyRequest({
-      cacheKey,
-      mode: "hover",
-      item,
-      problem,
-      getToken,
-      signal: controller.signal,
-    })
-      .catch((error) => {
-        if (error?.name !== "AbortError") {
-          logLazyExplanation("prefetch skipped after error", {
-            cacheKey,
-            status: error?.status || null,
-            message: error?.message || "Request failed",
-          });
-        }
-      })
-      .finally(() => {
-        if (!cancelled) timerId = window.setTimeout(runNext, 350);
-      });
-  };
-
-  timerId = window.setTimeout(runNext, 0);
-
-  return () => {
-    cancelled = true;
-    if (timerId) window.clearTimeout(timerId);
-    controllers.forEach((controller) => controller.abort());
-  };
-}
-
 function FollowupChat({ item, problem, getToken }) {
   const [messages, setMessages] = useState(Array.isArray(item.chatHistory) ? item.chatHistory : []);
   const [question, setQuestion] = useState("");
@@ -610,6 +544,13 @@ function FloatingWindow({ item, index, problem, getToken }) {
     || item.content?.[item.depth]
     || item.content?.intermediate
     || item.title;
+  const displayTitle = userFacingTooltipTitle({
+    title: lazyState.data?.title || item.title,
+    selectedText: item.selectedText || item.display,
+    display: item.display,
+    latex: item.latex,
+    role: item.role,
+  });
 
   useEffect(() => {
     return () => {
@@ -717,7 +658,7 @@ function FloatingWindow({ item, index, problem, getToken }) {
         <div className="flex min-w-0 items-center gap-2">
           <GripHorizontal className="h-4 w-4 shrink-0 text-teal-200/55" />
           <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold text-cyan-50/95">{item.title}</h3>
+            <h3 className="truncate text-sm font-semibold text-cyan-50/95"><MathText>{displayTitle}</MathText></h3>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -815,7 +756,14 @@ export function ExplanationPopover() {
   const content = explanationLevel >= 2
     ? hoverLens.content?.intermediate
     : hoverLens.content?.beginner;
-  const lazyContent = lazyState.data?.explanation || content || hoverLens.title;
+  const displayTitle = userFacingTooltipTitle({
+    title: lazyState.data?.title || hoverLens.title,
+    selectedText: hoverLens.selectedText || hoverLens.display,
+    display: hoverLens.display,
+    latex: hoverLens.latex,
+    role: hoverLens.role,
+  });
+  const lazyContent = lazyState.data?.explanation || content || displayTitle;
 
   return (
     <motion.div
@@ -829,7 +777,7 @@ export function ExplanationPopover() {
       onMouseMove={holdHoverLens}
       onMouseLeave={releaseHoverLens}
     >
-      <h3 className="mb-1 text-xs font-semibold text-cyan-50/95">{hoverLens.title}</h3>
+      <h3 className="mb-1 text-xs font-semibold text-cyan-50/95"><MathText>{displayTitle}</MathText></h3>
       {lazyState.loading ? (
         <div className="flex items-center gap-2 text-xs leading-5 text-slate-100/75">
           <Loader2 className="h-3 w-3 animate-spin text-teal-100/80" />
@@ -851,19 +799,6 @@ export function ExplanationPopover() {
 export function PinnedLensLayer({ problem }) {
   const { pinnedLenses } = useHover();
   const { getToken } = useAuthToken();
-
-  useEffect(() => {
-    if (!problem?.steps?.length) return undefined;
-    let cancelPrefetch = () => {};
-    const timerId = window.setTimeout(() => {
-      cancelPrefetch = prefetchVisibleHoverExplanations(problem, getToken);
-    }, 900);
-
-    return () => {
-      window.clearTimeout(timerId);
-      cancelPrefetch();
-    };
-  }, [getToken, problem]);
 
   return (
     <>

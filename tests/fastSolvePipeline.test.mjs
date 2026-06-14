@@ -7,6 +7,36 @@ import { normalizeDisplayText, renderMathLatex } from "../src/lib/mathAnnotator.
 const REGRESSION_INTEGRAL = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
 
 describe("fast solve pipeline", () => {
+  it("strips generated markdown and display math wrappers before rendering", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Divergence theorem",
+      problemLatex: "```latex\n\\[\n\\\\iiint_V \\\\nabla \\\\cdot (\\\\nabla \\\\times \\\\mathbf F)\\,dV\n\\]\n```",
+      steps: [
+        {
+          id: "step-1",
+          heading: "Start with the integral",
+          latex: "$$\\\\iiint_V \\\\nabla \\\\cdot (\\\\nabla \\\\times \\\\mathbf F)\\,dV$$",
+          reasoning: "Use the original integral.",
+          anchors: [],
+        },
+        {
+          id: "step-2",
+          heading: "Use the identity",
+          latex: "\\[\\\\nabla \\\\cdot (\\\\nabla \\\\times \\\\mathbf F)=0\\]",
+          reasoning: "The divergence of a curl is zero.",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "$0$",
+      numericCheck: "0",
+    }, { originalProblem: "" });
+
+    assert.equal(explanation.originalProblem, "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf{F})\\,dV");
+    assert.equal(explanation.steps[0].math, "\\iiint_V\\nabla\\cdot(\\nabla\\times\\mathbf{F})\\,dV");
+    assert.equal(explanation.steps[1].math, "\\nabla\\cdot(\\nabla\\times\\mathbf{F})=0");
+    assert.equal(explanation.finalAnswerLatex, "0");
+  });
+
   it("keeps the regression integral as the first rendered line and removes filler steps", () => {
     const explanation = convertFastSolveToMathExplanation({
       title: "Evaluate Integral",
@@ -127,7 +157,47 @@ describe("fast solve pipeline", () => {
     assert.equal(explanation.extractedProblemText, "Differentiate x squared with respect to x.");
     assert.equal(explanation.extractedProblemLatex, "\\frac{d}{dx} x^2");
     assert.equal(explanation.problem.includes("Please solve"), false);
-    assert.equal(explanation.steps[0].math, "\\frac{d}{dx}x^2");
+    assert.equal(explanation.steps[0].math, "\\frac{d}{dx}x^2=2x");
     assert.equal(explanation.finalAnswerLatex, "2x");
+  });
+
+  it("uses clean extracted image latex and skips duplicate problem restatement steps", () => {
+    const explanation = convertImageSolveToMathExplanation({
+      title: "Use curl identity",
+      extractedProblemLatex: "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf F)\\,dV \\quad \\text{and}V\\text{isthesolidregioninsi\\,de}\\z=9 - x^2 - y^2",
+      extractedProblemText: "Evaluate the divergence theorem integral.",
+      steps: [
+        {
+          title: "Start with the problem",
+          equationLatex: "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf F)\\,dV \\quad \\text{and}V\\text{isthesolidregioninsi\\,de}\\z=9 - x^2 - y^2",
+          explanation: "This restates the uploaded problem.",
+          tokens: [],
+        },
+        {
+          title: "Recall the vector calculus identity",
+          equationLatex: "\\nabla \\cdot (\\nabla \\times \\mathbf F)=0",
+          explanation: "The divergence of a curl is always zero.",
+          tokens: [{
+            id: "identity",
+            text: "divergence of a curl",
+            latex: "\\nabla \\cdot (\\nabla \\times \\mathbf F)",
+            role: "identity",
+            subtokens: [],
+          }],
+        },
+      ],
+      finalAnswerLatex: "0",
+      numericCheck: "0",
+    });
+
+    assert.equal(explanation.expression.includes("\\text{and } V"), true);
+    assert.equal(explanation.expression.includes("\\text{ is the solid region inside }"), true);
+    assert.equal(explanation.expression.includes("\\z"), false);
+    assert.equal(explanation.expression.includes("isthesolidregioninside"), false);
+    assert.equal(explanation.steps[0].label, "Recall the vector calculus identity");
+    assert.equal(explanation.steps[0].math, "\\nabla\\cdot(\\nabla\\times\\mathbf{F})=0");
+    assert.equal(explanation.steps[0].lines[0].text, "");
+    assert.equal(explanation.steps.some((step) => /Start with the problem/i.test(step.label)), false);
+    assert.equal(explanation.finalAnswerLatex, "0");
   });
 });

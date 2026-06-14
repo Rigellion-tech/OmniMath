@@ -1,9 +1,10 @@
 import React, { useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, ImagePlus, Loader2, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileText, ImagePlus, Loader2, Pencil, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
 import { extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import MathText from "./MathText";
+import MathRenderer from "./MathRenderer";
 import {
   analyzeImageQuality,
   canSubmitImageForAi,
@@ -89,15 +90,27 @@ function ExtractionReviewPanel({
   onTextChange,
   onLatexChange,
   onSolve,
-  onSolveAnyway,
   onCancel,
 }) {
+  const [editing, setEditing] = useState(false);
   if (!extraction) return null;
 
   const issues = Array.isArray(extraction.issues) ? extraction.issues : [];
   const tier = extraction.confidenceTier || extraction.extractionValidation?.tier || "medium";
   const confidence = Number(extraction.confidence ?? extraction.extractionValidation?.confidence ?? 0);
   const isLow = tier === "low";
+  const isMedium = tier === "medium";
+  const showEditor = editing;
+  const displaySegments = Array.isArray(extraction.displaySegments)
+    ? extraction.displaySegments
+    : Array.isArray(extraction.imageSource?.displaySegments)
+      ? extraction.imageSource.displaySegments
+      : [];
+  const statusText = isLow
+    ? "Review required before solving"
+    : isMedium
+      ? "Review highlighted parts before solving"
+      : "Extraction looks good";
 
   return (
     <div className="grid gap-3">
@@ -107,83 +120,150 @@ function ExtractionReviewPanel({
       )}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-100/80">
-            Review extracted problem
+            Image extraction
           </p>
           <span className="rounded-full border border-white/[0.09] bg-white/[0.045] px-2 py-0.5 font-mono text-[10px] text-slate-200/70">
             {confidence}% · {tier}
           </span>
         </div>
         <p className="mt-1.5 text-xs leading-4 text-slate-200/72">
-          {isLow
-            ? "OmniMath needs confirmation before solving this image."
-            : "Review the extraction or solve anyway if it matches the image."}
+          {statusText}
         </p>
-        {issues.length > 0 && (
-          <ul className="mt-2 grid gap-1 text-xs leading-4 text-amber-50/82">
-            {issues.slice(0, 5).map((issue, index) => (
-              <li key={`${issue.type || "issue"}-${index}`} className="flex gap-2">
-                <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-amber-200/75" />
-                <span>{issue.message || "Review this extraction."}</span>
-              </li>
+      </div>
+
+      {editedText && (
+        <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2 text-sm leading-6 text-slate-100/82">
+          {editedText}
+        </div>
+      )}
+
+      {displaySegments.length > 0 ? (
+        <div className="max-w-full overflow-x-auto rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-3 omni-scrollbar">
+          <div className="flex min-w-max flex-wrap items-baseline gap-x-2 gap-y-1 text-sm leading-7 text-slate-100/86">
+            {displaySegments.map((segment, index) => (
+              segment.type === "math" ? (
+                <span key={`math-${index}`} className="font-serif italic text-cyan-50/92">
+                  <MathRenderer
+                    math={segment.latex}
+                    fallbackText={segment.fallbackText}
+                    componentName="ImageUpload.segment"
+                  />
+                </span>
+              ) : (
+                <span key={`text-${index}`}>{segment.text}</span>
+              )
             ))}
-          </ul>
+          </div>
+        </div>
+      ) : (
+        <div className="max-w-full overflow-x-auto rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-3 text-sm text-cyan-50/90 omni-scrollbar">
+          <div className="min-w-max">
+            <MathText>{`\\(${editedLatex || "\\text{No extraction}"}\\)`}</MathText>
+          </div>
+        </div>
+      )}
+
+      {issues.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {issues.slice(0, 5).map((issue, index) => (
+            <span
+              key={`${issue.type || "issue"}-${index}`}
+              className={cn(
+                "rounded-full border px-2 py-1 text-[11px] leading-4",
+                issue.severity === "high"
+                  ? "border-rose-300/22 bg-rose-400/10 text-rose-50/86"
+                  : "border-amber-300/22 bg-amber-300/10 text-amber-50/86"
+              )}
+              title={issue.message || "Review this extraction."}
+            >
+              {issue.message || "Suspicious extraction token"}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {showEditor && (
+        <label className="grid gap-1.5">
+          <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+            Edit LaTeX
+          </span>
+          <textarea
+            value={editedLatex}
+            onChange={(event) => onLatexChange(event.target.value)}
+            rows={4}
+            className="min-h-24 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 font-mono text-sm leading-5 text-cyan-50 outline-none transition-colors focus:border-teal-200/35"
+          />
+        </label>
+      )}
+
+      <details className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2">
+        <summary className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-200/75">
+          <FileText className="h-3.5 w-3.5 text-teal-100/70" />
+          OCR Details
+        </summary>
+        <div className="mt-2 grid gap-2">
+          <label className="grid gap-1.5">
+            <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+              Plain text transcription
+            </span>
+            <textarea
+              value={editedText}
+              onChange={(event) => onTextChange(event.target.value)}
+              rows={3}
+              className="min-h-20 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 text-sm leading-5 text-slate-100 outline-none transition-colors focus:border-teal-200/35"
+            />
+          </label>
+          <div className="rounded-lg border border-white/[0.08] bg-black/20 p-2">
+            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+              Raw extracted LaTeX
+            </p>
+            <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-cyan-50/82 omni-scrollbar">
+              {extraction.extractedProblemLatex || ""}
+            </pre>
+          </div>
+          {issues.length > 0 && (
+            <ul className="grid gap-1 text-xs leading-4 text-amber-50/82">
+              {issues.map((issue, index) => (
+                <li key={`${issue.type || "issue-detail"}-${index}`} className="flex gap-2">
+                  <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-amber-200/75" />
+                  <span>{issue.message || "Review this extraction."}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </details>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        {isLow && !showEditor ? (
+          <button
+            type="button"
+            disabled={solving}
+            onClick={() => setEditing(true)}
+            className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            <Pencil className="h-4 w-4" />
+            Edit Extraction
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={solving || !editedLatex.trim()}
+            onClick={() => onSolve(showEditor ? "edited" : "direct")}
+            className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {showEditor ? "Solve" : "Accept Extraction"}
+          </button>
         )}
-      </div>
-
-      <label className="grid gap-1.5">
-        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
-          Extracted text
-        </span>
-        <textarea
-          value={editedText}
-          onChange={(event) => onTextChange(event.target.value)}
-          rows={3}
-          className="min-h-20 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 text-sm leading-5 text-slate-100 outline-none transition-colors focus:border-teal-200/35"
-        />
-      </label>
-
-      <label className="grid gap-1.5">
-        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
-          Extracted LaTeX
-        </span>
-        <textarea
-          value={editedLatex}
-          onChange={(event) => onLatexChange(event.target.value)}
-          rows={3}
-          className="min-h-20 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 font-mono text-sm leading-5 text-cyan-50 outline-none transition-colors focus:border-teal-200/35"
-        />
-      </label>
-
-      <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2 text-sm text-cyan-50/90">
-        <MathText>{`\\(${editedLatex || "\\text{No extraction}"}\\)`}</MathText>
-      </div>
-
-      <div className="grid gap-2 sm:grid-cols-3">
-        <button
-          type="button"
-          disabled={solving || !editedLatex.trim()}
-          onClick={() => onSolve("edited")}
-          className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
-        >
-          {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          Solve
-        </button>
         <button
           type="button"
           disabled={solving}
-          onClick={onSolveAnyway}
-          className="flex min-h-10 items-center justify-center gap-2 rounded-xl border border-amber-200/20 bg-amber-300/[0.07] px-3 text-sm font-semibold text-amber-50/90 transition-colors hover:bg-amber-300/[0.1] disabled:cursor-not-allowed disabled:opacity-45"
-        >
-          Solve Anyway
-        </button>
-        <button
-          type="button"
-          disabled={solving}
-          onClick={onCancel}
+          onClick={isLow ? onCancel : () => setEditing(true)}
           className="flex min-h-10 items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 text-sm font-semibold text-slate-200/78 transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-45"
         >
-          <RotateCcw className="h-4 w-4" />
-          Re-upload Image
+          {isLow ? <RotateCcw className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
+          {isLow ? "Re-upload Image" : "Edit Extraction"}
         </button>
       </div>
     </div>
@@ -203,7 +283,6 @@ function QualityPanel({
   onCancel,
   onSubmit,
   onSolve,
-  onSolveAnyway,
 }) {
   if (!preview) return null;
 
@@ -267,7 +346,6 @@ function QualityPanel({
               onTextChange={onTextChange}
               onLatexChange={onLatexChange}
               onSolve={onSolve}
-              onSolveAnyway={onSolveAnyway}
               onCancel={onCancel}
             />
           ) : (
@@ -531,7 +609,6 @@ export default function ImageUpload({
         onCancel={resetSelection}
         onSubmit={handleSubmit}
         onSolve={solveReviewedExtraction}
-        onSolveAnyway={() => solveReviewedExtraction("anyway")}
       />
     </div>
   );

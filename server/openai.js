@@ -13,11 +13,11 @@ import {
   imageSolveSchema,
   lazyTokenExplanationSchema,
 } from "./mathExplanationSchema.js";
+import { getOpenAiModelForPath, getOpenAiModels, logOpenAiModelSelection } from "./openaiModels.js";
 
 loadEnvFiles();
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-export const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
 const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 2200;
 const DEFAULT_LAZY_MAX_OUTPUT_TOKENS = 700;
@@ -52,11 +52,11 @@ function readPositiveNumber(name, fallback) {
 }
 
 export function getOpenAiModel() {
-  return process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
+  return getOpenAiModelForPath("solver");
 }
 
 export function getLazyOpenAiModel() {
-  return process.env.OPENAI_LAZY_MODEL || getOpenAiModel();
+  return getOpenAiModelForPath("hover");
 }
 
 export function getMaxOutputTokens() {
@@ -90,6 +90,7 @@ export function getOpenAiRuntimeConfig() {
   return {
     hasApiKey: isOpenAiConfigured(),
     model: getOpenAiModel(),
+    models: getOpenAiModels(),
     lazyModel: getLazyOpenAiModel(),
     maxOutputTokens: getMaxOutputTokens(),
     solveMaxOutputTokens: getSolveMaxOutputTokens(),
@@ -148,7 +149,7 @@ function logOpenAiRequest({ purpose, payload }) {
   console.info("[omnimath:openai-request]", {
     purpose,
     hasApiKey: config.hasApiKey,
-    model: config.model,
+    model: payload.model,
     maxOutputTokens: config.maxOutputTokens,
     organizationConfigured: config.organizationConfigured,
     projectConfigured: config.projectConfigured,
@@ -163,7 +164,7 @@ function logOpenAiProviderError({ purpose, response, responseBody }) {
     purpose,
     status: response.status,
     statusText: response.statusText,
-    model: config.model,
+    model: responseBody?.model || config.model,
     organizationConfigured: config.organizationConfigured,
     projectConfigured: config.projectConfigured,
     error: {
@@ -300,10 +301,11 @@ function parseJsonResponse(responseBody, assertFn) {
 async function requestOpenAi({
   content,
   purpose = "math_explanation",
+  modelPath = "solver",
   schema = fastSolveSchema,
   schemaName = "math_solve",
   maxOutputTokens = getSolveMaxOutputTokens(),
-  model = getOpenAiModel(),
+  model = getOpenAiModelForPath(modelPath),
 }) {
   const payload = {
     model,
@@ -320,6 +322,7 @@ async function requestOpenAi({
   };
   let response;
   try {
+    logOpenAiModelSelection(modelPath, { purpose });
     logOpenAiRequest({ purpose, payload });
     response = await fetch(OPENAI_RESPONSES_URL, {
       method: "POST",
@@ -366,14 +369,15 @@ async function requestOpenAi({
   return responseBody;
 }
 
-async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "text_completion" }) {
+async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "text_completion", modelPath = "solver" }) {
   const payload = {
-    model: getOpenAiModel(),
+    model: getOpenAiModelForPath(modelPath),
     input: [{ role: "user", content }],
     max_output_tokens: maxOutputTokens,
   };
   let response;
   try {
+    logOpenAiModelSelection(modelPath, { purpose });
     logOpenAiRequest({ purpose, payload });
     response = await fetch(OPENAI_RESPONSES_URL, {
       method: "POST",
@@ -449,6 +453,7 @@ export async function createMathExplanation({ prompt, image, originalProblem = "
     schema: image ? imageSolveSchema : fastSolveSchema,
     schemaName: image ? "math_image_solve" : "math_fast_solve",
     maxOutputTokens: getSolveMaxOutputTokens(),
+    modelPath: "solver",
   });
   const usage = responseBody.usage || null;
   const parsed = parseJsonResponse(
@@ -502,6 +507,7 @@ export async function createImageProblemExtraction({ prompt, image }) {
     schema: imageExtractionSchema,
     schemaName: "math_image_extract",
     maxOutputTokens: getImageExtractionMaxOutputTokens(),
+    modelPath: "imageExtraction",
   });
   const usage = responseBody.usage || null;
   const result = parseJsonResponse(responseBody, assertImageExtractionResponse);
@@ -525,13 +531,14 @@ export async function createFollowupAnswer({ prompt }) {
 }
 
 export async function createLazyTokenExplanation({ prompt, mode = "hover" }) {
+  const modelPath = mode === "pin" ? "pinned" : "hover";
   const responseBody = await requestOpenAi({
     content: [{ type: "input_text", text: prompt }],
     purpose: mode === "pin" ? "math_pin_explanation" : "math_token_explanation",
     schema: lazyTokenExplanationSchema,
     schemaName: "math_token_explanation",
     maxOutputTokens: getLazyMaxOutputTokens(),
-    model: getLazyOpenAiModel(),
+    modelPath,
   });
   return {
     ...parseJsonResponse(responseBody, assertLazyTokenExplanation),
@@ -546,6 +553,7 @@ export async function createCompareMethods({ prompt }) {
     schema: compareMethodsSchema,
     schemaName: "math_compare_methods",
     maxOutputTokens: getSolveMaxOutputTokens(),
+    modelPath: "solver",
   });
   return {
     ...parseJsonResponse(responseBody, assertCompareMethods),

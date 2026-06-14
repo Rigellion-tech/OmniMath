@@ -98,6 +98,35 @@ describe("fast solve pipeline", () => {
     assert.equal(substitutionStep.lines[0].tokens[0].parts.length, 1);
   });
 
+  it("sanitizes common malformed vector-calculus LaTeX before KaTeX rendering", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Stokes theorem",
+      problemLatex: "\\iint limits_s (\\nabla \\times \\mathbfF)\\cdot\\mathbfn\\,dS",
+      steps: [{
+        id: "step-1",
+        heading: "Use Stokes",
+        latex: "\\iint limits_s (\\nabla \\times \\mathbfF)\\cdot\\mathbfn\\,dS=\\oint_C \\mathbfF\\cdot\\mathbfdr",
+        reasoning: "Use Stokes' theorem.",
+        anchors: [],
+      }, {
+        id: "step-2",
+        heading: "Restrict field",
+        latex: "\\mathbfF(x,y,0)=<e^{x^2}\\sin(y),0,xy^2>",
+        reasoning: "Set z=0.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "-\\iint_D e^{x^2}\\cos(y)\\,dA",
+      numericCheck: "",
+    }, { originalProblem: "" });
+
+    assert.equal(explanation.steps.some((step) => /\\mathbfF|\\mathbfn|\\mathbfdr|limits_s|lim its_s/.test(step.math)), false);
+    for (const step of explanation.steps) {
+      const html = katex.renderToString(step.math, { throwOnError: false });
+      assert.equal(html.includes("katex-error"), false, step.math);
+      assert.equal(html.includes("merror"), false, step.math);
+    }
+  });
+
   it("repairs joined prose artifacts without splitting ordinary function words", () => {
     assert.equal(normalizeDisplayText("dsointegrandbecomes"), "so the integrand becomes");
     assert.equal(normalizeDisplayText("Use the cosine identity"), "Use the cosine identity");

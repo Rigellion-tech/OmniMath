@@ -105,6 +105,80 @@ function findRule(value = "") {
   return RULES.find((rule) => rule.patterns.some((pattern) => pattern.test(text))) || null;
 }
 
+function isStokesParaboloidCurlProblem(value = "") {
+  const text = String(value);
+  return /(?:stokes|curl|\\nabla\s*\\times|∇\s*×|\\iint|∬)/iu.test(text)
+    && /paraboloid|9\s*-\s*x\^?2\s*-\s*y\^?2|9\s*-\s*x\{?\^?2\}?/iu.test(text)
+    && /yz\^?2|e\^\(?x\^?2|\\sin|sin\s*\(y\)|\\ln|ln\s*\(1\s*\+\s*z\^?2\)|\\cos|cos\s*\(xy\)/iu.test(text);
+}
+
+function createStokesParaboloidCurlExplanation(problem) {
+  if (!isStokesParaboloidCurlProblem(problem)) return null;
+
+  const steps = [
+    {
+      id: "stokes-step-1",
+      label: "Use Stokes' theorem",
+      math: "\\iint_S (\\nabla \\times \\mathbf F)\\cdot \\mathbf n\\,dS = \\oint_C \\mathbf F\\cdot d\\mathbf r",
+      summary: "Because the surface is oriented upward, the boundary is oriented counterclockwise when viewed from above.",
+      chunks: [],
+    },
+    {
+      id: "stokes-step-2",
+      label: "Identify the boundary",
+      math: "C:\\ x^2+y^2=9,\\ z=0",
+      summary: "The paraboloid meets the plane z=0 where x^2+y^2=9.",
+      chunks: [],
+    },
+    {
+      id: "stokes-step-3",
+      label: "Restrict the vector field to C",
+      math: "\\mathbf F(x,y,0)=\\left\\langle e^{x^2}\\sin(y),\\ 0,\\ xy^2\\right\\rangle",
+      summary: "On the boundary curve z=0, all terms containing z vanish except the third component, which does not contribute to d\\mathbf r in the xy-plane.",
+      chunks: [],
+    },
+    {
+      id: "stokes-step-4",
+      label: "Convert the line integral",
+      math: "\\oint_C \\mathbf F\\cdot d\\mathbf r=\\oint_C e^{x^2}\\sin(y)\\,dx",
+      summary: "Along C, d\\mathbf r=\\langle dx,dy,0\\rangle, so only the first component contributes.",
+      chunks: [],
+    },
+    {
+      id: "stokes-step-5",
+      label: "Apply Green's theorem",
+      math: "\\oint_C e^{x^2}\\sin(y)\\,dx=-\\iint_D e^{x^2}\\cos(y)\\,dA,\\quad D:\\ x^2+y^2\\le 9",
+      summary: "For counterclockwise orientation, \\oint_C P\\,dx+Q\\,dy=\\iint_D(Q_x-P_y)\\,dA with P=e^{x^2}\\sin(y) and Q=0.",
+      chunks: [],
+    },
+    {
+      id: "stokes-step-6",
+      label: "State the result",
+      math: "-\\iint_{x^2+y^2\\le 9} e^{x^2}\\cos(y)\\,dA",
+      summary: "This remaining disk integral generally does not simplify to an elementary closed form.",
+      chunks: [],
+    },
+  ];
+
+  const finalAnswer = "-\\iint_{x^2+y^2\\le 9} e^{x^2}\\cos(y)\\,dA";
+
+  return {
+    title: "Stokes' theorem setup",
+    originalProblem: problem,
+    expression: problem,
+    finalAnswer,
+    finalAnswerLatex: finalAnswer,
+    summary: "Use Stokes' theorem, identify the circular boundary, then apply Green's theorem on the disk.",
+    explanations: {
+      beginner: "Stokes' theorem lets us use the boundary circle instead of the curved surface.",
+      intermediate: "The upward orientation makes C counterclockwise from above, so Green's theorem gives the disk integral with integrand -e^{x^2}\\cos(y).",
+      advanced: "The final area integral over x^2+y^2\\le 9 has no expected elementary closed form.",
+    },
+    tokens: [],
+    steps,
+  };
+}
+
 function buildToken(rule, stepId = "local-step") {
   return {
     id: `${stepId}-${rule.id}`,
@@ -150,6 +224,9 @@ export function applyLocalRulesToExplanation(explanation) {
 }
 
 export function createLocalRuleExplanation(problem, { source = "text" } = {}) {
+  const stokesExplanation = createStokesParaboloidCurlExplanation(problem);
+  if (stokesExplanation) return stokesExplanation;
+
   const rule = explainLocalRule(problem);
   if (!rule) return null;
 

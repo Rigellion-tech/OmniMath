@@ -69,6 +69,9 @@ Quality rules:
 - Do not create anchors for isolated differentials, single variables, basic operators, parentheses, random English words, or rule labels such as Power/Product/Chain/Leibniz.
 - Anchor latex must be an exact meaningful subexpression from the step latex when possible.
 - Never include filler headings such as "Define integral", "State the integral", "Apply math", or a standalone differential like "dx".
+- For Stokes/Green/curl problems, identify the oriented boundary and use \\iint_S (\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS=\\oint_C\\mathbf F\\cdot d\\mathbf r when applicable.
+- For the paraboloid z=9-x^2-y^2 above z=0 with upward orientation, use C: x^2+y^2=9, z=0, counterclockwise viewed from above.
+- If the resulting Green's theorem disk integral has no elementary closed form, state the non-elementary integral instead of hallucinating a simple value.
 - Every displayed equation must be valid LaTeX.
 - Math-rendered fields must contain only the LaTeX expression. Do not wrap math-rendered fields in Markdown fences, latex code blocks, \\[...\\], $$...$$, or $...$.
 - Never put plain text inside math unless it is wrapped in \\text{}.

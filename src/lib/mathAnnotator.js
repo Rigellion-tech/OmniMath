@@ -807,6 +807,8 @@ function normalizeExistingLatexForRender(value) {
     .replace(/(?<!\\)([a-zA-Z0-9}])d(\\[a-zA-Z]+)\b/g, "$1\\,d$2")
     .replace(/(?<!\\)([a-zA-Z0-9}])d([a-zA-Z])\b/g, "$1\\,d$2")
     .replace(/\s+/g, "")
+    .replace(/\\langle(?=[A-Za-z0-9\\])/g, "\\langle ")
+    .replace(/(?<=[A-Za-z0-9}])\\rangle/g, " \\rangle")
     .replace(/\\int(?=[a-zA-Z0-9\\])/g, "\\int ")
     .replace(/\\(cdot|times)(?=[A-Za-z0-9])/g, "\\$1 ")
     .replace(new RegExp(`\\\\(${FUNCTION_NAME_PATTERN})([a-zA-Z0-9])`, "g"), "\\$1 $2");

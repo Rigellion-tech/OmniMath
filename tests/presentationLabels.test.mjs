@@ -5,6 +5,7 @@ import {
   userFacingText,
   userFacingTooltipTitle,
 } from "../src/lib/presentationLabels.js";
+import { getProblemLabel } from "../src/lib/problemLabels.js";
 
 describe("presentation labels", () => {
   it("maps known internal identity names to educational titles", () => {
@@ -34,5 +35,14 @@ describe("presentation labels", () => {
   it("keeps concise human titles and rejects fallback internal content", () => {
     assert.equal(userFacingTooltipTitle({ title: "Vector Calculus Identity" }), "Vector Calculus Identity");
     assert.equal(userFacingText("classifier_tag_for_prompt_debug", "Selected Token"), "Selected Token");
+  });
+
+  it("classifies Stokes image problems before accidental limit artifacts", () => {
+    const problem = {
+      expression: "Evaluate \\iint\\limits_S (\\nabla \\times \\mathbf{F})\\cdot\\mathbf{n}\\,dS where F is a vector field.",
+      title: "Limit Problem",
+    };
+
+    assert.equal(getProblemLabel(problem), "Stokes' Theorem Problem");
   });
 });

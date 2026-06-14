@@ -73,6 +73,16 @@ export function sanitizeLatex(input = "") {
   text = text
     .replace(PROBLEM_PREAMBLE_PATTERN, "")
     .replace(/\\\\(?=([a-zA-Z]+|[,;!]))/g, () => "\\")
+    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
+    .replace(/\\mathbf([A-Za-z])/g, "\\mathbf{$1}")
+    .replace(/\\vec\s*([A-Za-z])/g, "\\vec{$1}")
+    .replace(/\\vec([A-Za-z])/g, "\\vec{$1}")
+    .replace(/\\hat\s*([A-Za-z])/g, "\\hat{$1}")
+    .replace(/\\hat([A-Za-z])/g, "\\hat{$1}")
+    .replace(/\\mathbf\{dr\}/g, "d\\mathbf{r}")
+    .replace(/\\mathbf\{d\}r/g, "d\\mathbf{r}")
+    .replace(/\\iint\s+(?:lim\s*its|limits)\s*_\s*([A-Za-z])/gi, "\\iint_{$1}")
+    .replace(/\\int\s+(?:lim\s*its|limits)\s*_\s*([A-Za-z])/gi, "\\int_{$1}")
     .replace(/∭/g, "\\iiint")
     .replace(/∬/g, "\\iint")
     .replace(/∫/g, "\\int")
@@ -88,7 +98,6 @@ export function sanitizeLatex(input = "") {
     .replace(/φ/g, "\\phi")
     .replace(/ρ/g, "\\rho")
     .replace(/\\([xyz])\b/g, "$1")
-    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
     .replace(/(?<!\\)\bln(?=\s*\()/gi, "\\ln")
     .replace(/(?<!\\)\bsin(?=\s*\()/gi, "\\sin")
     .replace(/(?<!\\)\bcos(?=\s*\()/gi, "\\cos")
@@ -98,6 +107,10 @@ export function sanitizeLatex(input = "") {
     .replace(/(?<!\\)\bint_/gi, "\\int_")
     .replace(/(?<!\\)\biiint_/gi, "\\iiint_")
     .replace(/(?<!\\)\biint_/gi, "\\iint_")
+    .replace(/<\s*/g, "\\left\\langle ")
+    .replace(/\s*>/g, " \\right\\rangle")
+    .replace(/\\langle(?![\s}])/g, "\\langle ")
+    .replace(/(?<![\s{])\\rangle/g, " \\rangle")
     .replace(/\\text\{\s*(where|and)\s*\}/gi, (_, word) => `\\quad \\text{${word.toLowerCase()} } \\quad`)
     .replace(/where(?=(?:\\mathbf\{?F|F)\b)/gi, "\\quad \\text{where } ")
     .replace(/and(?=V\b)/gi, "\\quad \\text{and } ")
@@ -107,6 +120,31 @@ export function sanitizeLatex(input = "") {
     .trim();
 
   return ensureVectorBrackets(text);
+}
+
+function readableMathFallback(value = "") {
+  return String(value || "")
+    .replace(/\\left|\\right/g, "")
+    .replace(/\\mathbf\{([^}]+)\}/g, "$1")
+    .replace(/\\(iint|int|nabla|times|cdot|sin|cos|tan|ln|log|langle|rangle|le|ge)\b/g, (_, command) => {
+      const replacements = {
+        iint: "∬",
+        int: "∫",
+        nabla: "∇",
+        times: "×",
+        cdot: "·",
+        langle: "<",
+        rangle: ">",
+        le: "≤",
+        ge: "≥",
+      };
+      return replacements[command] || command;
+    })
+    .replace(/[{}]/g, "")
+    .replace(/\\,/g, " ")
+    .replace(/\\/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function sanitizeKatexInput(input = "") {
@@ -313,19 +351,21 @@ export default function MathRenderer({
     } catch (error) {
       const message = error?.message || "Unknown KaTeX error";
       setRenderError(message);
-      host.textContent = renderMath || sanitizedMath || fallback;
+      host.textContent = readableMathFallback(fallback || rawMath || sanitizedMath || renderMath);
       host.setAttribute("data-math-fallback", "true");
-      console.error("[omnimath:math-render-error]", {
-        componentName,
-        originalInput: rawMath,
-        rawEquation: rawMath,
-        normalizedEquation: normalizedMath,
-        sanitizedEquation: sanitizedMath,
-        katexInput: renderMath,
-        displayMode,
-        message,
-        error,
-      });
+      if (import.meta.env.DEV) {
+        console.error("[omnimath:math-render-error]", {
+          componentName,
+          originalInput: rawMath,
+          rawEquation: rawMath,
+          normalizedEquation: normalizedMath,
+          sanitizedEquation: sanitizedMath,
+          katexInput: renderMath,
+          displayMode,
+          message,
+          error,
+        });
+      }
     }
 
     return () => {

@@ -41,7 +41,12 @@ Fill in `.env.local`:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_IMAGE_EXTRACTION_MODEL=gpt-4.1
+OPENAI_EXTRACTION_REVIEW_MODEL=gpt-4.1-mini
+OPENAI_SOLVER_MODEL=gpt-4.1
+OPENAI_HOVER_MODEL=gpt-4.1-mini
+OPENAI_PINNED_MODEL=gpt-4.1-mini
+OCR_REVIEW_CONFIDENCE_THRESHOLD=35
 OPENAI_MAX_OUTPUT_TOKENS=8000
 OPENAI_IMAGE_TOKEN_ESTIMATE=1700
 OPENAI_INPUT_COST_PER_1M_TOKENS=5
@@ -81,7 +86,14 @@ USAGE_IDENTITY_HMAC_SECRET=change_me_for_signed_user_tiers
 | Variable | Required | Default | Used by | Description |
 | --- | --- | --- | --- | --- |
 | `OPENAI_API_KEY` | Yes | None | Backend only | Secret key used by `server/openai.js` to call the OpenAI Responses API. |
-| `OPENAI_MODEL` | No | `gpt-4.1-mini` | Backend only | Model used for text and image math explanations. Change this if your account uses a different enabled model. |
+| `OPENAI_IMAGE_EXTRACTION_MODEL` | No | `gpt-4.1` | Backend only | Strong vision model used to extract clean LaTeX from uploaded images. |
+| `OPENAI_EXTRACTION_REVIEW_MODEL` | No | `gpt-4.1-mini` | Backend only | Mini model reserved for future ambiguous OCR review paths. Heuristic review runs first and usually avoids this call. |
+| `OPENAI_SOLVER_MODEL` | No | `gpt-4.1` | Backend only | Strong model used for full text and image solution generation. |
+| `OPENAI_HOVER_MODEL` | No | `gpt-4.1-mini` | Backend only | Cheaper model used for lightweight hover explanations. |
+| `OPENAI_PINNED_MODEL` | No | `gpt-4.1-mini` | Backend only | Cheaper model used for pinned explanations and pinned mini-chat. |
+| `OCR_REVIEW_CONFIDENCE_THRESHOLD` | No | `35` | Backend only | Browser OCR confidence below this value requires review before solving. Substantial OCR spacing cleanup also shows review suggested. |
+| `OPENAI_MODEL` | No | None | Backend only | Legacy fallback for solver and image extraction model selection when path-specific variables are unset. |
+| `OPENAI_LAZY_MODEL` | No | None | Backend only | Legacy fallback for hover and pinned model selection when path-specific variables are unset. |
 | `OPENAI_MAX_OUTPUT_TOKENS` | No | `8000` | Backend only | Maximum model output tokens per explanation. Also used for token-budget reservation before calling OpenAI. |
 | `OPENAI_IMAGE_TOKEN_ESTIMATE` | No | `1700` | Backend only | Conservative token estimate reserved for image inputs before OpenAI is called. |
 | `OPENAI_INPUT_COST_PER_1M_TOKENS` | No | `5` | Backend only | Input-token price used for server-side estimated cost logging and spend reports. |
@@ -108,6 +120,8 @@ USAGE_IDENTITY_HMAC_SECRET=change_me_for_signed_user_tiers
 | `DATABASE_URL` | For persistence | None | Backend only | Postgres connection string for app user records and saved explanation history. |
 | `DATABASE_SSL` | No | Auto | Backend only | Set `false` for local Postgres if needed, or `true` to force SSL. |
 | `DATABASE_POOL_MAX` | No | `3` | Backend only | Maximum Postgres connections per server instance. |
+
+OCR/image extraction and full solving can use stronger models through `OPENAI_IMAGE_EXTRACTION_MODEL` and `OPENAI_SOLVER_MODEL`, while hover, pinned explanations, and pinned mini-chat can stay on cheaper mini models. OCR review is exception-based: OmniMath validates rendered LaTeX, delimiter balance, truncation, and explicit uncertainty markers before considering extra review, which reduces false low-confidence warnings and avoids unnecessary model calls.
 | `PORT` | No | `8787` | Backend only | Port for the local API server. |
 | `DEV_API_TARGET` | No | `http://127.0.0.1:8787` | Vite dev server only | Local API target for the Vite `/api/*` proxy. Do not set this on Vercel. |
 | `DEV_CLIENT_ORIGIN` | No | `http://localhost:5173` | Backend only | Local frontend origin used to redirect accidental non-API requests to the API server back to Vite. |
@@ -387,7 +401,11 @@ This repo includes `vercel.json` with the Vite framework, `npm install`, `npm ru
 
    ```env
    OPENAI_API_KEY=your_openai_api_key
-   OPENAI_MODEL=gpt-4.1-mini
+   OPENAI_IMAGE_EXTRACTION_MODEL=gpt-4.1
+   OPENAI_EXTRACTION_REVIEW_MODEL=gpt-4.1-mini
+   OPENAI_SOLVER_MODEL=gpt-4.1
+   OPENAI_HOVER_MODEL=gpt-4.1-mini
+   OPENAI_PINNED_MODEL=gpt-4.1-mini
    AI_ENABLED=true
    AI_RATE_LIMIT_PER_MINUTE=10
    AI_RATE_LIMIT_PER_HOUR=100
@@ -437,7 +455,11 @@ If deploying outside Vercel, serve `dist/` and route `/api/*` to the Node backen
 
    ```env
    OPENAI_API_KEY=your_openai_api_key
-   OPENAI_MODEL=gpt-4.1-mini
+   OPENAI_IMAGE_EXTRACTION_MODEL=gpt-4.1
+   OPENAI_EXTRACTION_REVIEW_MODEL=gpt-4.1-mini
+   OPENAI_SOLVER_MODEL=gpt-4.1
+   OPENAI_HOVER_MODEL=gpt-4.1-mini
+   OPENAI_PINNED_MODEL=gpt-4.1-mini
    AI_ENABLED=true
    AI_RATE_LIMIT_PER_MINUTE=10
    AI_RATE_LIMIT_PER_HOUR=100
@@ -495,7 +517,7 @@ For split-domain deployments, either proxy frontend `/api/*` requests back to th
 - Logged-in users still receive anonymous limits: make sure the frontend sends a Clerk session token and the backend has `CLERK_SECRET_KEY` or `CLERK_JWT_KEY`.
 - Pro users still receive free limits: add a Clerk custom session token claim matching `CLERK_TIER_CLAIM` with value `pro`.
 - Account/history persistence unavailable: set `DATABASE_URL` and run the migrations in `db/migrations/`.
-- Model error from OpenAI: update `OPENAI_MODEL` to a model enabled for your account.
+- Model error from OpenAI: update the relevant path-specific model variable, such as `OPENAI_SOLVER_MODEL` or `OPENAI_IMAGE_EXTRACTION_MODEL`, to a model enabled for your account.
 
 ## Security Notes
 

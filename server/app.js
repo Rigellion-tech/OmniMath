@@ -37,6 +37,9 @@ import { runDeduplicatedRequest } from "./duplicateRequests.js";
 import { applyLocalRulesToExplanation, createLocalRuleExplanation } from "./localRules.js";
 import { annotateMathExplanation } from "./mathAnnotator.js";
 import { validateExtraction } from "./extractionValidation.js";
+import { getOpenAiModelForPath } from "./openaiModels.js";
+import { buildExtractedProblemDisplay, normalizeExtractedProblemText } from "./ocrTextNormalization.js";
+import { validateSolutionQuality } from "./solutionValidation.js";
 import {
   createExplanationCacheKey,
   createImageHash,
@@ -72,6 +75,41 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/webp",
   "image/gif",
 ]);
+
+function logExtractionReviewDebug(validation) {
+  if (process.env.NODE_ENV === "production") return;
+  console.info("[omnimath:ocr-review]", {
+    path: "extractionReview",
+    model: getOpenAiModelForPath("extractionReview"),
+    llmReviewCalled: false,
+    confidence: validation?.confidence,
+    tier: validation?.tier,
+    critical: Boolean(validation?.critical),
+    reasons: Array.isArray(validation?.issues)
+      ? validation.issues.map((issue) => ({
+          type: issue.type,
+          severity: issue.severity,
+          critical: Boolean(issue.critical),
+          message: issue.message,
+        }))
+      : [],
+    metrics: validation?.metrics || null,
+  });
+}
+
+function buildRepairSolvePrompt(prompt, issues = []) {
+  return `${prompt}
+
+Your previous solution response failed OmniMath validation for these reasons: ${issues.join(", ") || "generic invalid solution"}.
+
+Repair requirements:
+- Solve the actual extracted math problem, not a generic rule example.
+- Do not output placeholders such as "Recognized rule", "f g x", or a one-step rule summary.
+- For curl surface integrals with an oriented boundary, use Stokes' theorem when applicable.
+- For the paraboloid z = 9 - x^2 - y^2 above z = 0, identify C as x^2 + y^2 = 9, z = 0 with counterclockwise orientation viewed from above.
+- If Green's theorem reduces the answer to a non-elementary disk integral, state that instead of inventing a simple closed form.
+- Return only valid JSON matching the requested schema.`;
+}
 
 function sendJson(res, statusCode, payload, headers = {}) {
   res.writeHead(statusCode, {
@@ -903,13 +941,41 @@ export async function handleExtractImageProblemRequest(req, res) {
         throw createOpenAiRequiredError();
       }
       extraction = await createImageProblemExtraction({ prompt, image });
+      const rawExtractedText = extraction.extractedProblemText;
+      const textCleanup = normalizeExtractedProblemText(rawExtractedText);
+      extraction.rawExtractedText = rawExtractedText;
+      extraction.extractedProblemText = textCleanup.text || rawExtractedText;
+      extraction.ocrTextCleanup = textCleanup;
+      const display = buildExtractedProblemDisplay({
+        rawOcrText: rawExtractedText,
+        cleanedPlainText: extraction.extractedProblemText,
+        extractedProblemLatex: extraction.extractedProblemLatex,
+      });
+      extraction.rawOcrText = display.rawOcrText;
+      extraction.cleanedPlainText = display.cleanedPlainText;
+      extraction.displaySegments = display.displaySegments;
+      extraction.solverInput = display.solverInput;
+      extraction.latexMathChunks = display.latexMathChunks;
       extraction.extractionValidation = validateExtraction({
         extractedProblemText: extraction.extractedProblemText,
         extractedProblemLatex: extraction.extractedProblemLatex,
         ocrConfidence: fields.ocrConfidence,
         modelConfidence: extraction.confidence,
         modelIssues: extraction.issues,
+        textCleanup,
       });
+      if (display.latexMathChunks.some((chunk) => chunk.renderIssue)) {
+        extraction.extractionValidation.issues.push({
+          type: "render_preview_issue",
+          severity: "medium",
+          critical: false,
+          message: "One or more extracted math chunks needed a plain-text fallback in the preview.",
+        });
+        extraction.extractionValidation.status = extraction.extractionValidation.status === "danger" ? "danger" : "warning";
+        extraction.extractionValidation.tier = extraction.extractionValidation.tier === "low" ? "low" : "medium";
+        extraction.extractionValidation.confidence = Math.min(extraction.extractionValidation.confidence, 84);
+      }
+      logExtractionReviewDebug(extraction.extractionValidation);
       extraction.confidence = extraction.extractionValidation.confidence;
       extraction.confidenceTier = extraction.extractionValidation.tier;
       extraction.issues = extraction.extractionValidation.issues;
@@ -918,7 +984,11 @@ export async function handleExtractImageProblemRequest(req, res) {
         filename: image.filename || null,
         contentType: image.contentType,
         bytes: image.buffer.length,
-        rawExtractedText: extraction.extractedProblemText,
+        rawExtractedText,
+        cleanedExtractedText: extraction.extractedProblemText,
+        displaySegments: extraction.displaySegments,
+        solverInput: extraction.solverInput,
+        latexMathChunks: extraction.latexMathChunks,
         rawExtractedLatex: extraction.extractedProblemLatex,
         confidence: extraction.confidence,
         confidenceTier: extraction.confidenceTier,
@@ -1003,7 +1073,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
     const { duplicate, value } = await runDeduplicatedRequest(cacheKey, async () => {
       let result = createLocalRuleExplanation(problemLatex, { source: "image" });
       let source = "local rule";
-      const willCallOpenAi = !result && isOpenAiConfigured();
+      const willCallOpenAi = isOpenAiConfigured();
       const { reservation } = await checkAndReserveUsage({
         req,
         identity,
@@ -1014,14 +1084,33 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       let usage;
 
       try {
+        if (result) {
+          try {
+            validateSolutionQuality(result, { problem: problemLatex });
+          } catch (error) {
+            if (!isOpenAiConfigured()) throw error;
+            result = null;
+          }
+        }
+
         if (!result) {
           if (!isOpenAiConfigured()) {
             throw createOpenAiRequiredError();
           }
-          result = await createMathExplanation({ prompt, originalProblem: problemLatex });
-          result = applyLocalRulesToExplanation(result);
-          source = "live AI call";
+          try {
+            result = await createMathExplanation({ prompt, originalProblem: problemLatex });
+            result = applyLocalRulesToExplanation(result);
+            validateSolutionQuality(result, { problem: problemLatex });
+            source = "live AI call";
+          } catch (firstError) {
+            const repairPrompt = buildRepairSolvePrompt(prompt, firstError.solutionIssues || [firstError.code || firstError.message]);
+            result = await createMathExplanation({ prompt: repairPrompt, originalProblem: problemLatex });
+            result = applyLocalRulesToExplanation(result);
+            validateSolutionQuality(result, { problem: problemLatex });
+            source = "live AI repair call";
+          }
         }
+        validateSolutionQuality(result, { problem: problemLatex });
         result = annotateMathExplanation(result);
         result.imageSource = {
           ...(extraction.imageSource || {}),
@@ -1030,6 +1119,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
           contentType: extraction.imageSource?.contentType || null,
           bytes: extraction.imageSource?.bytes || null,
           rawExtractedText: extraction.rawExtractedText || extraction.extractedProblemText || extraction.imageSource?.rawExtractedText || "",
+          cleanedExtractedText: extraction.extractedProblemText || extraction.imageSource?.cleanedExtractedText || "",
           rawExtractedLatex: extraction.rawExtractedLatex || extraction.extractedProblemLatex || extraction.imageSource?.rawExtractedLatex || "",
           finalProblemText: problemText,
           finalProblemLatex: problemLatex,
@@ -1041,7 +1131,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
           solveDecision,
           editedBeforeSolving: solveDecision === "edited",
         };
-        result.extractedProblemText = result.imageSource.rawExtractedText;
+        result.extractedProblemText = result.imageSource.finalProblemText || result.imageSource.cleanedExtractedText || result.imageSource.rawExtractedText;
         result.extractedProblemLatex = result.imageSource.rawExtractedLatex;
         result.extractionValidation = extraction.extractionValidation || {
           confidence: result.imageSource.confidence,
@@ -1188,6 +1278,7 @@ export async function handleExplainImageRequest(req, res) {
           extractedProblemLatex: result.extractedProblemLatex || result.expression,
           ocrConfidence: fields.ocrConfidence,
         });
+        logExtractionReviewDebug(result.extractionValidation);
         logImageUploadDebug("extracted", {
           extractedProblemText: result.extractedProblemText || "",
           extractedProblemLatex: result.extractedProblemLatex || result.expression || "",

@@ -87,17 +87,17 @@ describe("OCR extraction validation", () => {
     assert.ok(validation.issues.some((issue) => issue.type === "parentheses_loss"));
   });
 
-  it("lowers confidence for low OCR confidence and superscript-heavy screenshots", () => {
+  it("does not lower confidence for superscript-heavy screenshots alone", () => {
     const validation = validateExtraction({
       extractedProblemText: "x^2+y^2+z^2",
       extractedProblemLatex: "x^2+y^2+z^2",
       ocrConfidence: 52,
     });
 
-    assert.equal(validation.status, "warning");
-    assert.ok(validation.issues.some((issue) => issue.type === "many_superscripts"));
-    assert.ok(validation.issues.some((issue) => issue.type === "low_ocr_confidence"));
-    assert.ok(validation.confidence < 52);
+    assert.equal(validation.status, "ok");
+    assert.equal(validation.tier, "high");
+    assert.equal(validation.issues.some((issue) => issue.type === "many_superscripts"), false);
+    assert.equal(validation.issues.some((issue) => issue.type === "low_ocr_confidence"), false);
   });
 
   it("gates very low OCR confidence before full solution generation", () => {

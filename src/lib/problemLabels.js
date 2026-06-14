@@ -24,11 +24,13 @@ export function classifyProblem(value, fallback = GENERIC_TITLE) {
   const text = sourceText(value);
   const normalized = text.toLowerCase();
   if (!normalized.trim()) return fallback;
+  if (/stokes|\\nabla\s*\\times|∇\s*×|curl|\\oint|∮/.test(normalized)) return "Stokes' Theorem Problem";
+  if (/surface\s+integral|\\iint_s|∬_s|vector\s+field|\\mathbf\{?f\}?/.test(normalized)) return "Vector Calculus Problem";
   if (/triple\s+integral|\\iiint/.test(normalized)) return "Triple Integral";
   if (/\\int[^]*\\infty|infinite\s+(limit|bound)|improper/.test(normalized)) return "Improper Integral";
   if (/\\int|integral/.test(normalized)) return "Integral Evaluation";
   if (/differentiat|derivative|\\frac\{d|d\/dx|prime/.test(normalized)) return "Differentiation";
-  if (/\\lim|limit/.test(normalized)) return "Limit Problem";
+  if (/\\lim(?!its)|\blimit\b/.test(normalized)) return "Limit Problem";
   if (/\\sum|series|summation/.test(normalized)) return "Series Problem";
   if (/matrix|determinant|\\begin\{[bpv]?matrix/.test(normalized)) return "Matrix Problem";
   if (/solve|equation|=/.test(normalized)) return "Equation Problem";

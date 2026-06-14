@@ -1,3 +1,5 @@
+import katex from "katex";
+
 const SUPERSCRIPT_DIGITS = new Map([
   ["⁰", "0"],
   ["¹", "1"],
@@ -42,9 +44,57 @@ function normalizeUnicodeScripts(value) {
   return output;
 }
 
+function normalizeParenthesizedScripts(value) {
+  const source = safeString(value);
+  let output = "";
+
+  for (let index = 0; index < source.length; index += 1) {
+    const marker = source[index];
+    if ((marker !== "^" && marker !== "_") || source[index + 1] !== "(") {
+      output += marker;
+      continue;
+    }
+
+    let cursor = index + 2;
+    let depth = 1;
+    let script = "";
+    while (cursor < source.length && depth > 0) {
+      const char = source[cursor];
+      if (char === "(") {
+        depth += 1;
+        script += char;
+      } else if (char === ")") {
+        depth -= 1;
+        if (depth > 0) script += char;
+      } else {
+        script += char;
+      }
+      cursor += 1;
+    }
+
+    if (depth === 0) {
+      output += `${marker}{${script}}`;
+      index = cursor - 1;
+    } else {
+      output += marker;
+    }
+  }
+
+  return output;
+}
+
 function normalizeForScan(value) {
-  return normalizeUnicodeScripts(value)
+  return normalizeParenthesizedScripts(normalizeUnicodeScripts(value))
+    .replace(/∭/g, "\\iiint")
+    .replace(/∬/g, "\\iint")
+    .replace(/∫/g, "\\int")
+    .replace(/∇/g, "\\nabla")
+    .replace(/×/g, "\\times")
+    .replace(/⋅|·/g, "\\cdot")
+    .replace(/(?<!\\)\b(sin|cos|tan|sec|csc|cot|ln|log|exp)\s*\(/gi, "\\$1(")
     .replace(/\\left|\\right/g, "")
+    .replace(/\\langle/g, "<")
+    .replace(/\\rangle/g, ">")
     .replace(/\\mathrm\{e\}/g, "e")
     .replace(/\\operatorname\{([^{}]+)\}/g, "\\$1")
     .replace(/\\ /g, " ")
@@ -137,12 +187,61 @@ function extractScripts(value, marker) {
   return scripts.filter((item) => item.value);
 }
 
-function countParentheses(value) {
+function countDelimiters(value, open, close) {
   const source = normalizeForScan(value);
   return {
-    open: (source.match(/\(/g) || []).length,
-    close: (source.match(/\)/g) || []).length,
+    open: (source.match(new RegExp(`\\${open}`, "g")) || []).length,
+    close: (source.match(new RegExp(`\\${close}`, "g")) || []).length,
   };
+}
+
+function getDelimiterBalanceIssues(value) {
+  const source = normalizeForScan(value);
+  const checks = [
+    { type: "unbalanced_parentheses", label: "parentheses", open: "(", close: ")" },
+    { type: "unbalanced_brackets", label: "brackets", open: "[", close: "]" },
+    { type: "unbalanced_braces", label: "braces", open: "{", close: "}" },
+  ];
+
+  return checks.flatMap((check) => {
+    const counts = countDelimiters(source, check.open, check.close);
+    if (counts.open === counts.close) return [];
+    return [{
+      type: check.type,
+      severity: "high",
+      critical: true,
+      message: `The extracted LaTeX has unbalanced ${check.label}.`,
+    }];
+  });
+}
+
+function getLatexRenderIssue(latex) {
+  if (!latex) return null;
+  try {
+    katex.renderToString(latex, {
+      throwOnError: true,
+      strict: "ignore",
+      displayMode: true,
+    });
+    return null;
+  } catch (error) {
+    return {
+      type: "malformed_latex",
+      severity: "high",
+      critical: true,
+      message: `The extracted LaTeX could not render cleanly: ${error.message}`,
+    };
+  }
+}
+
+function hasUncertaintyMarker(value) {
+  return /(?:\[\?\]|<\s*unclear\s*>|\bunclear\b|\bunreadable\b|\billegible\b|\bmissing\b|\?\?\?|\[blank\]|\[missing\])/iu.test(value);
+}
+
+function looksTruncated(value) {
+  const source = safeString(value);
+  return /(?:\.\.\.|…)$/.test(source)
+    || /(?:where|with|and|=|,|:|;|\\frac|\\sqrt|\\left|\\right)\s*$/iu.test(source);
 }
 
 function normalizeForDistance(value) {
@@ -219,6 +318,49 @@ function hasFunctionArgumentGroup(value) {
   return /\\(?:sin|cos|tan|sec|csc|cot|ln|log|exp)\(/u.test(source);
 }
 
+function extractFunctionCalls(value) {
+  const source = normalizeForScan(value);
+  const calls = [];
+  const pattern = /\\(sin|cos|tan|sec|csc|cot|ln|log|exp)\(/gu;
+  let match;
+
+  while ((match = pattern.exec(source))) {
+    let cursor = pattern.lastIndex;
+    let depth = 1;
+    let argument = "";
+    while (cursor < source.length && depth > 0) {
+      const char = source[cursor];
+      if (char === "(") {
+        depth += 1;
+        argument += char;
+      } else if (char === ")") {
+        depth -= 1;
+        if (depth > 0) argument += char;
+      } else {
+        argument += char;
+      }
+      cursor += 1;
+    }
+    if (depth === 0) {
+      calls.push(`${match[1].toLowerCase()}:${compactScript(argument)}`);
+    }
+  }
+
+  return calls;
+}
+
+function compareFunctionCalls(text, latex) {
+  const latexCalls = new Set(extractFunctionCalls(latex));
+  return extractFunctionCalls(text)
+    .filter((call) => !latexCalls.has(call))
+    .map((call) => ({
+      type: "parentheses_loss",
+      severity: "high",
+      critical: true,
+      message: `A function argument may have changed or lost parentheses near ${call.split(":")[0]}.`,
+    }));
+}
+
 function hasTheoremSensitiveTerms(value) {
   return /\b(boundary|orientation|oriented|normal|outward|inward|clockwise|counterclockwise|surface|flux|curl|divergence|closed)\b/iu.test(value);
 }
@@ -229,12 +371,18 @@ function parseOcrConfidence(value) {
   return Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : null;
 }
 
+function getOcrReviewThreshold() {
+  const threshold = Number(process.env.OCR_REVIEW_CONFIDENCE_THRESHOLD);
+  return Number.isFinite(threshold) ? Math.max(0, Math.min(100, threshold)) : 35;
+}
+
 export function validateExtraction({
   extractedProblemText = "",
   extractedProblemLatex = "",
   ocrConfidence = null,
   modelConfidence = null,
   modelIssues = [],
+  textCleanup = null,
 } = {}) {
   const text = safeString(extractedProblemText);
   const latex = safeString(extractedProblemLatex);
@@ -242,11 +390,10 @@ export function validateExtraction({
   const latexExponents = extractScripts(latex, "^");
   const textSubscripts = extractScripts(text, "_");
   const latexSubscripts = extractScripts(latex, "_");
-  const textParens = countParentheses(text);
-  const latexParens = countParentheses(latex);
   const differenceRatio = levenshteinRatio(text, latex);
   const confidenceInput = parseOcrConfidence(ocrConfidence);
   const modelConfidenceInput = parseOcrConfidence(modelConfidence);
+  const reviewThreshold = getOcrReviewThreshold();
   const issues = [
     ...(Array.isArray(modelIssues) ? modelIssues.map((issue) => ({
       type: safeString(issue?.type) || "ocr_unclear",
@@ -257,15 +404,48 @@ export function validateExtraction({
     ...compareScripts(textExponents, latexExponents, "exponent_loss"),
     ...compareScripts(textSubscripts, latexSubscripts, "subscript_loss"),
   ];
+  const renderIssue = getLatexRenderIssue(latex);
 
-  if ((textParens.open > latexParens.open) || (textParens.close > latexParens.close)) {
+  if (!latex || latex.length < 3) {
     issues.push({
-      type: "parentheses_loss",
+      type: "empty_extraction",
       severity: "high",
       critical: true,
-      message: "Parentheses in the text transcription may be missing from the LaTeX extraction.",
+      message: "The extracted LaTeX is empty or too short to solve.",
     });
   }
+
+  if (renderIssue) issues.push(renderIssue);
+  issues.push(...getDelimiterBalanceIssues(latex));
+
+  if (hasUncertaintyMarker(text) || hasUncertaintyMarker(latex)) {
+    issues.push({
+      type: "explicit_uncertainty",
+      severity: "high",
+      critical: true,
+      message: "The extraction contains an explicit uncertainty or unreadable marker.",
+    });
+  }
+
+  if (looksTruncated(text) || looksTruncated(latex)) {
+    issues.push({
+      type: "truncated_extraction",
+      severity: "high",
+      critical: true,
+      message: "The extracted problem appears incomplete or truncated.",
+    });
+  }
+
+  if (textCleanup?.substantial) {
+    issues.push({
+      type: "ocr_text_cleanup_review",
+      severity: "medium",
+      critical: false,
+      message: "OCR spacing was repaired before solving; review the cleaned text if anything looks off.",
+    });
+  }
+
+  issues.push(...compareFunctionCalls(text, latex));
 
   if (hasFunctionArgumentGroup(text) && !hasFunctionArgumentGroup(latex)) {
     issues.push({
@@ -305,37 +485,30 @@ export function validateExtraction({
     });
   }
 
-  const totalSuperscripts = Math.max(textExponents.length, latexExponents.length);
-  if (totalSuperscripts >= 3) {
-    issues.push({
-      type: "many_superscripts",
-      severity: "medium",
-      critical: false,
-      message: "This extraction contains several superscripts; review powers before trusting the solution.",
-    });
-  }
-
-  if (confidenceInput !== null && confidenceInput < 70) {
+  if (confidenceInput !== null && confidenceInput < reviewThreshold) {
     issues.push({
       type: "low_ocr_confidence",
-      severity: confidenceInput < 45 ? "high" : "medium",
-      critical: confidenceInput < 60,
+      severity: "high",
+      critical: true,
       message: `OCR confidence is ${Math.round(confidenceInput)}%.`,
     });
   }
 
-  if (differenceRatio > 0.34) {
+  if (differenceRatio > 0.62 && !renderIssue) {
     issues.push({
       type: "text_latex_mismatch",
-      severity: differenceRatio > 0.5 ? "high" : "medium",
-      critical: differenceRatio > 0.5,
-      message: "The plain-text transcription and LaTeX extraction differ significantly.",
+      severity: "medium",
+      critical: false,
+      message: "The plain-text transcription and rendered LaTeX may describe different structures.",
     });
   }
 
   const penalty = issues.reduce((total, issue) => total + (issue.severity === "high" ? 28 : 14), 0);
+  const effectiveOcrConfidence = confidenceInput !== null && confidenceInput < 35
+    ? confidenceInput
+    : 100;
   const baseConfidence = Math.min(
-    confidenceInput ?? 100,
+    effectiveOcrConfidence,
     modelConfidenceInput ?? 100,
     92
   );
@@ -362,6 +535,14 @@ export function validateExtraction({
       textSubscripts: textSubscripts.length,
       latexSubscripts: latexSubscripts.length,
       differenceRatio: Number(differenceRatio.toFixed(3)),
+      textCleanup: textCleanup
+        ? {
+            changed: Boolean(textCleanup.changed),
+            substantial: Boolean(textCleanup.substantial),
+            changedCharacters: Number(textCleanup.changedCharacters || 0),
+            changeRatio: Number(textCleanup.changeRatio || 0),
+          }
+        : null,
     },
   };
 }

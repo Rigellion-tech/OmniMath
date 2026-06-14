@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Columns2, Eye, LayoutPanelTop } from "lucide-react";
 import KeyboardShortcutsModal from "./KeyboardShortcutsModal";
 import { InteractiveMathLine } from "./MathStep";
+import MathRenderer from "./MathRenderer";
 import { normalizeMathRendererInput } from "./MathRenderer";
 import SolutionFlow from "./SolutionFlow";
 import WorkspaceCompareView from "./WorkspaceCompareView";
@@ -74,6 +75,11 @@ function problemStatementLines(problem) {
 function ExtractionReview({ problem }) {
   const extractedText = problem.extractedProblemText || "";
   const extractedLatex = problem.extractedProblemLatex || "";
+  const displaySegments = Array.isArray(problem.displaySegments)
+    ? problem.displaySegments
+    : Array.isArray(problem.imageSource?.displaySegments)
+      ? problem.imageSource.displaySegments
+      : [];
   if (!extractedText && !extractedLatex) return null;
 
   const validation = problem.extractionValidation || {};
@@ -84,7 +90,7 @@ function ExtractionReview({ problem }) {
   const isWarning = status === "warning";
   const StatusIcon = isDanger || isWarning ? AlertTriangle : CheckCircle2;
   const statusLabel = isDanger ? "Review required" : isWarning ? "Review suggested" : "Extraction checked";
-  const latexLine = extractedLatex
+  const latexLine = extractedLatex && displaySegments.length === 0
     ? {
         id: "extracted-problem-latex",
         kind: "block",
@@ -128,6 +134,26 @@ function ExtractionReview({ problem }) {
         <p className="mt-3 text-sm leading-6 text-slate-200/82">
           {extractedText}
         </p>
+      )}
+
+      {displaySegments.length > 0 && (
+        <div className="mt-3 max-w-full overflow-x-auto rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 omni-scrollbar">
+          <div className="flex min-w-max flex-wrap items-baseline gap-x-2 gap-y-1 text-sm leading-7 text-slate-200/86">
+            {displaySegments.map((segment, index) => (
+              segment.type === "math" ? (
+                <span key={`math-${index}`} className="font-serif italic text-cyan-50/92">
+                  <MathRenderer
+                    math={segment.latex}
+                    fallbackText={segment.fallbackText}
+                    componentName="ExtractedProblem.segment"
+                  />
+                </span>
+              ) : (
+                <span key={`text-${index}`}>{segment.text}</span>
+              )
+            ))}
+          </div>
+        </div>
       )}
 
       {latexLine && (

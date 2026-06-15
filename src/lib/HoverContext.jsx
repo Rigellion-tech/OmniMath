@@ -58,7 +58,7 @@ function getHoverDelay(settings) {
 }
 
 function createChunkWindow(chunk, stepId, event, pinned, index, defaultDepth = "intermediate") {
-  const anchor = getEventAnchor(event);
+  const anchor = event?.anchorRect ? { element: null, rect: event.anchorRect } : getEventAnchor(event);
   const position = getEventPosition(
     anchor.rect ? { anchorRect: anchor.rect } : event,
     index,
@@ -103,7 +103,7 @@ function createChunkWindow(chunk, stepId, event, pinned, index, defaultDepth = "
 }
 
 function createSelectionWindow(selection, event, pinned, index, defaultDepth = "intermediate") {
-  const anchor = getEventAnchor(event);
+  const anchor = event?.anchorRect ? { element: null, rect: event.anchorRect } : getEventAnchor(event);
   const position = getEventPosition(
     anchor.rect ? { anchorRect: anchor.rect } : event,
     index,
@@ -141,7 +141,7 @@ function createSelectionWindow(selection, event, pinned, index, defaultDepth = "
 }
 
 function createStepWindow(step, event, pinned, index, defaultDepth = "intermediate") {
-  const anchor = getEventAnchor(event);
+  const anchor = event?.anchorRect ? { element: null, rect: event.anchorRect } : getEventAnchor(event);
   const position = getEventPosition(
     anchor.rect ? { anchorRect: anchor.rect } : event,
     index,
@@ -194,7 +194,7 @@ function createStepWindow(step, event, pinned, index, defaultDepth = "intermedia
 
 function createConceptWindow(conceptId, event, pinned, index, defaultDepth = "intermediate") {
   const concept = getConceptById(conceptId);
-  const anchor = getEventAnchor(event);
+  const anchor = event?.anchorRect ? { element: null, rect: event.anchorRect } : getEventAnchor(event);
   const size = pinned ? { width: 300, height: 180 } : DEFAULT_QUICK_TOOLTIP_SIZE;
   const position = getEventPosition(anchor.rect ? { anchorRect: anchor.rect } : event, index, size);
 

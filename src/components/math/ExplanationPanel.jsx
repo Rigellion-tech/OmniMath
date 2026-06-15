@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { GripHorizontal, Loader2, Pin, Send, X } from "lucide-react";
 import InlineMath from "./InlineMath";
@@ -704,9 +704,9 @@ function FloatingWindow({ item, index, problem, getToken }) {
         </div>
       </div>
 
-      <div className="omni-scrollbar max-h-[330px] space-y-3 overflow-y-auto px-3.5 py-3.5">
+      <div className="omni-scrollbar max-h-[330px] space-y-3 overflow-y-auto overflow-x-hidden px-3.5 py-3.5">
         {item.display && (
-          <div className="max-w-full overflow-x-auto border-l border-teal-300/25 py-1 pl-3 font-serif text-lg italic leading-8 text-teal-50 omni-scrollbar">
+          <div className="omni-math-block border-l border-teal-300/25 py-1 pl-3 font-serif text-lg italic leading-8 text-teal-50 omni-scrollbar">
             <InlineMath math={item.display} />
           </div>
         )}
@@ -741,6 +741,8 @@ function FloatingWindow({ item, index, problem, getToken }) {
 export function ExplanationPopover() {
   const { explanationLevel, hoverLens, holdHoverLens, releaseHoverLens } = useHover();
   const { getToken } = useAuthToken();
+  const tooltipRef = useRef(null);
+  const [adjustedPosition, setAdjustedPosition] = useState(null);
   const hoverDepth = explanationLevel >= 2 ? "intermediate" : "beginner";
   const lazyState = useLazyExplanation(
     hoverLens,
@@ -750,6 +752,62 @@ export function ExplanationPopover() {
     Boolean(hoverLens),
     hoverDepth
   );
+
+  useLayoutEffect(() => {
+    setAdjustedPosition(null);
+  }, [hoverLens?.id, hoverLens?.x, hoverLens?.y]);
+
+  useLayoutEffect(() => {
+    const tooltip = tooltipRef.current;
+    const anchor = hoverLens?.anchor;
+    if (!tooltip || !anchor) return;
+
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const intersects = (left, right) => !(
+      left.right <= right.left
+      || left.left >= right.right
+      || left.bottom <= right.top
+      || left.top >= right.bottom
+    );
+
+    if (!intersects(tooltipRect, anchor)) return;
+
+    const gap = 12;
+    const padding = 12;
+    const viewport = {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
+    const size = {
+      width: tooltipRect.width,
+      height: tooltipRect.height,
+    };
+    const clamp = (x, y) => ({
+      x: Math.min(Math.max(padding, x), Math.max(padding, viewport.width - size.width - padding)),
+      y: Math.min(Math.max(padding, y), Math.max(padding, viewport.height - size.height - padding)),
+    });
+    const candidates = [
+      clamp(anchor.right + gap, anchor.top),
+      clamp(anchor.left - size.width - gap, anchor.top),
+      clamp(anchor.left + anchor.width / 2 - size.width / 2, anchor.bottom + gap),
+      clamp(anchor.left + anchor.width / 2 - size.width / 2, anchor.top - size.height - gap),
+    ];
+    const next = candidates.find((candidate) => {
+      const rect = {
+        left: candidate.x,
+        right: candidate.x + size.width,
+        top: candidate.y,
+        bottom: candidate.y + size.height,
+      };
+      return !intersects(rect, anchor);
+    }) || candidates[0];
+
+    setAdjustedPosition((current) => (
+      current && Math.abs(current.x - next.x) < 1 && Math.abs(current.y - next.y) < 1
+        ? current
+        : next
+    ));
+  }, [hoverLens]);
 
   if (!hoverLens) return null;
 
@@ -767,12 +825,16 @@ export function ExplanationPopover() {
 
   return (
     <motion.div
+      ref={tooltipRef}
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 4 }}
       transition={{ duration: 0.14 }}
-      className="omni-quick-tooltip fixed z-[80] max-w-[260px] rounded-xl px-3 py-2"
-      style={{ left: hoverLens.x, top: hoverLens.y }}
+      className="omni-quick-tooltip fixed z-[80] max-w-[280px] rounded-xl px-3 py-2"
+      style={{
+        left: adjustedPosition?.x ?? hoverLens.x,
+        top: adjustedPosition?.y ?? hoverLens.y,
+      }}
       onMouseEnter={holdHoverLens}
       onMouseMove={holdHoverLens}
       onMouseLeave={releaseHoverLens}
@@ -788,7 +850,7 @@ export function ExplanationPopover() {
           {lazyState.error}
         </div>
       ) : (
-        <div className="omni-math-text text-xs leading-5 text-slate-100/80">
+        <div className="omni-math-text max-w-full overflow-x-auto text-xs leading-5 text-slate-100/80 omni-scrollbar">
           <MathText>{lazyContent}</MathText>
         </div>
       )}

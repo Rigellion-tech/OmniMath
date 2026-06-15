@@ -16,6 +16,8 @@ node_modules
 dist
 dist-ssr
 *.local
+test-artifacts/
+.cache/
 
 # Editor directories and files
 .vscode/*

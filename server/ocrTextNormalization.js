@@ -1,5 +1,6 @@
 import katex from "katex";
 import { renderMathLatex } from "./mathAnnotator.js";
+import { createMathNode, shouldPreserveLatex, traceMathStage } from "../src/lib/mathNode.js";
 
 function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -14,6 +15,16 @@ function countChangedCharacters(left, right) {
   return { changed, max };
 }
 
+function normalizeOcrMathPhrases(value = "") {
+  return String(value || "")
+    .replace(/\be\s+to\s+the\s+([xyz])\s+squared\b/gi, (_, variable) => `e^{${variable.toLowerCase()}^2}`)
+    .replace(/\b([xyz])\s+squared\b/gi, (_, variable) => `${variable.toLowerCase()}^2`)
+    .replace(/\b([xyz])\s+cubed\b/gi, (_, variable) => `${variable.toLowerCase()}^3`)
+    .replace(/\bsin\s+([A-Za-z][A-Za-z0-9]*)\b/gi, (_, argument) => `\\sin(${argument})`)
+    .replace(/\bcos\s+([A-Za-z][A-Za-z0-9]*)\b/gi, (_, argument) => `\\cos(${argument})`)
+    .replace(/\bln\s+([A-Za-z0-9]+)\b/gi, (_, argument) => `\\ln(${argument})`);
+}
+
 export function normalizeExtractedProblemText(value = "") {
   const original = safeString(value);
   if (!original) {
@@ -26,7 +37,7 @@ export function normalizeExtractedProblemText(value = "") {
     };
   }
 
-  let text = original
+  let text = normalizeOcrMathPhrases(original)
     .replace(/\bLet([A-Z])be\b/g, "Let $1 be")
     .replace(/\bwhere([A-Z])\b/g, "where $1")
     .replace(/\b([Cc]urve\s+is)([A-Z])\b/g, "$1 $2")
@@ -64,7 +75,7 @@ export function normalizeExtractedProblemText(value = "") {
 }
 
 function normalizeMathChunk(value = "") {
-  let text = safeString(value)
+  let text = normalizeOcrMathPhrases(safeString(value))
     .replace(/∬/g, "\\iint")
     .replace(/∫/g, "\\int")
     .replace(/∇/g, "\\nabla")
@@ -119,12 +130,21 @@ function pushText(segments, text) {
 function pushMath(segments, text) {
   const source = safeString(text);
   if (!source) return;
-  const normalized = normalizeMathChunk(source);
+  const normalized = shouldPreserveLatex(source)
+    ? createMathNode(source, { stage: "ocr-normalization" }).latex
+    : normalizeMathChunk(source);
+  traceMathStage(
+    "OCR normalization",
+    source,
+    normalized,
+    shouldPreserveLatex(source) ? "preserved immutable LaTeX" : "unicode/plain OCR math repair"
+  );
   const validation = validateLatex(normalized);
   segments.push({
     type: "math",
     text: source,
     latex: validation.latex,
+    mathNode: createMathNode(validation.latex, { stage: "ocr-display" }),
     fallbackText: source,
     renderIssue: validation.renderIssue,
   });

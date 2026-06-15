@@ -1,3 +1,5 @@
+import { normalizeLatexForKatex, normalizeLatexTransport, shouldPreserveLatex, traceMathStage } from "./mathNode.js";
+
 const GREEK_COMMANDS = new Map([
   ["alpha", "\\alpha"],
   ["beta", "\\beta"],
@@ -459,7 +461,7 @@ function explainToken(role, latex, expressionKey) {
 }
 
 function createNode({ latex, role, idPrefix, index, start = 0, end = null, expressionKey, children = [] }) {
-  const normalizedLatex = normalizeMathText(latex);
+  const normalizedLatex = normalizeMathValue(latex);
   const explanation = explainToken(role, normalizedLatex, expressionKey);
   const id = `${idPrefix}-${index}-${cleanIdPart(normalizedLatex || role)}`;
   return {
@@ -787,46 +789,11 @@ function renderFunctionName(name) {
   return FUNCTION_NAMES.has(normalized) ? `\\${normalized}` : normalized;
 }
 
-function normalizeExistingLatexForRender(value) {
-  const protectedText = protectTextCommands(normalizeLatexFunctionSpacing(normalizeEscapedLatexInput(value))
-    .replace(/\r?\n+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim());
-
-  const normalized = protectedText.text
-    .replace(/<=/g, "\\le")
-    .replace(/>=/g, "\\ge")
-    .replace(/\\([xyz])\b/g, "$1")
-    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
-    .replace(/\\sqrt(?=([0-9]|\\[a-zA-Z]))(\\[a-zA-Z]+|[0-9]+)/g, "\\sqrt{$2}")
-    .replace(/(?<!\\)\bd(theta|phi|rho|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/gi, (match, name) => `d\\${name.toLowerCase()}`)
-    .replace(/(?<!\\)\b(sin|cos|tan|sec|csc|cot|log|ln|exp)\(([^()]+)\)/gi, (_, fn, arg) => `\\${fn.toLowerCase()}{${renderMathLatex(arg)}}`)
-    .replace(/(?<!\\)\b(sin|cos|tan|sec|csc|cot|log|ln|exp)\b/gi, (_, fn) => `\\${fn.toLowerCase()}`)
-    .replace(/(?<!\\)\b(theta|phi|rho|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/gi, (match) => GREEK_COMMANDS.get(match.toLowerCase()) || match)
-    .replace(/(?<!\\)(?<![,;:])\s+d(\\[a-zA-Z]+|[a-zA-Z])\b/g, "\\,d$1")
-    .replace(/(?<!\\)([a-zA-Z0-9}])d(\\[a-zA-Z]+)\b/g, "$1\\,d$2")
-    .replace(/(?<!\\)([a-zA-Z0-9}])d([a-zA-Z])\b/g, "$1\\,d$2")
-    .replace(/\s+/g, "")
-    .replace(/\\langle(?=[A-Za-z0-9\\])/g, "\\langle ")
-    .replace(/(?<=[A-Za-z0-9}])\\rangle/g, " \\rangle")
-    .replace(/\\int(?=[a-zA-Z0-9\\])/g, "\\int ")
-    .replace(/\\(cdot|times)(?=[A-Za-z0-9])/g, "\\$1 ")
-    .replace(new RegExp(`\\\\(${FUNCTION_NAME_PATTERN})([a-zA-Z0-9])`, "g"), "\\$1 $2");
-
-  return spaceAfterTextCommands(protectedText.restore(normalized));
-}
-
-function isLikelyExistingLatex(value) {
-  return /\\(int|iint|iiint|frac|sqrt|left|right|sin|cos|tan|sec|csc|cot|log|ln|exp|nabla|cdot|times|mathbf|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega|,|;|!)/.test(normalizeEscapedLatexInput(value));
-}
-
-function shouldPreserveExistingLatex(value) {
-  const text = normalizeEscapedLatexInput(value);
-  if (!isLikelyExistingLatex(text)) return false;
-  if (/\\(frac|left|right)/.test(text)) {
-    return true;
-  }
-  return !/[^\\]\//.test(text);
+function normalizeMathValue(value = "") {
+  const input = normalizeEscapedLatexInput(value);
+  return shouldPreserveLatex(input)
+    ? normalizeLatexTransport(input)
+    : normalizeMathText(input);
 }
 
 function renderImplicitProduct(parts, depth) {
@@ -882,8 +849,8 @@ function renderDerivativeLatex(text, depth) {
 }
 
 function renderLatexForKatex(value, depth = 0) {
-  if (depth === 0 && shouldPreserveExistingLatex(value)) {
-    return normalizeExistingLatexForRender(value);
+  if (depth === 0 && shouldPreserveLatex(value)) {
+    return normalizeLatexForKatex(normalizeEscapedLatexInput(value));
   }
 
   if (depth > 12) return normalizeMathText(value);
@@ -957,8 +924,17 @@ function renderLatexForKatex(value, depth = 0) {
 }
 
 export function renderMathLatex(value = "") {
+  const input = normalizeEscapedLatexInput(value);
+  if (shouldPreserveLatex(input)) {
+    const preserved = normalizeLatexForKatex(input);
+    traceMathStage("Markdown conversion", value, preserved, "preserved immutable LaTeX");
+    return preserved;
+  }
+
   try {
-    return renderLatexForKatex(normalizeLatexFunctionSpacing(normalizeEscapedLatexInput(value)));
+    const rendered = renderLatexForKatex(normalizeLatexFunctionSpacing(input));
+    traceMathStage("Markdown conversion", value, rendered, "plain text math repair");
+    return rendered;
   } catch (error) {
     console.error("Failed to normalize render math:", { value, error });
     return normalizeMathText(normalizeEscapedLatexInput(value));
@@ -1028,7 +1004,7 @@ function groupDifferentials(nodes, idPrefix, expressionKey) {
 }
 
 function productChildRole(value) {
-  const normalized = stripWrapping(normalizeMathText(value));
+  const normalized = stripWrapping(normalizeMathValue(value));
   if (readKnownFunctionCall(normalized)?.token === normalized) return "function";
   if (parseFraction(normalized) || parseSlashFraction(normalized)) return "fraction";
   if (findPowerSplit(normalized)?.endIndex === normalized.length) return "power";
@@ -1038,7 +1014,7 @@ function productChildRole(value) {
 
 function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
   if (depth > 4) return [];
-  const normalized = stripWrapping(normalizeMathText(text));
+  const normalized = stripWrapping(normalizeMathValue(text));
   if (!normalized) return [];
 
   const relations = splitTopLevelRelations(normalized);
@@ -1173,7 +1149,7 @@ function inferCompoundRole(text, preferredRole) {
   if (preferredRole && preferredRole !== "other") return preferredRole;
   if (/\\le|\\ge|<=|>=|≤|≥|<|>/.test(text)) return "bound";
   if (/=/.test(text)) return "equation";
-  if (/\\frac/.test(text) || parseSlashFraction(stripWrapping(normalizeMathText(text)))) return "fraction";
+  if (/\\frac/.test(text) || parseSlashFraction(stripWrapping(normalizeMathValue(text)))) return "fraction";
   if (/\\sqrt/.test(text)) return "radical";
   if (/\\,|\\;|\\cdot|·/.test(text)) return "product";
   if (/\^/.test(text) && findPowerSplit(text)?.endIndex === text.length) return "power";
@@ -1188,7 +1164,7 @@ function inferCompoundRole(text, preferredRole) {
 }
 
 function parseNode(text, preferredRole, idPrefix, index, start, expressionKey, depth) {
-  const normalized = normalizeMathText(text);
+  const normalized = normalizeMathValue(text);
   const role = inferCompoundRole(normalized, preferredRole);
   const children = parseExpressionChildren(normalized, `${idPrefix}-${index}`, expressionKey, depth);
   return createNode({
@@ -1203,7 +1179,7 @@ function parseNode(text, preferredRole, idPrefix, index, start, expressionKey, d
 }
 
 export function annotateExpression({ id = "expr-1", latex = "", role = "other", problemId = "problem" } = {}) {
-  const normalizedLatex = normalizeMathText(latex);
+  const normalizedLatex = normalizeMathValue(latex);
   const expressionKey = `${problemId}:${normalizedLatex}`;
   const rootRole = inferCompoundRole(normalizedLatex, role);
   let children = [];
@@ -1251,12 +1227,12 @@ function tokenToChunkPart(token) {
 }
 
 function tokenToLineToken(token, fallbackId) {
-  const display = normalizeMathText(token?.latex || token?.display || token?.text || "");
+  const display = normalizeMathValue(token?.latex || token?.display || token?.text || "");
   const explanation = explainToken(token?.role || inferCompoundRole(display), display, "line-token");
   return {
     id: token?.id || fallbackId,
     display,
-    latex: normalizeMathText(token?.latex || display),
+    latex: normalizeMathValue(token?.latex || display),
     text: normalizeDisplayText(token?.text || displayText(display)),
     role: token?.role || inferCompoundRole(display),
     short: token?.short || token?.label || explanation.short,
@@ -1346,7 +1322,7 @@ function normalizeStepLines(step, fallbackChunks) {
       kind: line?.kind || (line?.latex ? "math" : "text"),
       role: line?.role || "other",
       text: normalizeDisplayText(line?.text || ""),
-      latex: line?.latex ? normalizeMathText(line.latex) : "",
+      latex: line?.latex ? normalizeMathValue(line.latex) : "",
       tokens: Array.isArray(line?.tokens)
         ? line.tokens.map((token, tokenIndex) => normalizeLineToken(
             token,
@@ -1383,7 +1359,7 @@ function chunkDisplayValue(chunk) {
   return chunk?.display ?? chunk?.latex ?? chunk?.text ?? "";
 }
 
-function withChunkRenderMetadata(chunk, normalizedLatex = normalizeMathText(chunkDisplayValue(chunk))) {
+function withChunkRenderMetadata(chunk, normalizedLatex = normalizeMathValue(chunkDisplayValue(chunk))) {
   const originalDisplay = String(chunk?.originalDisplay ?? chunkDisplayValue(chunk) ?? "");
   return {
     ...chunk,
@@ -1395,13 +1371,13 @@ function withChunkRenderMetadata(chunk, normalizedLatex = normalizeMathText(chun
 }
 
 function normalizeExistingPart(part, fallbackId) {
-  const display = normalizeMathText(part?.display || part?.latex || part?.text || "");
+  const display = normalizeMathValue(part?.display || part?.latex || part?.text || "");
   const explanation = explainToken(part?.role || inferCompoundRole(display), display, "existing");
   return {
     ...part,
     id: part?.id || fallbackId,
     display,
-    latex: normalizeMathText(part?.latex || display),
+    latex: normalizeMathValue(part?.latex || display),
     text: normalizeDisplayText(part?.text || displayText(display)),
     role: part?.role || inferCompoundRole(display),
     short: part?.short || explanation.short,
@@ -1426,7 +1402,7 @@ function expressionFromChunk(problemId, step, chunk, chunkIndex) {
 function normalizeExpressions(problemId, step, fallbackChunks) {
   if (Array.isArray(step.expressions) && step.expressions.length > 0) {
     return step.expressions.map((expression, expressionIndex) => {
-      const latex = normalizeMathText(expression?.latex || fallbackChunks[expressionIndex]?.display || step.math || "");
+      const latex = normalizeMathValue(expression?.latex || fallbackChunks[expressionIndex]?.display || step.math || "");
       const annotated = annotateExpression({
         id: expression?.id || `${step.id}-expr-${expressionIndex + 1}`,
         latex,
@@ -1459,8 +1435,8 @@ export function annotateMathExplanation(value) {
     description: normalizeDisplayText(value.description || ""),
     summary: normalizeDisplayText(value.summary || value.description || value.explanations?.intermediate || ""),
     originalProblem: value.originalProblem || value.problem || value.expression || "",
-    expression: value.expression ? normalizeMathText(value.expression) : value.expression,
-    finalAnswer: value.finalAnswer ? normalizeMathText(value.finalAnswer) : value.finalAnswer,
+    expression: value.expression ? normalizeMathValue(value.expression) : value.expression,
+    finalAnswer: value.finalAnswer ? normalizeMathValue(value.finalAnswer) : value.finalAnswer,
     steps: Array.isArray(value.steps)
       ? value.steps.map((step, stepIndex) => {
           const fallbackChunks = Array.isArray(step.chunks) && step.chunks.length > 0
@@ -1474,17 +1450,17 @@ export function annotateMathExplanation(value) {
               }];
           const hasModelExpressions = Array.isArray(step.expressions) && step.expressions.length > 0;
           const expressions = normalizeExpressions(problemId, step, fallbackChunks);
-          const expressionByLatex = new Map(expressions.map((expression) => [normalizeMathText(expression.latex), expression]));
+          const expressionByLatex = new Map(expressions.map((expression) => [normalizeMathValue(expression.latex), expression]));
           const chunks = fallbackChunks.map((chunk, chunkIndex) => {
             if (hasUsefulParts(chunk)) {
               const display = chunkDisplayValue(chunk);
-              const normalizedLatex = normalizeMathText(display);
+              const normalizedLatex = normalizeMathValue(display);
               return {
                 ...withChunkRenderMetadata(chunk, normalizedLatex),
                 parts: chunk.parts.map((part, partIndex) => normalizeExistingPart(part, `${chunk.id}-part-${partIndex + 1}`)),
               };
             }
-            const latex = normalizeMathText(chunkDisplayValue(chunk));
+            const latex = normalizeMathValue(chunkDisplayValue(chunk));
             const expression = expressionByLatex.get(latex) || expressions[chunkIndex] || expressionFromChunk(problemId, step, chunk, chunkIndex);
             const root = expression.tokens?.[0];
             const parts = Array.isArray(root?.children) && root.children.length > 0
@@ -1499,7 +1475,7 @@ export function annotateMathExplanation(value) {
             ...step,
             label: normalizeDisplayText(step.label || step.title || `Step ${stepIndex + 1}`),
             title: normalizeDisplayText(step.title || step.label),
-            math: step.math ? normalizeMathText(step.math) : step.math,
+            math: step.math ? normalizeMathValue(step.math) : step.math,
             summary: normalizeDisplayText(step.summary || ""),
             plainExplanation: normalizeDisplayText(step.plainExplanation || step.summary),
             expressions,

@@ -361,6 +361,47 @@ function compareFunctionCalls(text, latex) {
     }));
 }
 
+function extractLatexCommands(value) {
+  const source = normalizeParenthesizedScripts(normalizeUnicodeScripts(value))
+    .replace(/∭/g, "\\iiint")
+    .replace(/∬/g, "\\iint")
+    .replace(/∫/g, "\\int")
+    .replace(/∇/g, "\\nabla")
+    .replace(/×/g, "\\times")
+    .replace(/⋅|·/g, "\\cdot")
+    .replace(/≤/g, "\\le")
+    .replace(/≥/g, "\\ge")
+    .replace(/(?<!\\)\b(sin|cos|tan|sec|csc|cot|ln|log|exp)\s*\(/gi, "\\$1(")
+    .replace(/\\operatorname\{([^{}]+)\}/g, "\\$1");
+  return Array.from(source.matchAll(/\\[a-zA-Z]+/gu), (match) => match[0]);
+}
+
+function compareLatexCommands(text, latex) {
+  const latexCommands = new Set(extractLatexCommands(latex));
+  const strippedLatex = normalizeForScan(latex).replace(/\\/g, "");
+  return extractLatexCommands(text)
+    .filter((command) => !latexCommands.has(command))
+    .map((command) => ({
+      type: "command_stripping",
+      severity: "high",
+      critical: true,
+      message: strippedLatex.includes(command.slice(1).toLowerCase())
+        ? `LaTeX command ${command} appears to have lost its backslash.`
+        : `LaTeX command ${command} is missing from the extracted LaTeX.`,
+    }));
+}
+
+function getMalformedCommandIssues(value) {
+  const source = safeString(value);
+  const malformed = source.match(/\\(?:iiint|iint|oint|int|quad|langle|rangle|sin|cos|tan|sec|csc|cot|log|ln|exp|notin|to)(?=[A-Za-z0-9])|\\le(?=(?!ft)[A-Za-z0-9])|\\ge(?=(?!q)[A-Za-z0-9])|\\in(?=(?!t|fty)[A-Za-z0-9])/gu) || [];
+  return [...new Set(malformed)].map((command) => ({
+    type: "malformed_command",
+    severity: "high",
+    critical: true,
+    message: `LaTeX command ${command} is merged with the following token.`,
+  }));
+}
+
 function hasTheoremSensitiveTerms(value) {
   return /\b(boundary|orientation|oriented|normal|outward|inward|clockwise|counterclockwise|surface|flux|curl|divergence|closed)\b/iu.test(value);
 }
@@ -403,6 +444,8 @@ export function validateExtraction({
     })) : []),
     ...compareScripts(textExponents, latexExponents, "exponent_loss"),
     ...compareScripts(textSubscripts, latexSubscripts, "subscript_loss"),
+    ...compareLatexCommands(text, latex),
+    ...getMalformedCommandIssues(latex),
   ];
   const renderIssue = getLatexRenderIssue(latex);
 
@@ -512,12 +555,12 @@ export function validateExtraction({
     modelConfidenceInput ?? 100,
     92
   );
-  const confidence = Math.max(0, Math.min(100, Math.round(baseConfidence - penalty)));
+  const mathIntegrityScore = Math.max(0, Math.min(100, Math.round(baseConfidence - penalty)));
   const hasHighIssue = issues.some((issue) => issue.severity === "high");
   const hasCriticalIssue = issues.some((issue) => issue.critical);
-  const tier = hasCriticalIssue || confidence < 60
+  const tier = hasCriticalIssue || mathIntegrityScore < 60
     ? "low"
-    : confidence < 85
+    : mathIntegrityScore < 85
       ? "medium"
       : "high";
 
@@ -525,7 +568,9 @@ export function validateExtraction({
     status: hasHighIssue ? "danger" : issues.length > 0 ? "warning" : "ok",
     tier,
     critical: hasCriticalIssue,
-    confidence,
+    confidence: mathIntegrityScore,
+    ocrConfidence: confidenceInput,
+    mathIntegrityScore,
     issues,
     metrics: {
       ocrConfidence: confidenceInput,

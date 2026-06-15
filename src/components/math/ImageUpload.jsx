@@ -97,7 +97,8 @@ function ExtractionReviewPanel({
 
   const issues = Array.isArray(extraction.issues) ? extraction.issues : [];
   const tier = extraction.confidenceTier || extraction.extractionValidation?.tier || "medium";
-  const confidence = Number(extraction.confidence ?? extraction.extractionValidation?.confidence ?? 0);
+  const integrity = Number(extraction.mathIntegrityScore ?? extraction.extractionValidation?.mathIntegrityScore ?? extraction.confidence ?? extraction.extractionValidation?.confidence ?? 0);
+  const ocrConfidence = Number(extraction.ocrConfidence ?? extraction.extractionValidation?.ocrConfidence ?? extraction.extractionValidation?.metrics?.ocrConfidence ?? 0);
   const isLow = tier === "low";
   const isMedium = tier === "medium";
   const showEditor = editing;
@@ -122,9 +123,16 @@ function ExtractionReviewPanel({
           <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-100/80">
             Image extraction
           </p>
-          <span className="rounded-full border border-white/[0.09] bg-white/[0.045] px-2 py-0.5 font-mono text-[10px] text-slate-200/70">
-            {confidence}% · {tier}
-          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {ocrConfidence > 0 && (
+              <span className="rounded-full border border-white/[0.09] bg-white/[0.045] px-2 py-0.5 font-mono text-[10px] text-slate-200/70">
+                OCR {ocrConfidence}%
+              </span>
+            )}
+            <span className="rounded-full border border-white/[0.09] bg-white/[0.045] px-2 py-0.5 font-mono text-[10px] text-slate-200/70">
+              Math {integrity}% · {tier}
+            </span>
+          </div>
         </div>
         <p className="mt-1.5 text-xs leading-4 text-slate-200/72">
           {statusText}

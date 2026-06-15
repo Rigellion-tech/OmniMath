@@ -109,14 +109,14 @@ function renderSegment(segment, index) {
     return (
       <InlineMath
         key={`math-${index}`}
-        math={normalizeMathToken(segment.value)}
+        math={segment.value}
         className={segment.displayMode ? "omni-block-math" : "omni-inline-math"}
         displayMode={segment.displayMode}
       />
     );
   }
 
-  return renderAutoMathText(segment.value, `text-${index}`);
+  return renderAutoMathText(normalizeDisplayText(segment.value), `text-${index}`);
 }
 
 function parseExplicitMath(text) {
@@ -146,7 +146,7 @@ function parseExplicitMath(text) {
 }
 
 export default function MathText({ children, className = "" }) {
-  const text = normalizeDisplayText(typeof children === "string" ? children : String(children ?? ""));
+  const text = typeof children === "string" ? children : String(children ?? "");
   const segments = parseExplicitMath(text);
 
   return (

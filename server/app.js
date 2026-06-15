@@ -46,6 +46,7 @@ import {
   getCachedExplanation,
   setCachedExplanation,
 } from "./explanationCache.js";
+import { traceMathStage } from "../src/lib/mathNode.js";
 import {
   createUserSessionForRequest,
   getCurrentUserData,
@@ -942,7 +943,11 @@ export async function handleExtractImageProblemRequest(req, res) {
       }
       extraction = await createImageProblemExtraction({ prompt, image });
       const rawExtractedText = extraction.extractedProblemText;
+      traceMathStage("OCR output", "", extraction.extractedProblemLatex, "model image extraction", {
+        extractedProblemText: rawExtractedText,
+      });
       const textCleanup = normalizeExtractedProblemText(rawExtractedText);
+      traceMathStage("OCR normalization", rawExtractedText, textCleanup.text || rawExtractedText, "plain OCR text spacing cleanup");
       extraction.rawExtractedText = rawExtractedText;
       extraction.extractedProblemText = textCleanup.text || rawExtractedText;
       extraction.ocrTextCleanup = textCleanup;
@@ -964,6 +969,9 @@ export async function handleExtractImageProblemRequest(req, res) {
         modelIssues: extraction.issues,
         textCleanup,
       });
+      traceMathStage("Extraction validation", extraction.extractedProblemLatex, extraction.extractedProblemLatex, "structural integrity scoring", {
+        validation: extraction.extractionValidation,
+      });
       if (display.latexMathChunks.some((chunk) => chunk.renderIssue)) {
         extraction.extractionValidation.issues.push({
           type: "render_preview_issue",
@@ -977,6 +985,8 @@ export async function handleExtractImageProblemRequest(req, res) {
       }
       logExtractionReviewDebug(extraction.extractionValidation);
       extraction.confidence = extraction.extractionValidation.confidence;
+      extraction.ocrConfidence = extraction.extractionValidation.ocrConfidence;
+      extraction.mathIntegrityScore = extraction.extractionValidation.mathIntegrityScore;
       extraction.confidenceTier = extraction.extractionValidation.tier;
       extraction.issues = extraction.extractionValidation.issues;
       extraction.imageSource = {
@@ -991,6 +1001,8 @@ export async function handleExtractImageProblemRequest(req, res) {
         latexMathChunks: extraction.latexMathChunks,
         rawExtractedLatex: extraction.extractedProblemLatex,
         confidence: extraction.confidence,
+        ocrConfidence: extraction.ocrConfidence,
+        mathIntegrityScore: extraction.mathIntegrityScore,
         confidenceTier: extraction.confidenceTier,
         issues: extraction.issues,
       };
@@ -1056,6 +1068,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
         text: problemText ? `Confirmed image extraction text: ${problemText}` : "Confirmed image extraction.",
       }],
     });
+    traceMathStage("Prompt construction", problemLatex, prompt, "insert confirmed image LaTeX into solve prompt");
     const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: getSolveMaxOutputTokens() });
     const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: getSolveMaxOutputTokens() }));
     const cacheKey = createExplanationCacheKey({
@@ -1099,19 +1112,23 @@ export async function handleSolveExtractedProblemRequest(req, res) {
           }
           try {
             result = await createMathExplanation({ prompt, originalProblem: problemLatex });
+            traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM solve response");
             result = applyLocalRulesToExplanation(result);
             validateSolutionQuality(result, { problem: problemLatex });
             source = "live AI call";
           } catch (firstError) {
             const repairPrompt = buildRepairSolvePrompt(prompt, firstError.solutionIssues || [firstError.code || firstError.message]);
             result = await createMathExplanation({ prompt: repairPrompt, originalProblem: problemLatex });
+            traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM repair solve response");
             result = applyLocalRulesToExplanation(result);
             validateSolutionQuality(result, { problem: problemLatex });
             source = "live AI repair call";
           }
         }
         validateSolutionQuality(result, { problem: problemLatex });
+        const beforeAnnotation = result.expression || result.problem || problemLatex;
         result = annotateMathExplanation(result);
+        traceMathStage("Tokenization", beforeAnnotation, result.expression || result.problem || "", "annotate explanation tokens/chunks");
         result.imageSource = {
           ...(extraction.imageSource || {}),
           imageHash: extraction.imageSource?.imageHash || extraction.imageHash || null,
@@ -1124,6 +1141,8 @@ export async function handleSolveExtractedProblemRequest(req, res) {
           finalProblemText: problemText,
           finalProblemLatex: problemLatex,
           confidence: Number(extraction.confidence ?? extraction.extractionValidation?.confidence ?? extraction.imageSource?.confidence ?? 0),
+          ocrConfidence: Number(extraction.ocrConfidence ?? extraction.extractionValidation?.ocrConfidence ?? extraction.imageSource?.ocrConfidence ?? 0),
+          mathIntegrityScore: Number(extraction.mathIntegrityScore ?? extraction.extractionValidation?.mathIntegrityScore ?? extraction.imageSource?.mathIntegrityScore ?? extraction.confidence ?? 0),
           confidenceTier: extraction.confidenceTier || extraction.extractionValidation?.tier || extraction.imageSource?.confidenceTier || "",
           issues: Array.isArray(extraction.issues)
             ? extraction.issues
@@ -1135,9 +1154,15 @@ export async function handleSolveExtractedProblemRequest(req, res) {
         result.extractedProblemLatex = result.imageSource.rawExtractedLatex;
         result.extractionValidation = extraction.extractionValidation || {
           confidence: result.imageSource.confidence,
+          ocrConfidence: result.imageSource.ocrConfidence,
+          mathIntegrityScore: result.imageSource.mathIntegrityScore,
           tier: result.imageSource.confidenceTier,
           issues: result.imageSource.issues,
         };
+        result.confidence = result.extractionValidation.confidence;
+        result.ocrConfidence = result.extractionValidation.ocrConfidence;
+        result.mathIntegrityScore = result.extractionValidation.mathIntegrityScore;
+        result.confidenceTier = result.extractionValidation.tier;
 
         const normalizedUsage = normalizeOpenAiUsage(result._aiUsage, 0);
         usage = await settleTokenUsage(
@@ -1239,6 +1264,7 @@ export async function handleExplainImageRequest(req, res) {
     }
 
     const prompt = buildMathExplanationPrompt({ problem, image: true });
+    traceMathStage("Prompt construction", problem, prompt, "insert image-upload context into image solve prompt");
     logImageUploadDebug("openai-input", {
       forwardedToOpenAI: true,
       filename: image.filename || null,
@@ -1268,16 +1294,23 @@ export async function handleExplainImageRequest(req, res) {
             throw createOpenAiRequiredError();
           } else {
             result = await createMathExplanation({ prompt, image, originalProblem: problem });
+            traceMathStage("Explanation generation", problem, result.extractedProblemLatex || result.expression || "", "LLM image solve response");
             result = applyLocalRulesToExplanation(result);
             source = "live AI call";
           }
         }
+        const beforeAnnotation = result.extractedProblemLatex || result.expression || "";
         result = annotateMathExplanation(result);
+        traceMathStage("Tokenization", beforeAnnotation, result.extractedProblemLatex || result.expression || "", "annotate image solution tokens/chunks");
         result.extractionValidation = validateExtraction({
           extractedProblemText: result.extractedProblemText,
           extractedProblemLatex: result.extractedProblemLatex || result.expression,
           ocrConfidence: fields.ocrConfidence,
         });
+        result.confidence = result.extractionValidation.confidence;
+        result.ocrConfidence = result.extractionValidation.ocrConfidence;
+        result.mathIntegrityScore = result.extractionValidation.mathIntegrityScore;
+        result.confidenceTier = result.extractionValidation.tier;
         logExtractionReviewDebug(result.extractionValidation);
         logImageUploadDebug("extracted", {
           extractedProblemText: result.extractedProblemText || "",

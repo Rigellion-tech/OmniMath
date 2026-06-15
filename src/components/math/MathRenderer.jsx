@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
-import { renderMathLatex } from "@/lib/mathAnnotator";
+import { createLatexValidationResult, createMathNode, mathNodeToLatex, normalizeLatexTransport, safeMathString, traceMathStage } from "@/lib/mathNode";
 
 const LATEX_COMMAND_PATTERN = /\\(?:iiint|iint|int|nabla|cdot|times|mathbf|frac|left|right|sqrt|sum|lim|sin|cos|tan|ln|log|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/;
 const MATH_SYMBOL_PATTERN = /[=<>^_+\-*/]|\d\s*[a-zA-Z]|[a-zA-Z]\s*\(|\b(?:dV|dx|dy|dz)\b/;
@@ -14,149 +14,24 @@ const PROSE_BOUNDARY_PATTERNS = [
   /\band(?=V\b|\s)/i,
 ];
 
-export function safeMathString(math, fallback = "") {
-  if (math === null || math === undefined) return "";
-  if (typeof math === "string" || typeof math === "number" || typeof math === "boolean") {
-    return String(math);
-  }
-  if (typeof math === "object") {
-    return String(math.latex || math.math || math.display || math.text || math.fallbackDisplay || fallback);
-  }
-  return String(math);
-}
-
 export function normalizeMathRendererInput(value = "") {
-  let text = safeMathString(value).trim();
-  let previous = "";
-
-  while (text !== previous) {
-    previous = text;
-    text = text.trim();
-    const wrappers = [
-      { pattern: /^```(?:latex|tex|math)?\s*([\s\S]*?)\s*```$/iu, replacement: "$1" },
-      { pattern: /^\\\(([\s\S]*)\\\)$/u, replacement: "$1" },
-      { pattern: /^\\\[([\s\S]*)\\\]$/u, replacement: "$1" },
-      { pattern: /^\$\$([\s\S]*)\$\$$/u, replacement: "$1" },
-      { pattern: /^\$([\s\S]*)\$$/u, replacement: "$1" },
-    ];
-    for (const { pattern, replacement } of wrappers) {
-      if (pattern.test(text)) {
-        text = text.replace(pattern, replacement).trim();
-        break;
-      }
-    }
-  }
-
-  return text.replace(/^\\displaystyle\s*/, "").trim();
-}
-
-function ensureVectorBrackets(text) {
-  let output = String(text || "");
-  output = output
-    .replace(/(?<!\\left)\\langle/g, "\\left\\langle")
-    .replace(/(?<!\\right)\\rangle/g, "\\right\\rangle");
-
-  const leftCount = (output.match(/\\left\\langle/g) || []).length;
-  const rightCount = (output.match(/\\right\\rangle/g) || []).length;
-  if (leftCount > rightCount) {
-    output = `${output}${"\\right\\rangle".repeat(leftCount - rightCount)}`;
-  }
-  if (rightCount > leftCount) {
-    output = `${"\\left\\langle".repeat(rightCount - leftCount)}${output}`;
-  }
-  return output;
+  return normalizeLatexTransport(value);
 }
 
 export function sanitizeLatex(input = "") {
-  let text = normalizeMathRendererInput(input);
-
-  text = text
-    .replace(PROBLEM_PREAMBLE_PATTERN, "")
-    .replace(/\\\\(?=([a-zA-Z]+|[,;!]))/g, () => "\\")
-    .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
-    .replace(/\\mathbf([A-Za-z])/g, "\\mathbf{$1}")
-    .replace(/\\vec\s*([A-Za-z])/g, "\\vec{$1}")
-    .replace(/\\vec([A-Za-z])/g, "\\vec{$1}")
-    .replace(/\\hat\s*([A-Za-z])/g, "\\hat{$1}")
-    .replace(/\\hat([A-Za-z])/g, "\\hat{$1}")
-    .replace(/\\mathbf\{dr\}/g, "d\\mathbf{r}")
-    .replace(/\\mathbf\{d\}r/g, "d\\mathbf{r}")
-    .replace(/\\iint\s+(?:lim\s*its|limits)\s*_\s*([A-Za-z])/gi, "\\iint_{$1}")
-    .replace(/\\int\s+(?:lim\s*its|limits)\s*_\s*([A-Za-z])/gi, "\\int_{$1}")
-    .replace(/∭/g, "\\iiint")
-    .replace(/∬/g, "\\iint")
-    .replace(/∫/g, "\\int")
-    .replace(/∇/g, "\\nabla")
-    .replace(/⋅|·/g, "\\cdot")
-    .replace(/×/g, "\\times")
-    .replace(/≤/g, "\\le")
-    .replace(/≥/g, "\\ge")
-    .replace(/≠/g, "\\ne")
-    .replace(/∞/g, "\\infty")
-    .replace(/π/g, "\\pi")
-    .replace(/θ/g, "\\theta")
-    .replace(/φ/g, "\\phi")
-    .replace(/ρ/g, "\\rho")
-    .replace(/\\([xyz])\b/g, "$1")
-    .replace(/(?<!\\)\bln(?=\s*\()/gi, "\\ln")
-    .replace(/(?<!\\)\bsin(?=\s*\()/gi, "\\sin")
-    .replace(/(?<!\\)\bcos(?=\s*\()/gi, "\\cos")
-    .replace(/(?<!\\)\btan(?=\s*\()/gi, "\\tan")
-    .replace(/(?<!\\)\barctan(?=\s*\()/gi, "\\arctan")
-    .replace(/(?<!\\)\bfrac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/gi, "\\frac{$1}{$2}")
-    .replace(/(?<!\\)\bint_/gi, "\\int_")
-    .replace(/(?<!\\)\biiint_/gi, "\\iiint_")
-    .replace(/(?<!\\)\biint_/gi, "\\iint_")
-    .replace(/<\s*/g, "\\left\\langle ")
-    .replace(/\s*>/g, " \\right\\rangle")
-    .replace(/\\langle(?![\s}])/g, "\\langle ")
-    .replace(/(?<![\s{])\\rangle/g, " \\rangle")
-    .replace(/\\text\{\s*(where|and)\s*\}/gi, (_, word) => `\\quad \\text{${word.toLowerCase()} } \\quad`)
-    .replace(/where(?=(?:\\mathbf\{?F|F)\b)/gi, "\\quad \\text{where } ")
-    .replace(/and(?=V\b)/gi, "\\quad \\text{and } ")
-    .replace(/\bwhere(?=(?:\\mathbf\{?F|F)\b)/gi, "\\quad \\text{where } ")
-    .replace(/\band(?=V\b)/gi, "\\quad \\text{and } ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return ensureVectorBrackets(text);
-}
-
-function readableMathFallback(value = "") {
-  return String(value || "")
-    .replace(/\\left|\\right/g, "")
-    .replace(/\\mathbf\{([^}]+)\}/g, "$1")
-    .replace(/\\(iint|int|nabla|times|cdot|sin|cos|tan|ln|log|langle|rangle|le|ge)\b/g, (_, command) => {
-      const replacements = {
-        iint: "∬",
-        int: "∫",
-        nabla: "∇",
-        times: "×",
-        cdot: "·",
-        langle: "<",
-        rangle: ">",
-        le: "≤",
-        ge: "≥",
-      };
-      return replacements[command] || command;
-    })
-    .replace(/[{}]/g, "")
-    .replace(/\\,/g, " ")
-    .replace(/\\/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  const node = createMathNode(input, { stage: "frontend-renderer-sanitize" });
+  const validation = createLatexValidationResult(node.latex);
+  traceMathStage(
+    "KaTeX rendering",
+    input,
+    validation.output,
+    validation.repaired ? `pre-KaTeX repair: ${validation.issues.join(",") || "clean"}` : node.normalization
+  );
+  return validation.output;
 }
 
 export function sanitizeKatexInput(input = "") {
-  return String(input || "")
-    .replace(/\\(langle|rangle)(?=[A-Za-z0-9\\])/g, "\\$1 ")
-    .replace(/\\le(?=(?!ft)[A-Za-z0-9\\])/g, "\\le ")
-    .replace(/\\ge(?=(?!q)[A-Za-z0-9\\])/g, "\\ge ")
-    .replace(/\\to(?=(?!p)[A-Za-z0-9\\])/g, "\\to ")
-    .replace(/\\notin(?=[A-Za-z0-9\\])/g, "\\notin ")
-    .replace(/\\in(?=(?!t|fty)[A-Za-z0-9\\])/g, "\\in ")
-    .replace(/\\text\{([^}]*)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ")
-    .trim();
+  return mathNodeToLatex(input);
 }
 
 export function containsLatexCommand(value = "") {
@@ -230,12 +105,13 @@ function findRegionAssignment(text) {
 }
 
 function pushMathBlock(blocks, latex, idHint) {
-  const sanitized = sanitizeLatex(latex);
-  if (!sanitized) return;
+  const node = createMathNode(latex, { idHint });
+  if (!node.latex) return;
   blocks.push({
     type: "math",
     idHint,
-    latex: sanitized,
+    latex: node.latex,
+    mathNode: node,
   });
 }
 
@@ -255,7 +131,8 @@ export function splitLatexRenderBlocks(value = "") {
 
   const boundary = findFirstProseBoundary(source);
   if (!boundary && !(source.length > 160 && /\\text\{/.test(source))) {
-    return [{ type: "math", idHint: "math", latex: sanitizeLatex(source) }];
+    const node = createMathNode(source, { idHint: "math" });
+    return [{ type: "math", idHint: "math", latex: node.latex, mathNode: node }];
   }
 
   const blocks = [];
@@ -292,7 +169,9 @@ export function splitLatexRenderBlocks(value = "") {
     pushProseBlock(blocks, tail, "tail");
   }
 
-  return blocks.length > 0 ? blocks : [{ type: "math", idHint: "math", latex: sanitizeLatex(source) }];
+  if (blocks.length > 0) return blocks;
+  const node = createMathNode(source, { idHint: "math" });
+  return [{ type: "math", idHint: "math", latex: node.latex, mathNode: node }];
 }
 
 function logMathRender(details) {
@@ -314,7 +193,7 @@ export default function MathRenderer({
   const sanitizedMath = useMemo(() => sanitizeLatex(normalizedMath), [normalizedMath]);
   const shouldRenderKatex = forceMath || looksLikeMathExpression(normalizedMath);
   const renderMath = useMemo(
-    () => (shouldRenderKatex ? sanitizeKatexInput(renderMathLatex(sanitizedMath)) : sanitizedMath),
+    () => (shouldRenderKatex ? sanitizeKatexInput(sanitizedMath) : sanitizedMath),
     [sanitizedMath, shouldRenderKatex]
   );
   const [renderError, setRenderError] = useState("");
@@ -343,29 +222,33 @@ export default function MathRenderer({
     console.debug("[omnimath:katex-input]", renderMath);
 
     try {
+      katex.renderToString(renderMath, {
+        throwOnError: true,
+        strict: "ignore",
+        displayMode,
+      });
       katex.render(renderMath, host, {
         throwOnError: true,
+        strict: "ignore",
         displayMode,
       });
       host.removeAttribute("data-math-fallback");
     } catch (error) {
       const message = error?.message || "Unknown KaTeX error";
       setRenderError(message);
-      host.textContent = readableMathFallback(fallback || rawMath || sanitizedMath || renderMath);
+      host.textContent = "";
       host.setAttribute("data-math-fallback", "true");
-      if (import.meta.env.DEV) {
-        console.error("[omnimath:math-render-error]", {
-          componentName,
-          originalInput: rawMath,
-          rawEquation: rawMath,
-          normalizedEquation: normalizedMath,
-          sanitizedEquation: sanitizedMath,
-          katexInput: renderMath,
-          displayMode,
-          message,
-          error,
-        });
-      }
+      console.error("[omnimath:math-render-error]", {
+        componentName,
+        originalInput: rawMath,
+        rawEquation: rawMath,
+        normalizedEquation: normalizedMath,
+        sanitizedEquation: sanitizedMath,
+        katexInput: renderMath,
+        displayMode,
+        message,
+        error,
+      });
     }
 
     return () => {
@@ -383,8 +266,7 @@ export default function MathRenderer({
         renderError ? "font-mono not-italic text-sm leading-6 text-amber-100/90 whitespace-pre-wrap break-words" : "",
       ].filter(Boolean).join(" ")}
       data-math-renderer="katex"
-      data-math-render-error={renderError || undefined}
-      title={renderError || undefined}
+      data-math-render-error={renderError ? "true" : undefined}
     />
   );
 }

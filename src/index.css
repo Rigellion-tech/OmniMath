@@ -251,10 +251,48 @@
 
   .omni-solution-flow {
     max-width: 62rem;
+    min-width: 0;
+    width: 100%;
+    overflow-x: clip;
   }
 
   .omni-solution-line {
     min-height: 1.8rem;
+    box-sizing: border-box;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: visible;
+    overscroll-behavior-inline: contain;
+  }
+
+  .omni-problem-preview,
+  .omni-math-block {
+    box-sizing: border-box;
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: visible;
+    overscroll-behavior-inline: contain;
+  }
+
+  .omni-problem-preview {
+    contain: inline-size;
+  }
+
+  .omni-problem-preview .katex-display,
+  .omni-math-block .katex-display {
+    max-width: 100%;
+    margin: 0;
+    text-align: left;
+  }
+
+  .omni-problem-preview .katex,
+  .omni-math-block .katex,
+  .omni-solution-line .katex {
+    max-width: 100%;
   }
 
   .omni-math-expression-list {
@@ -341,6 +379,14 @@
     box-shadow: none;
   }
 
+  .math-token {
+    box-sizing: border-box;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    vertical-align: baseline;
+  }
+
   .omni-token-selected {
     background: rgba(45, 212, 191, 0.12) !important;
     box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.22), 0 0 16px rgba(45, 212, 191, 0.14) !important;
@@ -351,6 +397,8 @@
     display: inline-flex;
     align-items: baseline;
     gap: 0;
+    max-width: 100%;
+    vertical-align: baseline;
     white-space: nowrap;
   }
 
@@ -531,6 +579,9 @@
   .math-visual-layer {
     position: relative;
     z-index: 1;
+    display: inline-block;
+    max-width: 100%;
+    vertical-align: baseline;
     pointer-events: none;
   }
 
@@ -540,6 +591,7 @@
     z-index: 2;
     display: flex;
     align-items: stretch;
+    overflow: hidden;
     pointer-events: none;
   }
 
@@ -778,10 +830,15 @@
 }
 .omni-inline-math {
   white-space: nowrap;
+  max-width: 100%;
 }
 .omni-block-math {
   display: block;
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
+}
+
+[data-math-fallback="true"] {
+  display: none !important;
 }

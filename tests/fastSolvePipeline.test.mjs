@@ -32,8 +32,8 @@ describe("fast solve pipeline", () => {
     }, { originalProblem: "" });
 
     assert.equal(explanation.originalProblem, "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf{F})\\,dV");
-    assert.equal(explanation.steps[0].math, "\\iiint_V\\nabla\\cdot(\\nabla\\times\\mathbf{F})\\,dV");
-    assert.equal(explanation.steps[1].math, "\\nabla\\cdot(\\nabla\\times\\mathbf{F})=0");
+    assert.equal(explanation.steps[0].math, "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf{F})\\,dV");
+    assert.equal(explanation.steps[1].math, "\\nabla \\cdot (\\nabla \\times \\mathbf{F})=0");
     assert.equal(explanation.finalAnswerLatex, "0");
   });
 
@@ -224,7 +224,7 @@ describe("fast solve pipeline", () => {
     assert.equal(explanation.expression.includes("\\z"), false);
     assert.equal(explanation.expression.includes("isthesolidregioninside"), false);
     assert.equal(explanation.steps[0].label, "Recall the vector calculus identity");
-    assert.equal(explanation.steps[0].math, "\\nabla\\cdot(\\nabla\\times\\mathbf{F})=0");
+    assert.equal(explanation.steps[0].math, "\\nabla \\cdot (\\nabla \\times \\mathbf{F})=0");
     assert.equal(explanation.steps[0].lines[0].text, "");
     assert.equal(explanation.steps.some((step) => /Start with the problem/i.test(step.label)), false);
     assert.equal(explanation.finalAnswerLatex, "0");

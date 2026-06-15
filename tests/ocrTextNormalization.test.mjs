@@ -31,7 +31,7 @@ test("builds display segments for the Stokes image problem without collapsed pro
   assert.match(plain, /Let S be the portion of the paraboloid/);
   assert.ok(math.some((segment) => /z=9-x/.test(segment.latex.replace(/\s+/g, ""))));
   assert.ok(math.some((segment) => /\\iint/.test(segment.latex)));
-  assert.ok(math.some((segment) => /\\mathbf\{F\}/.test(segment.latex) && /\\left\\langle/.test(segment.latex)));
+  assert.ok(math.some((segment) => /\\mathbf\{F\}/.test(segment.latex) && /\\langle/.test(segment.latex)));
   assert.equal(math.some((segment) => segment.renderIssue), false);
 });
 
@@ -47,4 +47,17 @@ test("substantial OCR cleanup marks extraction as review suggested", () => {
   assert.equal(validation.status, "warning");
   assert.equal(validation.tier, "medium");
   assert.ok(validation.issues.some((issue) => issue.type === "ocr_text_cleanup_review"));
+});
+
+test("normalizes spoken OCR math phrases before display and solving", () => {
+  const input = "Evaluate e to the x squared plus sin y where x squared plus y squared equals 9 and cos xy appears.";
+  const result = normalizeExtractedProblemText(input);
+
+  assert.equal(result.text.includes("x squared"), false);
+  assert.equal(result.text.includes("y squared"), false);
+  assert.match(result.text, /e\^\{x\^2\}/);
+  assert.match(result.text, /\\sin\(y\)/);
+  assert.match(result.text, /x\^2/);
+  assert.match(result.text, /y\^2/);
+  assert.match(result.text, /\\cos\(xy\)/);
 });

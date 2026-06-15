@@ -85,7 +85,12 @@ function ExtractionReview({ problem }) {
   const validation = problem.extractionValidation || {};
   const issues = Array.isArray(validation.issues) ? validation.issues : [];
   const status = validation.status || "ok";
-  const confidence = Number.isFinite(validation.confidence) ? validation.confidence : null;
+  const mathIntegrityScore = Number.isFinite(validation.mathIntegrityScore)
+    ? validation.mathIntegrityScore
+    : Number.isFinite(validation.confidence) ? validation.confidence : null;
+  const ocrConfidence = Number.isFinite(validation.ocrConfidence)
+    ? validation.ocrConfidence
+    : Number.isFinite(validation.metrics?.ocrConfidence) ? validation.metrics.ocrConfidence : null;
   const isDanger = status === "danger";
   const isWarning = status === "warning";
   const StatusIcon = isDanger || isWarning ? AlertTriangle : CheckCircle2;
@@ -123,9 +128,14 @@ function ExtractionReview({ problem }) {
           <StatusIcon className="h-3 w-3" />
           {statusLabel}
         </span>
-        {confidence !== null && (
+        {ocrConfidence !== null && (
           <span className="font-mono text-[11px] normal-case tracking-normal text-slate-300/60">
-            confidence {confidence}%
+            OCR {ocrConfidence}%
+          </span>
+        )}
+        {mathIntegrityScore !== null && (
+          <span className="font-mono text-[11px] normal-case tracking-normal text-slate-300/60">
+            math integrity {mathIntegrityScore}%
           </span>
         )}
       </div>
@@ -137,7 +147,7 @@ function ExtractionReview({ problem }) {
       )}
 
       {displaySegments.length > 0 && (
-        <div className="mt-3 max-w-full overflow-x-auto rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 omni-scrollbar">
+        <div className="omni-problem-preview mt-3 rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 omni-scrollbar">
           <div className="flex min-w-max flex-wrap items-baseline gap-x-2 gap-y-1 text-sm leading-7 text-slate-200/86">
             {displaySegments.map((segment, index) => (
               segment.type === "math" ? (
@@ -157,7 +167,7 @@ function ExtractionReview({ problem }) {
       )}
 
       {latexLine && (
-        <div className="mt-2 max-w-full overflow-x-auto rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 font-serif italic text-cyan-50/92 omni-scrollbar">
+        <div className="omni-problem-preview mt-2 rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 font-serif italic text-cyan-50/92 omni-scrollbar">
           <InteractiveMathLine line={latexLine} stepId="extracted-problem" />
         </div>
       )}
@@ -278,10 +288,10 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
   ]);
 
   return (
-    <section className="solution-board min-w-0">
+    <section className="solution-board min-w-0 max-w-full overflow-x-hidden">
       <div className="mb-5 grid gap-4">
         <div className="flex flex-col gap-4 border-b border-white/[0.07] pb-5 md:flex-row md:items-end md:justify-between">
-          <div className="min-w-0">
+          <div className="min-w-0 w-full max-w-full">
             <h2 className="text-2xl font-semibold tracking-normal text-cyan-50 md:text-3xl">
               {solutionTitle}
             </h2>
@@ -291,11 +301,11 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
               </p>
             )}
             {hasExpression ? (
-              <div className="mt-4 grid gap-2 border-l border-teal-300/25 py-2 pl-4">
+              <div className="omni-problem-preview mt-4 grid gap-2 border-l border-teal-300/25 py-2 pl-4">
                 {problemLines.map((line) => (
                   <div
                     key={line.id}
-                    className="max-w-full overflow-x-auto font-serif italic text-cyan-50/92 omni-scrollbar"
+                    className="omni-math-block font-serif italic text-cyan-50/92 omni-scrollbar"
                   >
                     <InteractiveMathLine line={line} stepId="problem-statement" />
                   </div>

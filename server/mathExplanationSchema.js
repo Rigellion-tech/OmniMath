@@ -1,4 +1,5 @@
 import { annotateMathExplanation, renderMathLatex } from "./mathAnnotator.js";
+import { normalizeLatexForKatex, shouldPreserveLatex, traceMathStage } from "../src/lib/mathNode.js";
 
 const REGRESSION_INTEGRAL_KEY = "\\int_0^\\infty\\frac\\ln(1+x^2)\\arctanxx(1+x^2)\\,dx";
 const REGRESSION_INTEGRAL_VALUE = 0.7546938294602481;
@@ -575,8 +576,34 @@ function normalizeGeneratedTextCommands(value = "") {
     .replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ");
 }
 
+function normalizeEscapedGeneratedLatex(value = "") {
+  let text = String(value || "");
+  let previous = "";
+  while (text !== previous) {
+    previous = text;
+    text = text
+      .replace(/\\\\(?=([a-zA-Z]+|[,;!]))/g, "\\")
+      .replace(/\\\\(?=[{}_^])/g, "\\");
+  }
+  return text;
+}
+
+function needsGeneratedLatexRepair(value = "") {
+  return /\\(?:mathbf|vec|hat)[A-Za-z]/.test(value)
+    || /\\text\{[^}]*\}(?=[A-Za-z0-9\\])/.test(value)
+    || /\\z\b/.test(value)
+    || /\\(?:iint|int)\s+(?:lim\s*its|limits)\s*_/i.test(value);
+}
+
 export function sanitizeGeneratedLatex(value = "") {
-  return normalizeGeneratedTextCommands(stripGeneratedLatexWrappers(value))
+  const stripped = normalizeEscapedGeneratedLatex(stripGeneratedLatexWrappers(value));
+  if (shouldPreserveLatex(stripped) && !needsGeneratedLatexRepair(stripped)) {
+    const preserved = normalizeLatexForKatex(stripped);
+    traceMathStage("LLM response parsing", value, preserved, "preserved immutable LaTeX");
+    return preserved;
+  }
+
+  const sanitized = normalizeGeneratedTextCommands(stripped)
     .replace(/\\\\(?=([a-zA-Z]+|[,;!]))/g, () => "\\")
     .replace(/\\mathbf\s*([A-Za-z])/g, "\\mathbf{$1}")
     .replace(/\\mathbf([A-Za-z])/g, "\\mathbf{$1}")
@@ -619,6 +646,8 @@ export function sanitizeGeneratedLatex(value = "") {
     .replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ")
     .replace(/\s+/g, " ")
     .trim();
+  traceMathStage("LLM response parsing", value, sanitized, "legacy generated LaTeX repair");
+  return sanitized;
 }
 
 function normalizeStepId(value, index) {

@@ -74,7 +74,7 @@ function solutionLinesForStep(step) {
 
 function MathLineShell({ children }) {
   return (
-    <div className="omni-solution-line max-w-full overflow-x-auto font-serif text-[18px] italic leading-8 text-cyan-50/90 omni-scrollbar md:text-[20px]">
+    <div className="omni-solution-line omni-math-block font-serif text-[18px] italic leading-8 text-cyan-50/90 omni-scrollbar md:text-[20px]">
       {children}
     </div>
   );
@@ -131,7 +131,7 @@ export function InteractiveMathLine({ line, stepId }) {
   if (hasTokens) {
     return (
       <div
-        className="omni-solution-line omni-equation-line flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[18px] leading-[1.7] md:text-[20px]"
+        className="omni-solution-line omni-equation-line flex max-w-full flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[18px] leading-[1.7] md:text-[20px]"
         data-line-role={line.role || "other"}
       >
         {showLineText && (

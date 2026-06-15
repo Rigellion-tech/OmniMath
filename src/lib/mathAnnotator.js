@@ -206,6 +206,10 @@ function spaceAfterTextCommands(value = "") {
   return String(value || "").replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ");
 }
 
+function normalizeLatexSpacingCommands(value = "") {
+  return String(value || "").replace(/\\\s+(?=\S)/g, "\\,");
+}
+
 function protectTextCommands(value = "") {
   let text = String(value || "");
   const replacements = [];
@@ -277,7 +281,7 @@ export function normalizeMathText(value = "") {
     text = text.replace(new RegExp(`(?<!\\\\)\\b${word}\\b`, "gi"), command);
   }
 
-  text = text.replace(/\^\(([^)]+)\)/g, "^{$1}");
+  text = normalizeLatexSpacingCommands(text.replace(/\^\(([^)]+)\)/g, "^{$1}"));
   return spaceAfterTextCommands(protectedText.restore(text.replace(/\s+/g, "")));
 }
 
@@ -494,7 +498,11 @@ function splitTopLevelRelations(text) {
     if (char === "}" || char === ")" || char === "]") depth -= 1;
     if (depth !== 0) continue;
 
-    const operator = operators.find((item) => text.startsWith(item, index));
+    const operator = operators.find((item) => {
+      if (!text.startsWith(item, index)) return false;
+      if (item.startsWith("\\") && /[A-Za-z]/.test(text[index + item.length] || "")) return false;
+      return true;
+    });
     if (!operator) continue;
 
     if (tokenStart < index) pieces.push({ type: "expr", value: text.slice(tokenStart, index), start: tokenStart });

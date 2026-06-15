@@ -64,7 +64,7 @@ Quality rules:
 - If a derivation is long, compress algebra into meaningful transformations instead of expanding every substep.
 - Every step must transform or materially justify the math.
 - Every step must include an anchors array, even when empty.
-- Generate at most 5-8 anchors across the whole solution.
+- Generate at most 3 anchors per step and at most 20 anchors across the whole solution.
 - Anchors should target actual confusion points: substitutions, changed bounds, identities, integration-by-parts choices, algebraic transformations, or non-obvious simplifications.
 - Do not create anchors for isolated differentials, single variables, basic operators, parentheses, random English words, or rule labels such as Power/Product/Chain/Leibniz.
 - Anchor latex must be an exact meaningful subexpression from the step latex when possible.
@@ -82,6 +82,9 @@ Quality rules:
 - ${outputContract}
 - numericCheck should be a decimal approximation when applicable, or an empty string.
 - Keep each reasoning field to 1-2 concise sentences, maximum 35 words.
+- Do not restate the entire original problem inside step 1; start with the first meaningful transformation or theorem setup.
+- Do not repeat long problem text in both problemLatex and steps[].latex.
+- For verification sections, use compact equations instead of prose-heavy derivations.
 - Return JSON only. Do not include markdown, comments, code fences, or explanatory prose outside JSON.`;
 }
 

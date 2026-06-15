@@ -330,7 +330,7 @@ export default function Home() {
       type: "success",
       label: "Explanation ready",
       detail: getStatusStepText(problemData.steps),
-      meta: "",
+      meta: data.runtimeNotice || "",
     });
   };
 
@@ -373,7 +373,11 @@ export default function Home() {
     const showBackendMessage = isServerError && import.meta.env.DEV && message;
     setGenerationStatus({
       type: "error",
-      label: source === "image" ? "Image analysis failed" : "Generation failed",
+      label: source === "image"
+        ? "Image analysis failed"
+        : source === "image-solve"
+          ? "Solution generation failed"
+          : "Generation failed",
       detail: isServerError
         ? showBackendMessage
           ? message

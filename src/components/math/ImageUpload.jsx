@@ -498,6 +498,7 @@ export default function ImageUpload({
 
     setSubmitting(true);
     onGenerationStart?.({ source: "image" });
+    let extractionSucceeded = false;
 
     try {
       const result = await extractImageProblem({
@@ -508,6 +509,7 @@ export default function ImageUpload({
       });
 
       onUsageUpdate?.(result.usage);
+      extractionSucceeded = true;
       setExtraction(result);
       setEditedText(result.extractedProblemText || "");
       setEditedLatex(result.extractedProblemLatex || "");
@@ -530,7 +532,7 @@ export default function ImageUpload({
     } catch (error) {
       console.error("Image problem generation failed:", error);
       onGenerationError?.({
-        source: "image",
+        source: extractionSucceeded ? "image-solve" : "image",
         message: error.message,
         status: error.status,
         code: error.body?.code,
@@ -561,7 +563,7 @@ export default function ImageUpload({
     } catch (error) {
       console.error("Confirmed image problem solve failed:", error);
       onGenerationError?.({
-        source: "image",
+        source: "image-solve",
         message: error.message,
         status: error.status,
         code: error.body?.code,

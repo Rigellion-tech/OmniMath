@@ -45,24 +45,24 @@ export function getTooltipPositionFromRect(
   const canOpenAbove = safeRect.top - gap - size.height - padding >= 0;
   const isQuickTooltip = size.height <= 160;
 
-  if (isQuickTooltip && (canOpenBelow || canOpenAbove)) {
-    return clampTooltipPosition(
-      safeRect.left + safeRect.width / 2 - size.width / 2 + stagger,
-      canOpenBelow
-        ? safeRect.bottom + gap + stagger
-        : safeRect.top - gap - size.height - stagger,
-      size,
-      resolvedViewport,
-      padding
-    );
-  }
-
   if (canOpenRight || canOpenLeft) {
     return clampTooltipPosition(
       canOpenRight
         ? safeRect.right + gap + stagger
         : safeRect.left - gap - size.width - stagger,
       safeRect.top + stagger,
+      size,
+      resolvedViewport,
+      padding
+    );
+  }
+
+  if (isQuickTooltip && (canOpenBelow || canOpenAbove)) {
+    return clampTooltipPosition(
+      safeRect.left + safeRect.width / 2 - size.width / 2 + stagger,
+      canOpenBelow
+        ? safeRect.bottom + gap + stagger
+        : safeRect.top - gap - size.height - stagger,
       size,
       resolvedViewport,
       padding

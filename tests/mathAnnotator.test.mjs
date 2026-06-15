@@ -80,6 +80,49 @@ describe("mathAnnotator", () => {
     assert.equal(renderMathLatex("du = dx, v = e^x"), "du=dx,v=e^{x}");
   });
 
+  it("preserves LaTeX command boundaries through annotation and KaTeX rendering", () => {
+    const cases = [
+      "C:\\ x^2+y^2=9,\\ z=0",
+      "C:\\,x^2+y^2=9,\\ z=0",
+      "\\left\\langle a,b,c\\right\\rangle",
+      "\\mathbf F(x,y,0)=\\left\\langle e^{x^2}\\sin(y),\\ 0,\\ xy^2\\right\\rangle",
+      "x^2+y^2\\le 9",
+      "\\left(x+y\\right)",
+      "\\oint_C e^{x^2}\\sin(y)\\,dx",
+      "\\iint_S(\\nabla\\times F)\\cdot n\\,dS",
+    ];
+
+    assert.equal(normalizeMathText("C:\\ x^2+y^2=9,\\ z=0"), "C:\\,x^2+y^2=9,\\,z=0");
+    assert.equal(normalizeMathText("C:\\,x^2+y^2=9,\\ z=0"), "C:\\,x^2+y^2=9,\\,z=0");
+
+    for (const latex of cases) {
+      const expression = annotateExpression({
+        id: `expr-command-boundary-${cases.indexOf(latex)}`,
+        latex,
+        role: "equation",
+        problemId: "command-boundaries",
+      });
+      const fragments = flattenTokens(expression.tokens).map((token) => token.latex);
+
+      assert.equal(fragments.some((fragment) => /\\[xz]\b/.test(fragment)), false, latex);
+      assert.equal(fragments.some((fragment) => /^ft\\langle/.test(fragment)), false, latex);
+      if (/\\left/.test(latex)) {
+        assert.equal(fragments.includes("\\le"), false, latex);
+      }
+
+      for (const fragment of fragments) {
+        const katexInput = renderMathLatex(fragment);
+        const html = katex.renderToString(katexInput, {
+          throwOnError: true,
+          strict: "ignore",
+        });
+
+        assert.equal(html.includes("katex-error"), false, fragment);
+        assert.equal(html.includes("merror"), false, fragment);
+      }
+    }
+  });
+
   it("builds a nested hierarchy for full-circle theta bounds", () => {
     const expression = annotateExpression({
       id: "expr-theta",

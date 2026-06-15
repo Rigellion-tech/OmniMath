@@ -9,6 +9,7 @@ import { useHover } from "@/lib/HoverContext";
 import { userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { getProblemLabel } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
+import { getTooltipPositionFromRect } from "@/lib/tooltipPosition";
 import { cn } from "@/lib/utils";
 
 const DEPTHS = [
@@ -763,6 +764,17 @@ export function ExplanationPopover() {
     if (!tooltip || !anchor) return;
 
     const tooltipRect = tooltip.getBoundingClientRect();
+    const hoveredRects = Array.from(document.querySelectorAll("[data-explainable='true']:hover, .omni-solution-line:hover"))
+      .map((node) => node.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    const collisionAnchor = hoveredRects.reduce((current, rect) => ({
+      left: Math.min(current.left, rect.left),
+      right: Math.max(current.right, rect.right),
+      top: Math.min(current.top, rect.top),
+      bottom: Math.max(current.bottom, rect.bottom),
+      width: Math.max(current.right, rect.right) - Math.min(current.left, rect.left),
+      height: Math.max(current.bottom, rect.bottom) - Math.min(current.top, rect.top),
+    }), anchor);
     const intersects = (left, right) => !(
       left.right <= right.left
       || left.left >= right.right
@@ -770,10 +782,8 @@ export function ExplanationPopover() {
       || left.top >= right.bottom
     );
 
-    if (!intersects(tooltipRect, anchor)) return;
+    if (!intersects(tooltipRect, collisionAnchor)) return;
 
-    const gap = 12;
-    const padding = 12;
     const viewport = {
       width: window.innerWidth,
       height: window.innerHeight,
@@ -782,15 +792,9 @@ export function ExplanationPopover() {
       width: tooltipRect.width,
       height: tooltipRect.height,
     };
-    const clamp = (x, y) => ({
-      x: Math.min(Math.max(padding, x), Math.max(padding, viewport.width - size.width - padding)),
-      y: Math.min(Math.max(padding, y), Math.max(padding, viewport.height - size.height - padding)),
-    });
     const candidates = [
-      clamp(anchor.right + gap, anchor.top),
-      clamp(anchor.left - size.width - gap, anchor.top),
-      clamp(anchor.left + anchor.width / 2 - size.width / 2, anchor.bottom + gap),
-      clamp(anchor.left + anchor.width / 2 - size.width / 2, anchor.top - size.height - gap),
+      getTooltipPositionFromRect(collisionAnchor, { size, viewport, gap: 12, padding: 12 }),
+      getTooltipPositionFromRect(collisionAnchor, { index: 1, size, viewport, gap: 12, padding: 12 }),
     ];
     const next = candidates.find((candidate) => {
       const rect = {
@@ -799,7 +803,7 @@ export function ExplanationPopover() {
         top: candidate.y,
         bottom: candidate.y + size.height,
       };
-      return !intersects(rect, anchor);
+      return !intersects(rect, collisionAnchor);
     }) || candidates[0];
 
     setAdjustedPosition((current) => (

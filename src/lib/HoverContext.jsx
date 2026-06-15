@@ -23,11 +23,12 @@ function clampPosition(x, y, size = WINDOW_SIZE, padding = 12) {
 }
 
 function getEventAnchor(event) {
-  const element = event?.currentTarget instanceof Element
+  const eventElement = event?.currentTarget instanceof Element
     ? event.currentTarget
     : event?.target instanceof Element
       ? event.target.closest("[data-explainable='true']")
       : null;
+  const element = eventElement?.closest?.("[data-inspectable='math-token']") || eventElement;
   const rect = element?.getBoundingClientRect?.();
   return {
     element,

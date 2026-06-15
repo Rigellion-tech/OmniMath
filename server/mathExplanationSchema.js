@@ -41,7 +41,7 @@ const fastSolveStepSchema = {
     reasoning: { type: "string" },
     anchors: {
       type: "array",
-      maxItems: 4,
+      maxItems: 3,
       items: fastSolveAnchorSchema,
     },
   },
@@ -105,6 +105,22 @@ export const fastSolveSchema = {
     },
     finalAnswerLatex: { type: "string" },
     numericCheck: { type: "string" },
+  },
+};
+
+export const compactSolveSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "problemLatex", "steps"],
+  properties: {
+    title: { type: "string" },
+    problemLatex: { type: "string" },
+    steps: {
+      type: "array",
+      minItems: 1,
+      maxItems: 8,
+      items: fastSolveStepSchema,
+    },
   },
 };
 
@@ -507,6 +523,7 @@ export function validateMathExplanationSchema(schema = mathExplanationSchema) {
 
 validateMathExplanationSchema();
 validateMathExplanationSchema(fastSolveSchema);
+validateMathExplanationSchema(compactSolveSchema);
 validateMathExplanationSchema(imageSolveSchema);
 validateMathExplanationSchema(imageExtractionSchema);
 validateMathExplanationSchema(lazyTokenExplanationSchema);
@@ -814,10 +831,51 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
       anchors: step.anchors
         .filter(isUsefulAnchor)
         .map((anchor, anchorIndex) => normalizeAnchor(anchor, normalizeStepId(step.id, index), anchorIndex))
-        .slice(0, 4),
+        .slice(0, 3),
     })),
     finalAnswerLatex,
     numericCheck: safeString(value.numericCheck),
+  };
+}
+
+export function assertCompactSolveResponse(value, originalProblem = "") {
+  if (!value || typeof value !== "object") {
+    throw createInvalidResponseError("Model returned an invalid compact solve response.");
+  }
+
+  const problemLatex = sanitizeGeneratedLatex(value.problemLatex || originalProblem);
+  const rawSteps = Array.isArray(value.steps) ? value.steps.slice(0, 8) : [];
+  if (!isString(value.title) || !problemLatex || rawSteps.length === 0) {
+    throw createInvalidResponseError("Compact model response is missing required solve fields.");
+  }
+
+  const steps = rawSteps
+    .map((step, index) => ({
+      id: normalizeStepId(step?.id, index),
+      heading: safeString(step?.heading || `Step ${index + 1}`),
+      latex: sanitizeGeneratedLatex(step?.latex),
+      reasoning: safeString(step?.reasoning),
+      anchors: [],
+    }))
+    .filter((step) => step.latex && !isStandaloneDifferential(step.latex) && !isFillerHeading(step.heading));
+
+  if (steps.length === 0) {
+    throw createInvalidResponseError("Compact model response does not contain meaningful solution steps.");
+  }
+
+  const finalAnswerLatex = steps.at(-1)?.latex || problemLatex;
+  return {
+    title: safeString(value.title),
+    problemLatex,
+    steps: steps.map((step, index) => ({
+      ...step,
+      id: normalizeStepId(step.id, index),
+      heading: step.heading || `Step ${index + 1}`,
+      reasoning: step.reasoning || "This step follows from the previous expression.",
+      anchors: [],
+    })),
+    finalAnswerLatex,
+    numericCheck: "",
   };
 }
 
@@ -902,7 +960,7 @@ export function convertFastSolveToMathExplanation(value, {
   preserveProblemLatex = false,
 } = {}) {
   const solve = correctRegressionFinalAnswerIfNeeded(assertFastSolveResponse(value, originalProblem, { includeProblemStep }));
-  let anchorBudget = 8;
+  let anchorBudget = 20;
   const anchorsByStepId = new Map();
   const steps = solve.steps.map((step, index) => {
     const stepId = normalizeStepId(step.id, index);

@@ -1,11 +1,13 @@
 import { loadEnvFiles } from "./env.js";
 import {
   assertCompareMethods,
+  assertCompactSolveResponse,
   assertFastSolveResponse,
   assertImageExtractionResponse,
   assertImageSolveResponse,
   assertLazyTokenExplanation,
   compareMethodsSchema,
+  compactSolveSchema,
   convertFastSolveToMathExplanation,
   convertImageSolveToMathExplanation,
   fastSolveSchema,
@@ -19,10 +21,12 @@ loadEnvFiles();
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
-const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 2200;
+const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 4200;
 const DEFAULT_LAZY_MAX_OUTPUT_TOKENS = 700;
 const DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1700;
+const COMPLEX_SOLVE_MAX_OUTPUT_TOKENS = 6500;
+const COMPACT_SOLVE_MAX_OUTPUT_TOKENS = 2400;
 const DEFAULT_INPUT_COST_PER_1M_TOKENS = 5;
 const DEFAULT_OUTPUT_COST_PER_1M_TOKENS = 30;
 
@@ -73,6 +77,16 @@ export function getLazyMaxOutputTokens() {
 
 export function getImageExtractionMaxOutputTokens() {
   return readPositiveNumber("OPENAI_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS", DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS);
+}
+
+function getSolveOutputTokenBudget({ prompt = "", compact = false } = {}) {
+  const configured = getSolveMaxOutputTokens();
+  if (compact) return Math.max(COMPACT_SOLVE_MAX_OUTPUT_TOKENS, Math.min(configured, COMPLEX_SOLVE_MAX_OUTPUT_TOKENS));
+
+  const promptText = String(prompt || "");
+  const complex = promptText.length > 2500
+    || /Stokes|Green|curl|\\nabla|\\iint|\\iiint|∬|∭|vector field|surface integral/iu.test(promptText);
+  return complex ? Math.max(configured, COMPLEX_SOLVE_MAX_OUTPUT_TOKENS) : configured;
 }
 
 function getOptionalOpenAiHeaders() {
@@ -173,6 +187,33 @@ function logOpenAiProviderError({ purpose, response, responseBody }) {
       message: providerError.message,
       param: providerError.param,
     },
+  });
+}
+
+function getFinishReason(responseBody) {
+  if (!responseBody || typeof responseBody !== "object") return "";
+  return responseBody.finish_reason
+    || responseBody.finishReason
+    || responseBody.incomplete_details?.reason
+    || responseBody.output?.find((item) => item?.finish_reason)?.finish_reason
+    || responseBody.output?.find((item) => item?.finishReason)?.finishReason
+    || responseBody.output?.find((item) => item?.status === "incomplete")?.incomplete_details?.reason
+    || "";
+}
+
+function isLengthFinishReason(responseBody) {
+  const reason = String(getFinishReason(responseBody) || "").toLowerCase();
+  return reason === "length" || reason === "max_output_tokens" || reason === "max_tokens";
+}
+
+function logOpenAiResponse({ purpose, responseBody, outputText = "" }) {
+  console.info("[omnimath:openai-response]", {
+    purpose,
+    model: responseBody?.model || null,
+    finishReason: getFinishReason(responseBody) || null,
+    status: responseBody?.status || null,
+    outputChars: String(outputText || "").length,
+    usage: responseBody?.usage || null,
   });
 }
 
@@ -280,10 +321,72 @@ function extractOutputText(responseBody) {
   });
 }
 
-function parseJsonResponse(responseBody, assertFn) {
+function stripJsonMarkdownFence(value = "") {
+  return String(value || "").trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu, "$1").trim();
+}
+
+function extractFirstCompleteJsonObject(value = "") {
+  const text = stripJsonMarkdownFence(value);
+  const start = text.indexOf("{");
+  if (start < 0) return { text, complete: false };
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+    if (depth === 0) {
+      return { text: text.slice(start, index + 1), complete: true };
+    }
+  }
+
+  return { text: text.slice(start), complete: false };
+}
+
+function createTruncatedJsonError(outputText, responseBody) {
+  return Object.assign(new Error("OpenAI response was cut off before JSON completed."), {
+    statusCode: 502,
+    code: "AI_RESPONSE_TRUNCATED",
+    publicMessage: "The model response was cut off. Retrying with a shorter explanation...",
+    invalidOutputText: outputText,
+    finishReason: getFinishReason(responseBody) || null,
+  });
+}
+
+export function parseJsonResponse(responseBody, assertFn) {
   const outputText = extractOutputText(responseBody);
+  logOpenAiResponse({ purpose: "json_parse", responseBody, outputText });
+  if (isLengthFinishReason(responseBody)) {
+    throw createTruncatedJsonError(outputText, responseBody);
+  }
+
+  const extracted = extractFirstCompleteJsonObject(outputText);
+  if (!extracted.complete) {
+    throw Object.assign(new Error("OpenAI returned incomplete JSON."), {
+      statusCode: 502,
+      code: "AI_RESPONSE_INVALID",
+      publicMessage: "The AI service returned an incomplete explanation.",
+      invalidOutputText: outputText,
+    });
+  }
+
   try {
-    return assertFn(JSON.parse(outputText));
+    return assertFn(JSON.parse(extracted.text));
   } catch (error) {
     if (error.statusCode) {
       error.invalidOutputText = outputText;
@@ -366,6 +469,7 @@ async function requestOpenAi({
     });
   }
 
+  logOpenAiResponse({ purpose, responseBody, outputText: extractOutputText(responseBody) });
   return responseBody;
 }
 
@@ -427,6 +531,37 @@ async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "te
   };
 }
 
+function mergeUsage(left, right) {
+  if (!left && !right) return null;
+  const a = normalizeOpenAiUsage(left);
+  const b = normalizeOpenAiUsage(right);
+  return {
+    input_tokens: a.inputTokens + b.inputTokens,
+    output_tokens: a.outputTokens + b.outputTokens,
+    total_tokens: a.totalTokens + b.totalTokens,
+  };
+}
+
+function buildCompactSolvePrompt(prompt, originalProblem = "") {
+  return `${prompt}
+
+The previous full structured response was cut off. Retry in compact mode.
+
+Compact mode output rules:
+- Return JSON matching the compact schema exactly: title, problemLatex, steps.
+- Use 4-8 steps for long problems; never more than 8.
+- Each step must contain id, heading, latex, reasoning, and anchors.
+- Set anchors to [] for every step unless one anchor is essential.
+- Keep reasoning to 1 concise sentence, maximum 25 words.
+- Do not restate the entire original problem as step 1.
+- Preserve mathematical correctness over hover interactivity.
+- Use compact equations for verification; avoid prose-heavy derivations.
+- Return JSON only.
+
+Original problem context:
+${originalProblem || "Use the problem from the prior prompt."}`;
+}
+
 export async function createMathExplanation({ prompt, image, originalProblem = "" }) {
   const content = [{ type: "input_text", text: prompt }];
   if (image) {
@@ -447,22 +582,56 @@ export async function createMathExplanation({ prompt, image, originalProblem = "
     });
   }
 
+  const purpose = image ? "math_image_fast_solve" : "math_fast_solve";
   const responseBody = await requestOpenAi({
     content,
-    purpose: image ? "math_image_fast_solve" : "math_fast_solve",
+    purpose,
     schema: image ? imageSolveSchema : fastSolveSchema,
     schemaName: image ? "math_image_solve" : "math_fast_solve",
-    maxOutputTokens: getSolveMaxOutputTokens(),
+    maxOutputTokens: getSolveOutputTokenBudget({ prompt }),
     modelPath: "solver",
   });
-  const usage = responseBody.usage || null;
-  const parsed = parseJsonResponse(
-    responseBody,
-    (value) => (image ? assertImageSolveResponse(value) : assertFastSolveResponse(value))
-  );
+  let usage = responseBody.usage || null;
+  let parsed;
+  let compactFallback = false;
+  let aiCallCount = 1;
+  try {
+    parsed = parseJsonResponse(
+      responseBody,
+      (value) => (image ? assertImageSolveResponse(value) : assertFastSolveResponse(value))
+    );
+  } catch (error) {
+    if (!["AI_RESPONSE_TRUNCATED", "AI_RESPONSE_INVALID"].includes(error.code) || image) throw error;
+    console.warn("[omnimath:openai-compact-retry]", {
+      purpose,
+      reason: error.code,
+      finishReason: error.finishReason || null,
+      outputChars: String(error.invalidOutputText || "").length,
+    });
+    const compactPrompt = buildCompactSolvePrompt(prompt, originalProblem);
+    const compactResponse = await requestOpenAi({
+      content: [{ type: "input_text", text: compactPrompt }],
+      purpose: "math_compact_solve_retry",
+      schema: compactSolveSchema,
+      schemaName: "math_compact_solve",
+      maxOutputTokens: getSolveOutputTokenBudget({ prompt: compactPrompt, compact: true }),
+      modelPath: "solver",
+    });
+    usage = mergeUsage(usage, compactResponse.usage || null);
+    aiCallCount = 2;
+    compactFallback = true;
+    parsed = parseJsonResponse(
+      compactResponse,
+      (value) => assertCompactSolveResponse(value, originalProblem)
+    );
+  }
   const result = image
     ? convertImageSolveToMathExplanation(parsed)
-    : convertFastSolveToMathExplanation(parsed, { originalProblem });
+    : convertFastSolveToMathExplanation(parsed, { originalProblem, includeProblemStep: !compactFallback });
+
+  if (compactFallback) {
+    result.runtimeNotice = "Compact explanation generated because the full structured response was too long.";
+  }
 
   if (image) {
     console.info("[omnimath:image-openai-output]", {
@@ -479,7 +648,7 @@ export async function createMathExplanation({ prompt, image, originalProblem = "
   });
   Object.defineProperty(result, "_aiCallCount", {
     enumerable: false,
-    value: 1,
+    value: aiCallCount,
   });
   return result;
 }

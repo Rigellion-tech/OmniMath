@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
+import { deflateSync } from "node:zlib";
 import { annotateMathExplanation } from "../src/lib/mathAnnotator.js";
 import { createLocalRuleExplanation } from "../server/localRules.js";
 
@@ -17,6 +18,82 @@ const STOKES_PROBLEM = [
   "F(x,y,z)=\\langle yz^2+e^{x^2}\\sin(y),x^3z+\\ln(1+z^2),xy^2+z\\cos(xy)\\rangle.",
   "Evaluate \\iint_S(\\nabla\\times F)\\cdot n\\,dS.",
 ].join(" ");
+
+const LOW_CONFIDENCE_OCR_TEXT = [
+  "Let C be the boundary of the surface where z >= 0.",
+  "x^2/4 + y^2/9 <= 1.",
+  "The vector field includes e^{x^2}, e^{-z^2}, theta, and 2pi.",
+].join(" ");
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const typeBuffer = Buffer.from(type, "ascii");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0);
+  return Buffer.concat([length, typeBuffer, data, checksum]);
+}
+
+function createReadableMathPng() {
+  const width = 1000;
+  const height = 760;
+  const channels = 3;
+  const rowLength = width * channels;
+  const raw = Buffer.alloc((rowLength + 1) * height, 255);
+
+  for (let y = 0; y < height; y += 1) {
+    raw[y * (rowLength + 1)] = 0;
+  }
+
+  const drawRect = (x, y, w, h) => {
+    for (let row = y; row < y + h; row += 1) {
+      if (row < 0 || row >= height) continue;
+      const rowStart = row * (rowLength + 1) + 1;
+      for (let col = x; col < x + w; col += 1) {
+        if (col < 0 || col >= width) continue;
+        const offset = rowStart + col * channels;
+        raw[offset] = 10;
+        raw[offset + 1] = 18;
+        raw[offset + 2] = 20;
+      }
+    }
+  };
+
+  for (let line = 0; line < 8; line += 1) {
+    const y = 90 + line * 72;
+    drawRect(150, y, 680 - line * 18, 18);
+    drawRect(150, y + 30, 430 + line * 20, 12);
+  }
+  drawRect(420, 85, 130, 230);
+  drawRect(700, 200, 95, 260);
+
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  header[10] = 0;
+  header[11] = 0;
+  header[12] = 0;
+
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
 
 function createStokesApiResponse() {
   const local = createLocalRuleExplanation(STOKES_PROBLEM, { source: "text" });
@@ -237,4 +314,95 @@ test("Stokes theorem solution stays contained and renderable at browser zoom lev
   }
 
   expect(browserConsoleErrors).toEqual([]);
+});
+
+test("low-confidence image review can continue with canonical extracted text", async ({ page }) => {
+  await installApiFixtures(page);
+
+  let solveRequestBody = null;
+  await page.route("**/api/extract-image-problem", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        extractedProblemText: LOW_CONFIDENCE_OCR_TEXT,
+        rawExtractedText: LOW_CONFIDENCE_OCR_TEXT,
+        rawOcrText: LOW_CONFIDENCE_OCR_TEXT,
+        cleanedPlainText: LOW_CONFIDENCE_OCR_TEXT,
+        extractedProblemLatex: "\\frac{e^{x^2}}{",
+        confidence: 50,
+        mathIntegrityScore: 50,
+        confidenceTier: "low",
+        ocrConfidence: 92,
+        issues: [
+          {
+            type: "low_math_confidence",
+            severity: "high",
+            critical: true,
+            message: "Review required before solving.",
+          },
+        ],
+        extractionValidation: {
+          status: "danger",
+          tier: "low",
+          critical: true,
+          confidence: 50,
+          mathIntegrityScore: 50,
+          ocrConfidence: 92,
+          issues: [
+            {
+              type: "low_math_confidence",
+              severity: "high",
+              critical: true,
+              message: "Review required before solving.",
+            },
+          ],
+        },
+        displaySegments: [
+          {
+            type: "math",
+            text: "e^{x^2}",
+            latex: "\\frac{e^{x^2}}{",
+            renderIssue: "KaTeX parse error",
+          },
+        ],
+        usage: { kind: "image", remaining: 998, limit: 999 },
+      }),
+    });
+  });
+
+  await page.route("**/api/solve-extracted-problem", async (route) => {
+    solveRequestBody = route.request().postDataJSON();
+    expect(solveRequestBody.problem).toBe(LOW_CONFIDENCE_OCR_TEXT);
+    expect(solveRequestBody.problemLatex || "").toBe("");
+    expect(solveRequestBody.problem).not.toContain("\\frac{e^{x^2}}{");
+    expect(solveRequestBody.extraction.normalizedText).toBe(LOW_CONFIDENCE_OCR_TEXT);
+    expect(solveRequestBody.extraction.previewMath?.[0]?.renderIssue).toBe("KaTeX parse error");
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createStokesApiResponse()),
+    });
+  });
+
+  await page.goto("/?mockAuth=1");
+  await page.locator("input[type='file']").setInputFiles({
+    name: "readable-math.png",
+    mimeType: "image/png",
+    buffer: createReadableMathPng(),
+  });
+
+  await expect(page.getByRole("button", { name: /Analyze with AI/i })).toBeEnabled();
+  await page.getByRole("button", { name: /Analyze with AI/i }).click();
+
+  await expect(page.getByText(/Review the extracted text/i)).toBeVisible();
+  await expect(page.getByText(/Math 50% · low/i)).toBeVisible();
+  const continueButton = page.getByRole("button", { name: /Continue with reviewed text/i });
+  await expect(continueButton).toBeVisible();
+  await expect(continueButton).toBeEnabled();
+
+  await continueButton.click();
+  await expect(page.getByText(/Explanation ready/i)).toBeVisible();
+  expect(solveRequestBody).not.toBeNull();
 });

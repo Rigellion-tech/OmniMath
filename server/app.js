@@ -975,13 +975,11 @@ export async function handleExtractImageProblemRequest(req, res) {
       if (display.latexMathChunks.some((chunk) => chunk.renderIssue)) {
         extraction.extractionValidation.issues.push({
           type: "render_preview_issue",
-          severity: "medium",
+          severity: "low",
           critical: false,
-          message: "One or more extracted math chunks needed a plain-text fallback in the preview.",
+          message: "Math preview could not render, but the extracted text can still be solved.",
         });
         extraction.extractionValidation.status = extraction.extractionValidation.status === "danger" ? "danger" : "warning";
-        extraction.extractionValidation.tier = extraction.extractionValidation.tier === "low" ? "low" : "medium";
-        extraction.extractionValidation.confidence = Math.min(extraction.extractionValidation.confidence, 84);
       }
       logExtractionReviewDebug(extraction.extractionValidation);
       extraction.confidence = extraction.extractionValidation.confidence;
@@ -1055,7 +1053,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
     throttleRequest(req, identity, "ai");
     assertAiEnabled();
     const body = requireObject(await readJson(req));
-    const problemLatex = requireTextProblem(body.problemLatex || body.problem || body.extractedProblemLatex);
+    const problemLatex = requireTextProblem(body.problem || body.problemLatex || body.extractedProblemLatex);
     const problemText = optionalShortText(body.problemText || body.extractedProblemText || "", "Problem text", MAX_PROBLEM_CHARS);
     const extraction = requireObject(body.extraction || {}, "Extraction");
     const solveDecision = ["direct", "anyway", "edited"].includes(body.solveDecision)
@@ -1067,6 +1065,14 @@ export async function handleSolveExtractedProblemRequest(req, res) {
         role: "student",
         text: problemText ? `Confirmed image extraction text: ${problemText}` : "Confirmed image extraction.",
       }],
+    });
+    logImageUploadDebug("solve-extracted-input", {
+      problemChars: problemLatex.length,
+      problemPreview: problemLatex.slice(0, 240),
+      problemTextChars: problemText.length,
+      problemTextPreview: problemText.slice(0, 240),
+      submittedProblemSource: extraction.submittedProblemSource || "",
+      hasPreviewMath: Array.isArray(extraction.previewMath) && extraction.previewMath.length > 0,
     });
     traceMathStage("Prompt construction", problemLatex, prompt, "insert confirmed image LaTeX into solve prompt");
     const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: getSolveMaxOutputTokens() });
@@ -1138,6 +1144,10 @@ export async function handleSolveExtractedProblemRequest(req, res) {
           rawExtractedText: extraction.rawExtractedText || extraction.extractedProblemText || extraction.imageSource?.rawExtractedText || "",
           cleanedExtractedText: extraction.extractedProblemText || extraction.imageSource?.cleanedExtractedText || "",
           rawExtractedLatex: extraction.rawExtractedLatex || extraction.extractedProblemLatex || extraction.imageSource?.rawExtractedLatex || "",
+          rawText: extraction.rawText || extraction.imageSource?.rawText || extraction.rawExtractedText || "",
+          displayText: extraction.displayText || extraction.imageSource?.displayText || problemText,
+          normalizedText: extraction.normalizedText || extraction.imageSource?.normalizedText || problemLatex,
+          validationText: extraction.validationText || extraction.imageSource?.validationText || extraction.normalizedText || problemLatex,
           finalProblemText: problemText,
           finalProblemLatex: problemLatex,
           confidence: Number(extraction.confidence ?? extraction.extractionValidation?.confidence ?? extraction.imageSource?.confidence ?? 0),

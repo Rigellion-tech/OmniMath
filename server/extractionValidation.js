@@ -26,8 +26,58 @@ const SUBSCRIPT_DIGITS = new Map([
   ["₉", "9"],
 ]);
 
+const SEMANTIC_MATH_SYMBOL_REPLACEMENTS = [
+  [/≤|⩽/g, "\\le"],
+  [/≥|⩾/g, "\\ge"],
+  [/≠/g, "\\neq"],
+  [/±/g, "\\pm"],
+  [/∓/g, "\\mp"],
+  [/×/g, "\\times"],
+  [/÷/g, "\\div"],
+  [/⋅|·/g, "\\cdot"],
+  [/≈/g, "\\approx"],
+  [/≡/g, "\\equiv"],
+  [/∞/g, "\\infty"],
+  [/∈/g, "\\in"],
+  [/∉/g, "\\notin"],
+  [/⊂/g, "\\subset"],
+  [/⊆/g, "\\subseteq"],
+  [/∪/g, "\\cup"],
+  [/∩/g, "\\cap"],
+  [/→/g, "\\to"],
+  [/⇒/g, "\\Rightarrow"],
+  [/↔/g, "\\leftrightarrow"],
+  [/∂/g, "\\partial"],
+  [/⟂|⊥/g, "\\perp"],
+  [/∥/g, "\\parallel"],
+];
+
+const LATEX_COMMAND_ALIASES = new Map([
+  ["\\geq", "\\ge"],
+  ["\\leq", "\\le"],
+  ["\\ne", "\\neq"],
+]);
+
 function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeSemanticMathSymbols(value) {
+  const withCompositeOperators = safeString(value)
+    .replace(/>\s+=/g, "\\ge")
+    .replace(/<\s+=/g, "\\le")
+    .replace(/!\s+=/g, "\\neq")
+    .replace(/>=/g, "\\ge")
+    .replace(/<=/g, "\\le")
+    .replace(/!=/g, "\\neq");
+  return SEMANTIC_MATH_SYMBOL_REPLACEMENTS.reduce(
+    (output, [pattern, replacement]) => output.replace(pattern, replacement),
+    withCompositeOperators
+  );
+}
+
+function canonicalLatexCommand(command) {
+  return LATEX_COMMAND_ALIASES.get(command) || command;
 }
 
 function normalizeUnicodeScripts(value) {
@@ -84,13 +134,11 @@ function normalizeParenthesizedScripts(value) {
 }
 
 function normalizeForScan(value) {
-  return normalizeParenthesizedScripts(normalizeUnicodeScripts(value))
+  return normalizeSemanticMathSymbols(normalizeParenthesizedScripts(normalizeUnicodeScripts(value)))
     .replace(/∭/g, "\\iiint")
     .replace(/∬/g, "\\iint")
     .replace(/∫/g, "\\int")
     .replace(/∇/g, "\\nabla")
-    .replace(/×/g, "\\times")
-    .replace(/⋅|·/g, "\\cdot")
     .replace(/(?<!\\)\b(sin|cos|tan|sec|csc|cot|ln|log|exp)\s*\(/gi, "\\$1(")
     .replace(/\\left|\\right/g, "")
     .replace(/\\langle/g, "<")
@@ -154,12 +202,15 @@ function readBaseBefore(source, index) {
   }
 
   if (/[a-zA-Z0-9]/u.test(source[cursor] || "")) {
-    let value = "";
-    while (cursor >= 0 && /[a-zA-Z0-9]/u.test(source[cursor])) {
-      value = source[cursor] + value;
-      cursor -= 1;
+    let commandEnd = cursor + 1;
+    let commandStart = cursor;
+    while (commandStart >= 0 && /[a-zA-Z]/u.test(source[commandStart])) {
+      commandStart -= 1;
     }
-    return value;
+    if (source[commandStart] === "\\") {
+      return source.slice(commandStart, commandEnd);
+    }
+    return source[cursor];
   }
 
   return source[cursor] || "";
@@ -232,6 +283,17 @@ function getLatexRenderIssue(latex) {
       message: `The extracted LaTeX could not render cleanly: ${error.message}`,
     };
   }
+}
+
+function isCanonicalTextUsable(value) {
+  const source = safeString(value);
+  return source.length >= 3
+    && !hasUncertaintyMarker(source)
+    && !looksTruncated(source);
+}
+
+function containsLatexCommand(value) {
+  return /\\[a-zA-Z]+/u.test(safeString(value));
 }
 
 function hasUncertaintyMarker(value) {
@@ -362,18 +424,14 @@ function compareFunctionCalls(text, latex) {
 }
 
 function extractLatexCommands(value) {
-  const source = normalizeParenthesizedScripts(normalizeUnicodeScripts(value))
+  const source = normalizeSemanticMathSymbols(normalizeParenthesizedScripts(normalizeUnicodeScripts(value)))
     .replace(/∭/g, "\\iiint")
     .replace(/∬/g, "\\iint")
     .replace(/∫/g, "\\int")
     .replace(/∇/g, "\\nabla")
-    .replace(/×/g, "\\times")
-    .replace(/⋅|·/g, "\\cdot")
-    .replace(/≤/g, "\\le")
-    .replace(/≥/g, "\\ge")
     .replace(/(?<!\\)\b(sin|cos|tan|sec|csc|cot|ln|log|exp)\s*\(/gi, "\\$1(")
     .replace(/\\operatorname\{([^{}]+)\}/g, "\\$1");
-  return Array.from(source.matchAll(/\\[a-zA-Z]+/gu), (match) => match[0]);
+  return Array.from(source.matchAll(/\\[a-zA-Z]+/gu), (match) => canonicalLatexCommand(match[0]));
 }
 
 function compareLatexCommands(text, latex) {
@@ -392,8 +450,8 @@ function compareLatexCommands(text, latex) {
 }
 
 function getMalformedCommandIssues(value) {
-  const source = safeString(value);
-  const malformed = source.match(/\\(?:iiint|iint|oint|int|quad|langle|rangle|sin|cos|tan|sec|csc|cot|log|ln|exp|notin|to)(?=[A-Za-z0-9])|\\le(?=(?!ft)[A-Za-z0-9])|\\ge(?=(?!q)[A-Za-z0-9])|\\in(?=(?!t|fty)[A-Za-z0-9])/gu) || [];
+  const source = normalizeSemanticMathSymbols(value);
+  const malformed = source.match(/\\(?:iiint|iint|oint|int|quad|langle|rangle|sin|cos|tan|sec|csc|cot|log|ln|exp|notin|to)(?=[A-Za-z0-9])|\\le(?=(?!ft|q)[A-Za-z])|\\ge(?=(?!q)[A-Za-z])|\\in(?=(?!t|fty)[A-Za-z0-9])/gu) || [];
   return [...new Set(malformed)].map((command) => ({
     type: "malformed_command",
     severity: "high",
@@ -427,11 +485,15 @@ export function validateExtraction({
 } = {}) {
   const text = safeString(extractedProblemText);
   const latex = safeString(extractedProblemLatex);
+  const renderIssue = getLatexRenderIssue(latex);
+  const canonicalTextUsable = isCanonicalTextUsable(text);
+  const shouldTrustCanonicalText = canonicalTextUsable && renderIssue && !containsLatexCommand(text);
+  const validationLatex = shouldTrustCanonicalText ? text : latex;
   const textExponents = extractScripts(text, "^");
-  const latexExponents = extractScripts(latex, "^");
+  const latexExponents = extractScripts(validationLatex, "^");
   const textSubscripts = extractScripts(text, "_");
-  const latexSubscripts = extractScripts(latex, "_");
-  const differenceRatio = levenshteinRatio(text, latex);
+  const latexSubscripts = extractScripts(validationLatex, "_");
+  const differenceRatio = levenshteinRatio(text, validationLatex);
   const confidenceInput = parseOcrConfidence(ocrConfidence);
   const modelConfidenceInput = parseOcrConfidence(modelConfidence);
   const reviewThreshold = getOcrReviewThreshold();
@@ -444,10 +506,9 @@ export function validateExtraction({
     })) : []),
     ...compareScripts(textExponents, latexExponents, "exponent_loss"),
     ...compareScripts(textSubscripts, latexSubscripts, "subscript_loss"),
-    ...compareLatexCommands(text, latex),
-    ...getMalformedCommandIssues(latex),
+    ...compareLatexCommands(text, validationLatex),
+    ...getMalformedCommandIssues(validationLatex),
   ];
-  const renderIssue = getLatexRenderIssue(latex);
 
   if (!latex || latex.length < 3) {
     issues.push({
@@ -458,10 +519,10 @@ export function validateExtraction({
     });
   }
 
-  if (renderIssue) issues.push(renderIssue);
-  issues.push(...getDelimiterBalanceIssues(latex));
+  if (renderIssue && !shouldTrustCanonicalText) issues.push(renderIssue);
+  issues.push(...getDelimiterBalanceIssues(validationLatex));
 
-  if (hasUncertaintyMarker(text) || hasUncertaintyMarker(latex)) {
+  if (hasUncertaintyMarker(text) || (!shouldTrustCanonicalText && hasUncertaintyMarker(latex))) {
     issues.push({
       type: "explicit_uncertainty",
       severity: "high",
@@ -470,7 +531,7 @@ export function validateExtraction({
     });
   }
 
-  if (looksTruncated(text) || looksTruncated(latex)) {
+  if (looksTruncated(text) || (!shouldTrustCanonicalText && looksTruncated(latex))) {
     issues.push({
       type: "truncated_extraction",
       severity: "high",
@@ -488,9 +549,9 @@ export function validateExtraction({
     });
   }
 
-  issues.push(...compareFunctionCalls(text, latex));
+  issues.push(...compareFunctionCalls(text, validationLatex));
 
-  if (hasFunctionArgumentGroup(text) && !hasFunctionArgumentGroup(latex)) {
+  if (hasFunctionArgumentGroup(text) && !hasFunctionArgumentGroup(validationLatex)) {
     issues.push({
       type: "function_argument_changed",
       severity: "high",
@@ -500,7 +561,7 @@ export function validateExtraction({
   }
 
   const textVectorComponents = countVectorComponents(text);
-  const latexVectorComponents = countVectorComponents(latex);
+  const latexVectorComponents = countVectorComponents(validationLatex);
   if (textVectorComponents !== null && latexVectorComponents !== null && textVectorComponents !== latexVectorComponents) {
     issues.push({
       type: "vector_component_count_mismatch",
@@ -510,7 +571,7 @@ export function validateExtraction({
     });
   }
 
-  if (hasIntegralBounds(text) && !hasIntegralBounds(latex)) {
+  if (hasIntegralBounds(text) && !hasIntegralBounds(validationLatex)) {
     issues.push({
       type: "integral_bounds_unclear",
       severity: "high",
@@ -519,7 +580,7 @@ export function validateExtraction({
     });
   }
 
-  if (hasTheoremSensitiveTerms(text) && !hasTheoremSensitiveTerms(latex)) {
+  if (hasTheoremSensitiveTerms(text) && !hasTheoremSensitiveTerms(validationLatex)) {
     issues.push({
       type: "theorem_sensitive_structure_unclear",
       severity: "high",

@@ -15,6 +15,13 @@ function countChangedCharacters(left, right) {
   return { changed, max };
 }
 
+export function normalizeSpacedRelationalOperators(value = "") {
+  return String(value || "")
+    .replace(/>\s+=/g, ">=")
+    .replace(/<\s+=/g, "<=")
+    .replace(/!\s+=/g, "!=");
+}
+
 function normalizeOcrMathPhrases(value = "") {
   return String(value || "")
     .replace(/\be\s+to\s+the\s+([xyz])\s+squared\b/gi, (_, variable) => `e^{${variable.toLowerCase()}^2}`)
@@ -50,6 +57,9 @@ export function normalizeExtractedProblemText(value = "") {
     .replace(/([^\s([{<])(?=\bwhere\b)/g, "$1 ")
     .replace(/\b([A-Za-z]{2,})([A-Z])(?=\s*(?:=|\(|<))/g, "$1 $2")
     .replace(/\s*=\s*/g, " = ")
+    .replace(/>\s+=/g, ">=")
+    .replace(/<\s+=/g, "<=")
+    .replace(/!\s+=/g, "!=")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -58,8 +68,11 @@ export function normalizeExtractedProblemText(value = "") {
     .replace(/\bwhere\s+F\b/g, "where F")
     .replace(/\bcurve is\s+C\b/gi, (match) => match.replace(/\s+/g, " "));
 
+  const comparableOriginal = normalizeSpacedRelationalOperators(original)
+    .replace(/\s+/g, " ")
+    .trim();
   const { changedCharacters, max } = (() => {
-    const result = countChangedCharacters(original, text);
+    const result = countChangedCharacters(comparableOriginal, text);
     return { changedCharacters: result.changed, max: result.max };
   })();
   const changeRatio = max > 0 ? changedCharacters / max : 0;
@@ -75,7 +88,7 @@ export function normalizeExtractedProblemText(value = "") {
 }
 
 function normalizeMathChunk(value = "") {
-  let text = normalizeOcrMathPhrases(safeString(value))
+  let text = normalizeSpacedRelationalOperators(normalizeOcrMathPhrases(safeString(value)))
     .replace(/∬/g, "\\iint")
     .replace(/∫/g, "\\int")
     .replace(/∇/g, "\\nabla")
@@ -83,6 +96,9 @@ function normalizeMathChunk(value = "") {
     .replace(/⋅|·/g, "\\cdot")
     .replace(/≤/g, "\\le")
     .replace(/≥/g, "\\ge")
+    .replace(/<=/g, "\\le ")
+    .replace(/>=/g, "\\ge ")
+    .replace(/!=/g, "\\neq ")
     .replace(/\be\^\(([^()]+(?:\([^)]*\))?[^()]*)\)/g, "e^{$1}")
     .replace(/([A-Za-z0-9}])(sin|cos|tan|ln|log|exp)\s*\(/gi, (_, left, fn) => `${left} \\${fn.toLowerCase()}(`)
     .replace(/(?<!\\)\b(sin|cos|tan|ln|log|exp)\s*\(/gi, (_, fn) => `\\${fn.toLowerCase()}(`)
@@ -211,7 +227,7 @@ export function buildExtractedProblemDisplay({
     rawOcrText: safeString(rawOcrText),
     cleanedPlainText: cleaned,
     displaySegments,
-    solverInput: safeString(extractedProblemLatex || cleaned),
+    solverInput: cleaned,
     latexMathChunks,
   };
 }

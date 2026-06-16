@@ -61,3 +61,27 @@ test("normalizes spoken OCR math phrases before display and solving", () => {
   assert.match(result.text, /y\^2/);
   assert.match(result.text, /\\cos\(xy\)/);
 });
+
+test("normalizes spaced OCR relational operators before validation and solving", () => {
+  const input = "z > = 0\nx^2/4 + y^2/9 < = 1\n0 < = r < = 1\n0 < = θ < = 2π";
+  const result = normalizeExtractedProblemText(input);
+
+  assert.equal(result.text, "z >= 0 x^2/4 + y^2/9 <= 1 0 <= r <= 1 0 <= θ <= 2π");
+  assert.equal(result.changed, true);
+  assert.equal(result.substantial, false);
+});
+
+test("uses canonical cleaned text as solver input when preview LaTeX is malformed", () => {
+  const input = "Let C be the boundary where z > = 0 and x^2/4 + y^2/9 < = 1 with e^(x^2), e^(-z^2), theta, and 2pi.";
+  const cleanup = normalizeExtractedProblemText(input);
+  const display = buildExtractedProblemDisplay({
+    rawOcrText: input,
+    cleanedPlainText: cleanup.text,
+    extractedProblemLatex: "\\frac{e^{x^2}}{",
+  });
+
+  assert.equal(display.solverInput, cleanup.text);
+  assert.match(display.solverInput, /z >= 0/);
+  assert.match(display.solverInput, /x\^2\/4 \+ y\^2\/9 <= 1/);
+  assert.equal(display.solverInput.includes("\\frac{e^{x^2}}{"), false);
+});

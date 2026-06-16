@@ -95,7 +95,8 @@ function ExtractionReview({ problem }) {
   const isWarning = status === "warning";
   const StatusIcon = isDanger || isWarning ? AlertTriangle : CheckCircle2;
   const statusLabel = isDanger ? "Review required" : isWarning ? "Review suggested" : "Extraction checked";
-  const latexLine = extractedLatex && displaySegments.length === 0
+  const shouldShowRenderedFallback = !extractedText && displaySegments.length > 0;
+  const latexLine = !extractedText && extractedLatex && displaySegments.length === 0
     ? {
         id: "extracted-problem-latex",
         kind: "block",
@@ -141,12 +142,12 @@ function ExtractionReview({ problem }) {
       </div>
 
       {extractedText && (
-        <p className="mt-3 text-sm leading-6 text-slate-200/82">
+        <p className="mt-3 whitespace-pre-wrap break-normal text-sm leading-6 text-slate-200/82 [overflow-wrap:anywhere]">
           {extractedText}
         </p>
       )}
 
-      {displaySegments.length > 0 && (
+      {shouldShowRenderedFallback && (
         <div className="omni-problem-preview mt-3 rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 omni-scrollbar">
           <div className="flex min-w-max flex-wrap items-baseline gap-x-2 gap-y-1 text-sm leading-7 text-slate-200/86">
             {displaySegments.map((segment, index) => (

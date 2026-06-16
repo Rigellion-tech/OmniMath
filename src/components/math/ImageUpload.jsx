@@ -1,10 +1,8 @@
 import React, { useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, FileText, ImagePlus, Loader2, Pencil, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
-import { extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
+import { buildExtractionSubmissionPayload, extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import MathText from "./MathText";
-import MathRenderer from "./MathRenderer";
 import {
   analyzeImageQuality,
   canSubmitImageForAi,
@@ -85,10 +83,8 @@ function QualityDiagnostics({ quality }) {
 function ExtractionReviewPanel({
   extraction,
   editedText,
-  editedLatex,
   solving,
   onTextChange,
-  onLatexChange,
   onSolve,
   onCancel,
 }) {
@@ -102,13 +98,9 @@ function ExtractionReviewPanel({
   const isLow = tier === "low";
   const isMedium = tier === "medium";
   const showEditor = editing;
-  const displaySegments = Array.isArray(extraction.displaySegments)
-    ? extraction.displaySegments
-    : Array.isArray(extraction.imageSource?.displaySegments)
-      ? extraction.imageSource.displaySegments
-      : [];
+  const canContinue = !solving && Boolean(editedText.trim());
   const statusText = isLow
-    ? "Review required before solving"
+    ? "Review the extracted text, then continue when it looks correct."
     : isMedium
       ? "Review highlighted parts before solving"
       : "Extraction looks good";
@@ -139,37 +131,18 @@ function ExtractionReviewPanel({
         </p>
       </div>
 
-      {editedText && (
-        <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2 text-sm leading-6 text-slate-100/82">
-          {editedText}
-        </div>
-      )}
-
-      {displaySegments.length > 0 ? (
-        <div className="max-w-full overflow-x-auto rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-3 omni-scrollbar">
-          <div className="flex min-w-max flex-wrap items-baseline gap-x-2 gap-y-1 text-sm leading-7 text-slate-100/86">
-            {displaySegments.map((segment, index) => (
-              segment.type === "math" ? (
-                <span key={`math-${index}`} className="font-serif italic text-cyan-50/92">
-                  <MathRenderer
-                    math={segment.latex}
-                    fallbackText={segment.fallbackText}
-                    componentName="ImageUpload.segment"
-                  />
-                </span>
-              ) : (
-                <span key={`text-${index}`}>{segment.text}</span>
-              )
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="max-w-full overflow-x-auto rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-3 text-sm text-cyan-50/90 omni-scrollbar">
-          <div className="min-w-max">
-            <MathText>{`\\(${editedLatex || "\\text{No extraction}"}\\)`}</MathText>
-          </div>
-        </div>
-      )}
+      <label className="grid gap-1.5">
+        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+          Extracted problem
+        </span>
+        <textarea
+          value={editedText}
+          onChange={(event) => onTextChange(event.target.value)}
+          rows={8}
+          className="min-h-40 resize-y whitespace-pre-wrap break-normal rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-2 text-sm leading-6 text-slate-100 outline-none transition-colors [overflow-wrap:anywhere] focus:border-teal-200/35"
+          spellCheck={false}
+        />
+      </label>
 
       {issues.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
@@ -190,37 +163,12 @@ function ExtractionReviewPanel({
         </div>
       )}
 
-      {showEditor && (
-        <label className="grid gap-1.5">
-          <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
-            Edit LaTeX
-          </span>
-          <textarea
-            value={editedLatex}
-            onChange={(event) => onLatexChange(event.target.value)}
-            rows={4}
-            className="min-h-24 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 font-mono text-sm leading-5 text-cyan-50 outline-none transition-colors focus:border-teal-200/35"
-          />
-        </label>
-      )}
-
       <details className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2">
         <summary className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-200/75">
           <FileText className="h-3.5 w-3.5 text-teal-100/70" />
           OCR Details
         </summary>
         <div className="mt-2 grid gap-2">
-          <label className="grid gap-1.5">
-            <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
-              Plain text transcription
-            </span>
-            <textarea
-              value={editedText}
-              onChange={(event) => onTextChange(event.target.value)}
-              rows={3}
-              className="min-h-20 resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2 text-sm leading-5 text-slate-100 outline-none transition-colors focus:border-teal-200/35"
-            />
-          </label>
           <div className="rounded-lg border border-white/[0.08] bg-black/20 p-2">
             <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
               Raw extracted LaTeX
@@ -242,28 +190,16 @@ function ExtractionReviewPanel({
         </div>
       </details>
 
-      <div className="grid gap-2 sm:grid-cols-2">
-        {isLow && !showEditor ? (
-          <button
-            type="button"
-            disabled={solving}
-            onClick={() => setEditing(true)}
-            className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            <Pencil className="h-4 w-4" />
-            Edit Extraction
-          </button>
-        ) : (
-          <button
-            type="button"
-            disabled={solving || !editedLatex.trim()}
-            onClick={() => onSolve(showEditor ? "edited" : "direct")}
-            className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            {showEditor ? "Solve" : "Accept Extraction"}
-          </button>
-        )}
+      <div className="sticky bottom-0 z-20 grid gap-2 border-t border-white/[0.07] bg-[#061116]/95 pt-2 sm:grid-cols-2">
+        <button
+          type="button"
+          disabled={!canContinue}
+          onClick={() => onSolve(showEditor ? "edited" : "direct")}
+          className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          Continue with reviewed text
+        </button>
         <button
           type="button"
           disabled={solving}
@@ -285,9 +221,7 @@ function QualityPanel({
   submitting,
   extraction,
   editedText,
-  editedLatex,
   onTextChange,
-  onLatexChange,
   onCancel,
   onSubmit,
   onSolve,
@@ -349,10 +283,8 @@ function QualityPanel({
             <ExtractionReviewPanel
               extraction={extraction}
               editedText={editedText}
-              editedLatex={editedLatex}
               solving={submitting}
               onTextChange={onTextChange}
-              onLatexChange={onLatexChange}
               onSolve={onSolve}
               onCancel={onCancel}
             />
@@ -431,7 +363,6 @@ export default function ImageUpload({
   const [submitting, setSubmitting] = useState(false);
   const [extraction, setExtraction] = useState(null);
   const [editedText, setEditedText] = useState("");
-  const [editedLatex, setEditedLatex] = useState("");
   const fileRef = useRef(null);
   const previewRef = useRef(null);
   const { getToken } = useAuthToken();
@@ -444,7 +375,6 @@ export default function ImageUpload({
     setQuality(null);
     setExtraction(null);
     setEditedText("");
-    setEditedLatex("");
     setAnalyzing(false);
     setSubmitting(false);
     if (fileRef.current) fileRef.current.value = "";
@@ -511,15 +441,17 @@ export default function ImageUpload({
       onUsageUpdate?.(result.usage);
       extractionSucceeded = true;
       setExtraction(result);
-      setEditedText(result.extractedProblemText || "");
-      setEditedLatex(result.extractedProblemLatex || "");
+      setEditedText(result.extractedProblemText || result.rawExtractedText || "");
 
       if (result.confidenceTier === "high" && !result.extractionValidation?.critical) {
-        const solved = await solveExtractedProblem({
-          problemLatex: result.extractedProblemLatex,
-          problemText: result.extractedProblemText,
+        const payload = buildExtractionSubmissionPayload({
           extraction: result,
+          displayText: result.extractedProblemText || result.rawExtractedText || "",
+          rawText: result.rawExtractedText || result.rawOcrText || result.extractedProblemText || "",
           solveDecision: "direct",
+        });
+        const solved = await solveExtractedProblem({
+          ...payload,
           getToken,
         });
         onProblemGenerated(solved);
@@ -543,19 +475,21 @@ export default function ImageUpload({
   };
 
   const solveReviewedExtraction = async (decision) => {
-    if (!extraction || !editedLatex.trim()) return;
+    if (!extraction || !editedText.trim()) return;
     setSubmitting(true);
     onGenerationStart?.({ source: "image" });
 
     try {
-      const rawLatex = extraction.extractedProblemLatex || "";
       const rawText = extraction.extractedProblemText || "";
-      const edited = editedLatex.trim() !== rawLatex.trim() || editedText.trim() !== rawText.trim();
-      const solved = await solveExtractedProblem({
-        problemLatex: decision === "anyway" ? rawLatex : editedLatex,
-        problemText: decision === "anyway" ? rawText : editedText,
+      const edited = editedText.trim() !== rawText.trim();
+      const payload = buildExtractionSubmissionPayload({
         extraction,
+        displayText: decision === "anyway" ? rawText : editedText,
+        rawText: extraction.rawExtractedText || extraction.rawOcrText || rawText,
         solveDecision: decision === "anyway" ? "anyway" : edited ? "edited" : "direct",
+      });
+      const solved = await solveExtractedProblem({
+        ...payload,
         getToken,
       });
       onProblemGenerated(solved);
@@ -613,9 +547,7 @@ export default function ImageUpload({
         submitting={submitting}
         extraction={extraction}
         editedText={editedText}
-        editedLatex={editedLatex}
         onTextChange={setEditedText}
-        onLatexChange={setEditedLatex}
         onCancel={resetSelection}
         onSubmit={handleSubmit}
         onSolve={solveReviewedExtraction}

@@ -25,6 +25,14 @@ const LOW_CONFIDENCE_OCR_TEXT = [
   "The vector field includes e^{x^2}, e^{-z^2}, theta, and 2pi.",
 ].join(" ");
 
+const LONG_VECTOR_FIELD_LATEX = "\\mathbf{F}(x,y,z)=\\langle y^2z+e^{x^2}\\sin(yz), x^3+\\ln(1+z^2)+\\frac{\\cos(xy)}{1+x^2+y^2}, xye^{-z^2}+\\arctan(x-y)\\rangle";
+
+const LONG_STOKES_PROBLEM = [
+  "Use Stokes' theorem for the upward oriented paraboloid cap.",
+  LONG_VECTOR_FIELD_LATEX,
+  "Evaluate \\iint_S(\\nabla\\times\\mathbf{F})\\cdot\\mathbf{n}\\,dS.",
+].join(" ");
+
 function crc32(buffer) {
   let crc = 0xffffffff;
   for (const byte of buffer) {
@@ -122,6 +130,56 @@ function createLazyExplanationResponse() {
   };
 }
 
+function createLongLatexApiResponse() {
+  const annotated = annotateMathExplanation({
+    title: "Stokes theorem long vector field",
+    problem: LONG_STOKES_PROBLEM,
+    expression: `\\iint_S(\\nabla\\times\\mathbf{F})\\cdot\\mathbf{n}\\,dS\\quad\\text{where}\\quad ${LONG_VECTOR_FIELD_LATEX}`,
+    extractedProblemText: LONG_STOKES_PROBLEM,
+    extractedProblemLatex: LONG_VECTOR_FIELD_LATEX,
+    steps: [
+      {
+        id: "long-step-1",
+        label: "Apply Stokes' theorem",
+        math: `\\iint_S(\\nabla\\times\\mathbf{F})\\cdot\\mathbf{n}\\,dS=\\oint_C\\mathbf{F}\\cdot d\\mathbf{r}\\quad\\text{where}\\quad ${LONG_VECTOR_FIELD_LATEX}`,
+        summary: "Apply Stokes' theorem to replace the surface integral with a boundary line integral.",
+      },
+      {
+        id: "long-step-2",
+        label: "Use the boundary circle",
+        math: "\\mathbf{r}(t)=\\langle 3\\cos t,3\\sin t,0\\rangle,\\quad 0\\le t\\le 2\\pi,\\quad d\\mathbf{r}=\\langle -3\\sin t,3\\cos t,0\\rangle\\,dt",
+        summary: "Parametrize the circular boundary in the plane z=0.",
+      },
+      {
+        id: "long-step-3",
+        label: "Substitute parametric variables into the integrand",
+        math: "x^3+\\frac{\\cos(xy)}{1+x^2+y^2}+\\arctan(x-y)=8\\cos^3\\theta+\\frac{\\cos(6\\cos\\theta\\sin\\theta)}{1+4\\cos^2\\theta+9\\sin^2\\theta}+\\arctan(2\\cos\\theta-3\\sin\\theta)",
+        summary: "Substitute the parametric variables into each dense term while keeping token anchors inspectable.",
+      },
+      {
+        id: "long-step-4",
+        label: "Final answer",
+        math: "\\oint_C\\mathbf{F}\\cdot d\\mathbf{r}=\\int_0^{2\\pi}\\left(81\\cos^3(t)\\sin(t)-27\\sin^3(t)+\\frac{3\\cos(9\\sin(t)\\cos(t))}{1+9\\cos^2(t)+9\\sin^2(t)}\\right)\\,dt",
+        summary: "This integral form is the final answer for the boundary evaluation.",
+      },
+    ],
+    finalAnswerLatex: "\\int_0^{2\\pi}\\left(81\\cos^3(t)\\sin(t)-27\\sin^3(t)+\\frac{3\\cos(9\\sin(t)\\cos(t))}{10}\\right)\\,dt",
+  });
+
+  return {
+    ...annotated,
+    usage: {
+      kind: "explanation",
+      tier: "test",
+      remaining: 999,
+      limit: 999,
+    },
+    saved: false,
+    source: "playwright long latex fixture",
+    demoMode: true,
+  };
+}
+
 async function installApiFixtures(page) {
   await page.route("**/api/explain", async (route) => {
     const requestBody = route.request().postDataJSON();
@@ -130,6 +188,32 @@ async function installApiFixtures(page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(createStokesApiResponse()),
+    });
+  });
+
+  await page.route("**/api/explain-token", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createLazyExplanationResponse()),
+    });
+  });
+
+  await page.route("**/api/explain-pin", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createLazyExplanationResponse()),
+    });
+  });
+}
+
+async function installLongLatexApiFixtures(page) {
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createLongLatexApiResponse()),
     });
   });
 
@@ -163,10 +247,10 @@ async function assertLayoutIntegrity(page, { checkHover = false } = {}) {
   const errors = await page.evaluate(({ checkHover }) => {
     const failures = [];
     const intersects = (left, right) => !(
-      left.right <= right.left
-      || left.left >= right.right
-      || left.bottom <= right.top
-      || left.top >= right.bottom
+      left.right <= right.left + tolerance
+      || left.left >= right.right - tolerance
+      || left.bottom <= right.top + tolerance
+      || left.top >= right.bottom - tolerance
     );
     const viewportWidth = document.documentElement.clientWidth;
     const pageWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
@@ -190,7 +274,7 @@ async function assertLayoutIntegrity(page, { checkHover = false } = {}) {
 
     const main = document.querySelector("main");
     const mainRect = main?.getBoundingClientRect();
-    const topPreview = document.querySelector(".omni-problem-preview");
+    const topPreview = document.querySelector(".omni-problem-summary-card, .omni-problem-preview");
     const topRect = topPreview?.getBoundingClientRect();
     if (!mainRect || !topRect) {
       failures.push("missing main content or top equation preview");
@@ -314,6 +398,168 @@ test("Stokes theorem solution stays contained and renderable at browser zoom lev
   }
 
   expect(browserConsoleErrors).toEqual([]);
+});
+
+test("long vector-field equations scroll inside math containers without page overflow", async ({ page }) => {
+  await installLongLatexApiFixtures(page);
+  await page.setViewportSize({ width: 1680, height: 1050 });
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill(LONG_STOKES_PROBLEM);
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  await expect(page.getByRole("button", { name: /Apply Stokes['’] theorem/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Final answer/i })).toBeVisible();
+  await expect(page.locator(".step-card")).toHaveCount(4);
+  const summaryCard = page.locator(".omni-problem-summary-card");
+  await expect(summaryCard).toBeVisible();
+  await expect(summaryCard).toContainText(/Stokes/i);
+  await expect(summaryCard).not.toContainText(/y\^2z\+e\^\{x\^2\}\\sin\(yz\)/);
+
+  const collapsedPreview = await summaryCard.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return {
+      height: rect.height,
+      katexCount: node.querySelectorAll(".katex").length,
+      text: node.textContent || "",
+    };
+  });
+  expect(collapsedPreview.height).toBeLessThan(240);
+  expect(collapsedPreview.katexCount).toBe(0);
+
+  await page.getByRole("button", { name: /View full problem/i }).click();
+  await expect(summaryCard).toContainText(/Full problem text/i);
+  await expect(summaryCard).toContainText(/Math preview/i);
+  await expect(summaryCard).toContainText(/y\^2z\+e\^\{x\^2\}\\sin\(yz\)/);
+
+  const layout = await page.evaluate(() => {
+    const tolerance = 2;
+    const pageOverflow = document.documentElement.scrollWidth - window.innerWidth;
+    const boardRect = document.querySelector(".solution-board")?.getBoundingClientRect();
+    const flowRect = document.querySelector(".omni-solution-flow")?.getBoundingClientRect();
+    const mathFontSizes = [...document.querySelectorAll(".omni-solution-flow .omni-equation-line, .omni-solution-flow .omni-math-block")]
+      .map((node) => Number.parseFloat(getComputedStyle(node).fontSize))
+      .filter(Number.isFinite);
+    const stepRects = [...document.querySelectorAll(".step-card")].map((node) => {
+      const rect = node.getBoundingClientRect();
+      return {
+        text: node.textContent?.slice(0, 80) || "",
+        width: rect.width,
+        height: rect.height,
+        visible: rect.bottom > 0 && rect.top < window.innerHeight,
+      };
+    });
+    const finalAnswer = document.querySelector(".final-answer-step[data-final-answer='true']");
+    const finalAnswerRect = finalAnswer?.getBoundingClientRect();
+    const finalAnswerStyle = finalAnswer ? getComputedStyle(finalAnswer) : null;
+    const nestedVerticalScrollbars = [...document.querySelectorAll(".solution-board *")]
+      .filter((node) => {
+        const style = getComputedStyle(node);
+        return /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 12;
+      })
+      .map((node) => ({
+        className: node.className || node.tagName,
+        scrollHeight: node.scrollHeight,
+        clientHeight: node.clientHeight,
+      }));
+    const mathShells = [...document.querySelectorAll(".math-render-shell-block, .omni-math-block")].map((node) => {
+      const rect = node.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+        escapesViewport: rect.left < -tolerance || rect.right > window.innerWidth + tolerance,
+      };
+    });
+
+    return {
+      pageOverflow,
+      boardWidth: boardRect?.width || 0,
+      flowWidth: flowRect?.width || 0,
+      minMathFontSize: Math.min(...mathFontSizes),
+      stepRects,
+      finalAnswer: finalAnswer ? {
+        visible: finalAnswerRect.width > 0 && finalAnswerRect.height > 0,
+        boxShadow: finalAnswerStyle.boxShadow,
+        background: finalAnswerStyle.backgroundImage || finalAnswerStyle.backgroundColor,
+      } : null,
+      nestedVerticalScrollbars,
+      mathShells,
+      hasInternalMathScroll: mathShells.some((shell) => shell.scrollWidth > shell.clientWidth + tolerance),
+      summaryCard: (() => {
+        const node = document.querySelector(".omni-problem-summary-card");
+        const rect = node?.getBoundingClientRect();
+        return node ? {
+          width: rect.width,
+          height: rect.height,
+          escapesViewport: rect.left < -tolerance || rect.right > window.innerWidth + tolerance,
+        } : null;
+      })(),
+    };
+  });
+
+  expect(layout.pageOverflow).toBeLessThanOrEqual(2);
+  expect(layout.boardWidth).toBeGreaterThanOrEqual(1260);
+  expect(layout.flowWidth).toBeGreaterThanOrEqual(1180);
+  expect(layout.minMathFontSize).toBeGreaterThanOrEqual(20);
+  expect(layout.stepRects.every((rect) => rect.width > 0 && rect.height >= 104 && rect.height <= 420)).toBe(true);
+  expect(layout.finalAnswer?.visible).toBe(true);
+  expect(`${layout.finalAnswer?.boxShadow || ""} ${layout.finalAnswer?.background || ""}`).toMatch(/emerald|rgba|linear-gradient/i);
+  expect(layout.summaryCard?.width).toBeGreaterThanOrEqual(1000);
+  expect(layout.summaryCard?.height).toBeGreaterThan(240);
+  expect(layout.summaryCard?.escapesViewport).toBe(false);
+  expect(layout.nestedVerticalScrollbars).toEqual([]);
+  expect(layout.mathShells.every((shell) => shell.width > 0 && shell.height > 0 && !shell.escapesViewport)).toBe(true);
+  expect(layout.hasInternalMathScroll).toBe(true);
+
+  await expect(page.locator(".omni-solution-flow .math-token-defer-subtokens[data-explainable='true']")).toHaveCount(0);
+  const xCubedToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='x^3']").first();
+  await expect(xCubedToken).toBeVisible();
+  const cosineToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='\\\\cos(xy)']").first();
+  const arctanToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='\\\\arctan(x-y)']").first();
+  await expect(cosineToken).toBeVisible();
+  await expect(arctanToken).toBeVisible();
+  const tokenTarget = await xCubedToken.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const stepRect = node.closest(".step-card")?.getBoundingClientRect();
+    return {
+      inspectable: node.getAttribute("data-inspectable"),
+      width: rect.width,
+      stepWidth: stepRect?.width || 0,
+    };
+  });
+  expect(tokenTarget.inspectable).toBe("math-subtoken");
+  expect(tokenTarget.width).toBeGreaterThan(0);
+  expect(tokenTarget.width).toBeLessThan(tokenTarget.stepWidth / 3);
+  await xCubedToken.hover();
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await cosineToken.hover();
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await arctanToken.hover();
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+
+  const xBox = await xCubedToken.boundingBox();
+  const cosBox = await cosineToken.boundingBox();
+  expect(xBox).not.toBeNull();
+  expect(cosBox).not.toBeNull();
+  await page.mouse.move(xBox.x + xBox.width / 2, xBox.y + xBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(cosBox.x + cosBox.width / 2, cosBox.y + cosBox.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-solution-flow .omni-token-selected")).not.toHaveCount(0);
+
+  await xCubedToken.click({ button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+
+  const hoverTarget = page.locator("[data-explainable='true']").first();
+  await expect(hoverTarget).toBeVisible();
+  await hoverTarget.evaluate((node) => node.setAttribute("data-layout-hover-target", "true"));
+  await hoverTarget.focus();
+  await expect(hoverTarget).toBeFocused();
+  await hoverTarget.click();
+
+  await assertLayoutIntegrity(page);
 });
 
 test("low-confidence image review can continue with canonical extracted text", async ({ page }) => {

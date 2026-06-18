@@ -183,6 +183,33 @@ describe("mathAnnotator", () => {
     assert.ok(latex.includes("d\\theta"));
   });
 
+  it("keeps dense vector-calculus substitutions as meaningful token parts", () => {
+    const explanation = annotateMathExplanation({
+      title: "Dense substitution",
+      problem: "Use Stokes theorem.",
+      steps: [{
+        id: "dense-step",
+        label: "Substitute parametric variables into the integrand",
+        math: "x^3+\\frac{\\cos(xy)}{1+x^2+y^2}+\\arctan(x-y)=8\\cos^3\\theta+\\frac{\\cos(6\\cos\\theta\\sin\\theta)}{1+4\\cos^2\\theta+9\\sin^2\\theta}+\\arctan(2\\cos\\theta-3\\sin\\theta)",
+        summary: "Substitute the parameterization.",
+      }],
+    });
+    const line = explanation.steps[0].lines[0];
+    const root = line.tokens[0];
+    const parts = flattenTokens(root.parts);
+    const latex = parts.map((token) => token.latex);
+
+    assert.equal(line.tokens.length, 1);
+    assert.ok(root.display.length > 120);
+    assert.ok(root.parts.length > 6);
+    assert.ok(latex.includes("x^3"));
+    assert.ok(latex.includes("3"));
+    assert.ok(latex.includes("\\cos(xy)"));
+    assert.ok(latex.includes("xy"));
+    assert.ok(latex.includes("\\arctan(x-y)"));
+    assert.ok(latex.includes("1+4\\cos^2\\theta+9\\sin^2\\theta"));
+  });
+
   it("keeps parent groups and leaves explainable in a volume-element equation", () => {
     const expression = annotateExpression({
       id: "expr-volume",

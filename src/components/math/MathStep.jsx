@@ -1,6 +1,6 @@
 import React from "react";
 import { ChevronDown } from "lucide-react";
-import MathRenderer, { looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
+import MathRenderer, { MathRenderShell, looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
 import MathChunk from "./MathChunk";
 import MathText from "./MathText";
 import { useHover } from "@/lib/HoverContext";
@@ -74,15 +74,15 @@ function solutionLinesForStep(step) {
 
 function MathLineShell({ children }) {
   return (
-    <div className="omni-solution-line omni-math-block font-serif text-[18px] italic leading-8 text-cyan-50/90 omni-scrollbar md:text-[20px]">
+    <MathRenderShell className="omni-solution-line omni-math-block font-serif text-[22px] italic leading-[2.35rem] text-cyan-50/92 md:text-[25px] md:leading-[2.75rem]">
       {children}
-    </div>
+    </MathRenderShell>
   );
 }
 
 function MathProseLine({ children }) {
   return (
-    <p className="omni-solution-line max-w-3xl text-sm leading-7 text-slate-300/72">
+    <p className="omni-solution-line omni-text-wrap-safe max-w-6xl text-base leading-8 text-slate-300/78">
       {children}
     </p>
   );
@@ -131,11 +131,11 @@ export function InteractiveMathLine({ line, stepId }) {
   if (hasTokens) {
     return (
       <div
-        className="omni-solution-line omni-equation-line flex max-w-full flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[18px] leading-[1.7] md:text-[20px]"
+        className="math-render-shell math-render-shell-block omni-solution-line omni-equation-line flex max-w-full flex-wrap items-baseline gap-x-2.5 gap-y-2 text-[22px] leading-[2.35rem] md:text-[25px] md:leading-[2.75rem]"
         data-line-role={line.role || "other"}
       >
         {showLineText && (
-          <span className="text-sm leading-7 text-slate-300/70">
+          <span className="omni-text-wrap-safe min-w-0 text-base leading-8 text-slate-300/74">
             {line.text}
           </span>
         )}
@@ -189,6 +189,8 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
   const isActiveStep = activeStepId === step.id;
   const hasWindow = openReferenceIds.includes(step.id);
   const state = isActiveStep ? "active" : selected ? "selected" : "idle";
+  const title = step.label || step.title || `Step ${index + 1}`;
+  const isFinalAnswer = /final\s+answer|answer$/iu.test(String(title || "")) || step.role === "final";
 
   const handleSelect = () => {
     clearSelectedConcept();
@@ -206,17 +208,23 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
   return (
     <article
       data-state={state}
-      className="step-card notebook-step group relative px-0 py-2.5 transition-colors duration-200"
+      data-final-answer={isFinalAnswer ? "true" : undefined}
+      className={cn(
+        "step-card notebook-step group relative px-4 py-5 transition-colors duration-200 md:px-6 md:py-5",
+        isFinalAnswer && "final-answer-step"
+      )}
     >
-      <div className="flex min-w-0 items-start gap-2.5">
+      <div className="flex min-w-0 items-start gap-4">
         <button
           type="button"
           onClick={handleSelect}
           onKeyDown={handleKeyDown}
           className={cn(
-            "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm font-mono text-[10px] transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116]",
-            selected || isActiveStep || hasWindow
-              ? "text-teal-100"
+            "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.035] font-mono text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116]",
+            isFinalAnswer
+              ? "border-emerald-300/35 bg-emerald-300/[0.09] text-emerald-50"
+              : selected || isActiveStep || hasWindow
+              ? "border-teal-300/30 bg-teal-300/[0.09] text-teal-50"
               : "text-slate-500/70 hover:text-teal-100"
           )}
           aria-label={`Select step ${index + 1}`}
@@ -224,16 +232,19 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
           {index + 1}
         </button>
 
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 max-w-full flex-1">
           <button
             type="button"
             onClick={handleSelect}
-            className="block min-w-0 rounded-sm text-left text-[15px] font-semibold leading-6 tracking-normal text-cyan-50/90 transition-colors hover:text-teal-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116] sm:text-base"
+            className={cn(
+              "block min-w-0 rounded-sm text-left text-lg font-semibold leading-8 tracking-normal transition-colors hover:text-teal-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116] md:text-xl",
+              isFinalAnswer ? "text-emerald-50" : "text-cyan-50/94"
+            )}
           >
-            <MathText>{step.label || step.title || `Step ${index + 1}`}</MathText>
+            <MathText>{title}</MathText>
           </button>
 
-          <div className="mt-1.5 grid gap-1.5">
+          <div className="mt-3 grid min-w-0 max-w-full gap-4">
             {lines.map((line, lineIndex) => (
               <InteractiveMathLine
                 key={line.id || `${step.id}-line-${lineIndex}`}
@@ -244,14 +255,14 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
           </div>
 
           {selected && (
-            <div className="mt-2 flex flex-wrap items-center gap-2">
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={(event) => {
                   event.stopPropagation();
                   onToggleExpanded?.(step.id);
                 }}
-                className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-[11px] text-slate-500/72 transition-colors hover:text-teal-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45"
+                className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-xs text-slate-400/78 transition-colors hover:text-teal-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45"
                 aria-expanded={expanded}
               >
                 <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
@@ -261,9 +272,14 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
           )}
 
           {selected && expanded && (
-            <div className="mt-2 grid gap-2">
+            <div className="mt-3 grid gap-2">
               {step.summary && (
-                <p className="max-w-3xl border-l border-teal-300/20 pl-3 text-sm leading-7 text-slate-300/72">
+                <p className={cn(
+                  "omni-text-wrap-safe max-w-6xl border-l pl-4 text-base leading-8",
+                  isFinalAnswer
+                    ? "border-emerald-300/30 text-emerald-50/82"
+                    : "border-teal-300/22 text-slate-300/78"
+                )}>
                   <MathText>{step.summary}</MathText>
                 </p>
               )}

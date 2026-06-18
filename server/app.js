@@ -173,7 +173,9 @@ function redirectDevFrontendRequest(req, res, url) {
 function sendError(res, error) {
   const statusCode = error.statusCode || 500;
   const isServerError = statusCode >= 500;
-  const message = isServerError && isProductionRuntime()
+  const message = error.code === "AI_SERVICE_UNAVAILABLE" && error.publicMessage
+    ? error.publicMessage
+    : isServerError && isProductionRuntime()
     ? error.publicMessage || "The AI backend could not complete the request."
     : error.message || error.publicMessage;
 
@@ -575,6 +577,7 @@ function logSolveTiming({
   prompt = "",
   aiUsage = null,
   apiCallCount = 0,
+  requestBodyChars = null,
 }) {
   const durationMs = Math.max(0, Date.now() - startedAt);
   const normalizedUsage = normalizeOpenAiUsage(aiUsage, estimateTokens(prompt));
@@ -584,6 +587,8 @@ function logSolveTiming({
     source,
     durationMs,
     apiCallCount,
+    promptChars: prompt.length,
+    requestBodyChars,
     inputTokenEstimate: estimateTokens(prompt),
     inputTokens: normalizedUsage.inputTokens || null,
     outputTokens: normalizedUsage.outputTokens || null,
@@ -1053,24 +1058,21 @@ export async function handleSolveExtractedProblemRequest(req, res) {
     throttleRequest(req, identity, "ai");
     assertAiEnabled();
     const body = requireObject(await readJson(req));
+    const requestBodyChars = JSON.stringify(body).length;
     const problemLatex = requireTextProblem(body.problem || body.problemLatex || body.extractedProblemLatex);
     const problemText = optionalShortText(body.problemText || body.extractedProblemText || "", "Problem text", MAX_PROBLEM_CHARS);
     const extraction = requireObject(body.extraction || {}, "Extraction");
     const solveDecision = ["direct", "anyway", "edited"].includes(body.solveDecision)
       ? body.solveDecision
       : "direct";
-    const prompt = buildMathExplanationPrompt({
-      problem: problemLatex,
-      history: [{
-        role: "student",
-        text: problemText ? `Confirmed image extraction text: ${problemText}` : "Confirmed image extraction.",
-      }],
-    });
+    const prompt = buildMathExplanationPrompt({ problem: problemLatex });
     logImageUploadDebug("solve-extracted-input", {
       problemChars: problemLatex.length,
       problemPreview: problemLatex.slice(0, 240),
       problemTextChars: problemText.length,
       problemTextPreview: problemText.slice(0, 240),
+      promptChars: prompt.length,
+      requestBodyChars,
       submittedProblemSource: extraction.submittedProblemSource || "",
       hasPreviewMath: Array.isArray(extraction.previewMath) && extraction.previewMath.length > 0,
     });
@@ -1123,6 +1125,14 @@ export async function handleSolveExtractedProblemRequest(req, res) {
             validateSolutionQuality(result, { problem: problemLatex });
             source = "live AI call";
           } catch (firstError) {
+            if ([
+              "AI_SERVICE_UNAVAILABLE",
+              "AI_PROVIDER_RATE_LIMITED",
+              "AI_SERVICE_ERROR",
+              "SERVER_CONFIG_ERROR",
+            ].includes(firstError.code)) {
+              throw firstError;
+            }
             const repairPrompt = buildRepairSolvePrompt(prompt, firstError.solutionIssues || [firstError.code || firstError.message]);
             result = await createMathExplanation({ prompt: repairPrompt, originalProblem: problemLatex });
             traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM repair solve response");
@@ -1201,6 +1211,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       source,
       identity,
       prompt,
+      requestBodyChars,
       aiUsage: result._aiUsage,
       apiCallCount: result._aiCallCount || 0,
     });

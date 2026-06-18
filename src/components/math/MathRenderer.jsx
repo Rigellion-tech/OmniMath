@@ -174,6 +174,27 @@ export function splitLatexRenderBlocks(value = "") {
   return [{ type: "math", idHint: "math", latex: node.latex, mathNode: node }];
 }
 
+export function MathRenderShell({
+  children,
+  className = "",
+  displayMode = true,
+  role = "math",
+}) {
+  const Tag = displayMode ? "div" : "span";
+  return (
+    <Tag
+      className={[
+        "math-render-shell",
+        displayMode ? "math-render-shell-block" : "math-render-shell-inline",
+        className,
+      ].filter(Boolean).join(" ")}
+      data-math-shell={role}
+    >
+      {children}
+    </Tag>
+  );
+}
+
 function logMathRender(details) {
   console.info("[omnimath:math-render]", details);
 }

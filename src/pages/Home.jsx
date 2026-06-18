@@ -370,6 +370,7 @@ export default function Home() {
     }
 
     const isServerError = status >= 500;
+    const isAiUnavailable = code === "AI_SERVICE_UNAVAILABLE";
     const showBackendMessage = isServerError && import.meta.env.DEV && message;
     setGenerationStatus({
       type: "error",
@@ -378,7 +379,9 @@ export default function Home() {
         : source === "image-solve"
           ? "Solution generation failed"
           : "Generation failed",
-      detail: isServerError
+      detail: isAiUnavailable
+        ? "AI service timed out or connection dropped. Try again."
+        : isServerError
         ? showBackendMessage
           ? message
           : "The AI backend could not complete the request."
@@ -446,7 +449,7 @@ export default function Home() {
 
         <div className="min-h-screen lg:pl-[280px]">
           <header className="sticky top-0 z-40 border-b border-white/[0.06] bg-[#061116]/80 backdrop-blur-xl">
-            <div className="mx-auto flex max-w-[1080px] flex-col gap-4 px-4 py-4 sm:px-6 xl:px-8">
+            <div className="mx-auto flex w-full max-w-[clamp(1100px,88vw,1680px)] flex-col gap-4 px-4 py-4 sm:px-6 xl:px-10">
               <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div className="flex min-w-0 items-center gap-3">
                   <button
@@ -519,7 +522,7 @@ export default function Home() {
             </div>
           </header>
 
-          <main ref={boardRef} className="relative z-10 mx-auto max-w-[1080px] px-4 py-7 sm:px-6 xl:px-8">
+          <main ref={boardRef} className="relative z-10 mx-auto w-full max-w-[clamp(1100px,88vw,1680px)] px-4 py-8 sm:px-6 xl:px-10">
             <div className="mx-auto min-w-0">
               <IssueCard status={generationStatus} />
               <ProblemBlock problem={problem} loading={isGenerating} />

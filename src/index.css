@@ -211,6 +211,7 @@
 
   .solution-board {
     animation: surface-in 360ms ease-out both;
+    --omni-solution-max-width: 96rem;
   }
 
   [data-omni-equation-motion="off"] .solution-board,
@@ -220,6 +221,10 @@
   }
 
   .step-card {
+    box-sizing: border-box;
+    max-width: 100%;
+    min-width: 0;
+    border-radius: 0.75rem;
     background: transparent;
     border: 0;
     box-shadow: none;
@@ -227,42 +232,94 @@
 
   .step-card:hover {
     transform: none;
-    background: transparent;
+    background: rgba(255, 255, 255, 0.015);
     box-shadow: none;
   }
 
   .step-card[data-state="active"],
   .step-card[data-state="selected"] {
-    box-shadow: none;
+    background:
+      linear-gradient(90deg, rgba(45, 212, 191, 0.055), transparent 32%),
+      rgba(255, 255, 255, 0.012);
+    box-shadow: inset 2px 0 0 rgba(45, 212, 191, 0.32);
   }
 
   .step-card[data-state="active"] {
-    background: transparent;
+    background:
+      linear-gradient(90deg, rgba(45, 212, 191, 0.07), transparent 36%),
+      rgba(45, 212, 191, 0.018);
+  }
+
+  .final-answer-step {
+    background:
+      linear-gradient(90deg, rgba(16, 185, 129, 0.095), transparent 40%),
+      rgba(16, 185, 129, 0.025);
+    box-shadow: inset 3px 0 0 rgba(110, 231, 183, 0.42);
   }
 
   .notebook-step + .notebook-step {
-    border-top: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.045);
   }
 
   .omni-equation-line {
     font-feature-settings: "kern" 1;
     word-spacing: 0.04em;
+    flex-wrap: nowrap !important;
   }
 
   .omni-solution-flow {
-    max-width: 62rem;
+    max-width: var(--omni-solution-max-width);
     min-width: 0;
     width: 100%;
-    overflow-x: clip;
+    overflow-x: visible;
+  }
+
+  .math-render-shell {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+    isolation: isolate;
+  }
+
+  .math-render-shell-block {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: clip;
+    overscroll-behavior-inline: contain;
+    contain: inline-size;
+    padding-block: 0.12rem 0.24rem;
+    scrollbar-color: rgba(45, 212, 191, 0.26) transparent;
+    scrollbar-width: thin;
+  }
+
+  .math-render-shell-block::-webkit-scrollbar {
+    height: 5px;
+  }
+
+  .math-render-shell-block::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .math-render-shell-block::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: rgba(45, 212, 191, 0.24);
+  }
+
+  .math-render-shell-inline {
+    display: inline;
+    max-width: 100%;
+    overflow-wrap: normal;
+    vertical-align: baseline;
   }
 
   .omni-solution-line {
-    min-height: 1.8rem;
+    min-height: 2.4rem;
     box-sizing: border-box;
     max-width: 100%;
     min-width: 0;
     overflow-x: auto;
-    overflow-y: visible;
+    overflow-y: clip;
     overscroll-behavior-inline: contain;
   }
 
@@ -282,17 +339,68 @@
     contain: inline-size;
   }
 
+  .omni-problem-card {
+    max-width: var(--omni-solution-max-width);
+    border-radius: 1rem;
+    border: 1px solid rgba(45, 212, 191, 0.14);
+    background: rgba(45, 212, 191, 0.035);
+    padding: 1rem 1.1rem;
+  }
+
+  .omni-problem-summary-card {
+    box-sizing: border-box;
+    max-width: var(--omni-solution-max-width);
+    min-width: 0;
+    border-radius: 1rem;
+    border: 1px solid rgba(45, 212, 191, 0.14);
+    background:
+      linear-gradient(90deg, rgba(45, 212, 191, 0.06), transparent 38%),
+      rgba(255, 255, 255, 0.025);
+    padding: 1rem 1.1rem;
+    box-shadow: inset 2px 0 0 rgba(45, 212, 191, 0.22);
+  }
+
+  .omni-problem-card .omni-solution-line {
+    min-height: 2.7rem;
+  }
+
   .omni-problem-preview .katex-display,
-  .omni-math-block .katex-display {
+  .omni-math-block .katex-display,
+  .math-render-shell-block .katex-display {
+    display: block;
     max-width: 100%;
     margin: 0;
+    overflow: visible;
     text-align: left;
   }
 
   .omni-problem-preview .katex,
   .omni-math-block .katex,
-  .omni-solution-line .katex {
+  .omni-solution-line .katex,
+  .math-render-shell .katex {
     max-width: 100%;
+  }
+
+  .math-render-shell-block > [data-math-renderer="katex"] {
+    display: inline-block;
+    min-width: min-content;
+    max-width: none;
+    white-space: nowrap;
+    vertical-align: baseline;
+  }
+
+  .math-render-shell-inline > [data-math-renderer="katex"] {
+    display: inline;
+    max-width: 100%;
+    vertical-align: baseline;
+  }
+
+  .omni-text-wrap-safe {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    white-space: normal;
   }
 
   .omni-math-expression-list {
@@ -381,10 +489,16 @@
 
   .math-token {
     box-sizing: border-box;
+    flex: 0 0 auto;
     max-width: 100%;
-    overflow-x: auto;
+    min-width: 0;
+    overflow: visible;
     overflow-y: visible;
     vertical-align: baseline;
+  }
+
+  .math-token-defer-subtokens::after {
+    display: none;
   }
 
   .omni-token-selected {
@@ -398,6 +512,7 @@
     align-items: baseline;
     gap: 0;
     max-width: 100%;
+    min-width: 0;
     vertical-align: baseline;
     white-space: nowrap;
   }
@@ -581,6 +696,7 @@
     z-index: 1;
     display: inline-block;
     max-width: 100%;
+    min-width: 0;
     vertical-align: baseline;
     pointer-events: none;
   }
@@ -826,17 +942,18 @@
 .omni-math-text .katex-display {
   margin: calc(var(--omni-equation-padding-y, 0.75rem) * 0.65) 0;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
 }
 .omni-inline-math {
-  white-space: nowrap;
   max-width: 100%;
+  overflow-wrap: normal;
+  vertical-align: baseline;
 }
 .omni-block-math {
   display: block;
   max-width: 100%;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
 }
 
 [data-math-fallback="true"] {

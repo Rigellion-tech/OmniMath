@@ -87,6 +87,7 @@ function ExtractionReviewPanel({
   onTextChange,
   onSolve,
   onCancel,
+  solveError,
 }) {
   const [editing, setEditing] = useState(false);
   if (!extraction) return null;
@@ -99,6 +100,7 @@ function ExtractionReviewPanel({
   const isMedium = tier === "medium";
   const showEditor = editing;
   const canContinue = !solving && Boolean(editedText.trim());
+  const primaryLabel = solveError ? "Retry solve" : "Continue with reviewed text";
   const statusText = isLow
     ? "Review the extracted text, then continue when it looks correct."
     : isMedium
@@ -139,7 +141,7 @@ function ExtractionReviewPanel({
           value={editedText}
           onChange={(event) => onTextChange(event.target.value)}
           rows={8}
-          className="min-h-40 resize-y whitespace-pre-wrap break-normal rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-2 text-sm leading-6 text-slate-100 outline-none transition-colors [overflow-wrap:anywhere] focus:border-teal-200/35"
+          className="omni-text-wrap-safe min-h-40 resize-y whitespace-pre-wrap rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-2 text-sm leading-6 text-slate-100 outline-none transition-colors focus:border-teal-200/35"
           spellCheck={false}
         />
       </label>
@@ -163,6 +165,12 @@ function ExtractionReviewPanel({
         </div>
       )}
 
+      {solveError && (
+        <div className="rounded-lg border border-amber-300/[0.16] bg-amber-300/[0.06] px-2.5 py-1.5 text-xs leading-4 text-amber-50/82">
+          {solveError}
+        </div>
+      )}
+
       <details className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2">
         <summary className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-200/75">
           <FileText className="h-3.5 w-3.5 text-teal-100/70" />
@@ -173,7 +181,7 @@ function ExtractionReviewPanel({
             <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
               Raw extracted LaTeX
             </p>
-            <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-cyan-50/82 omni-scrollbar">
+            <pre className="omni-text-wrap-safe mt-1 max-h-24 overflow-auto whitespace-pre-wrap text-xs leading-5 text-cyan-50/82 omni-scrollbar">
               {extraction.extractedProblemLatex || ""}
             </pre>
           </div>
@@ -198,7 +206,7 @@ function ExtractionReviewPanel({
           className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
         >
           {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          Continue with reviewed text
+          {solving ? "Solving..." : primaryLabel}
         </button>
         <button
           type="button"
@@ -225,6 +233,7 @@ function QualityPanel({
   onCancel,
   onSubmit,
   onSolve,
+  solveError,
 }) {
   if (!preview) return null;
 
@@ -287,6 +296,7 @@ function QualityPanel({
               onTextChange={onTextChange}
               onSolve={onSolve}
               onCancel={onCancel}
+              solveError={solveError}
             />
           ) : (
             <>
@@ -363,6 +373,7 @@ export default function ImageUpload({
   const [submitting, setSubmitting] = useState(false);
   const [extraction, setExtraction] = useState(null);
   const [editedText, setEditedText] = useState("");
+  const [solveError, setSolveError] = useState("");
   const fileRef = useRef(null);
   const previewRef = useRef(null);
   const { getToken } = useAuthToken();
@@ -375,6 +386,7 @@ export default function ImageUpload({
     setQuality(null);
     setExtraction(null);
     setEditedText("");
+    setSolveError("");
     setAnalyzing(false);
     setSubmitting(false);
     if (fileRef.current) fileRef.current.value = "";
@@ -427,6 +439,7 @@ export default function ImageUpload({
     if (!canSubmitImageForAi(quality)) return;
 
     setSubmitting(true);
+    setSolveError("");
     onGenerationStart?.({ source: "image" });
     let extractionSucceeded = false;
 
@@ -470,13 +483,17 @@ export default function ImageUpload({
         code: error.body?.code,
         usage: error.body?.usage,
       });
+      if (extractionSucceeded && error.body?.code === "AI_SERVICE_UNAVAILABLE") {
+        setSolveError("AI service timed out or connection dropped. Try again.");
+      }
       setSubmitting(false);
     }
   };
 
   const solveReviewedExtraction = async (decision) => {
-    if (!extraction || !editedText.trim()) return;
+    if (submitting || !extraction || !editedText.trim()) return;
     setSubmitting(true);
+    setSolveError("");
     onGenerationStart?.({ source: "image" });
 
     try {
@@ -503,6 +520,9 @@ export default function ImageUpload({
         code: error.body?.code,
         usage: error.body?.usage,
       });
+      if (error.body?.code === "AI_SERVICE_UNAVAILABLE") {
+        setSolveError("AI service timed out or connection dropped. Try again.");
+      }
       setSubmitting(false);
     }
   };
@@ -551,6 +571,7 @@ export default function ImageUpload({
         onCancel={resetSelection}
         onSubmit={handleSubmit}
         onSolve={solveReviewedExtraction}
+        solveError={solveError}
       />
     </div>
   );

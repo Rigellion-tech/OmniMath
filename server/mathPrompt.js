@@ -50,7 +50,7 @@ export function buildMathExplanationPrompt({ problem, history = [], image = fals
 - The problemLatex field must be the original problem in clean pure valid LaTeX only.
 - Each steps[].latex field must contain pure valid LaTeX only.
 - The finalAnswerLatex field must contain pure valid LaTeX only.
-- The first step's latex must exactly match problemLatex.`;
+- Do not use the first step to restate problemLatex.`;
 
   return `You are OmniMath, a careful AI math tutor.
 
@@ -59,9 +59,11 @@ ${conversationBlock}${sourceInstruction}
 Generate only the solved problem in the compact JSON schema plus a tiny list of high-value hover anchors. Do not generate hover explanations, pin explanations, related concepts, rule tags, token metadata, subtokens, or alternative methods.
 
 Quality rules:
-- The steps array must contain 1-10 items. Never return more than 10 steps.
-- Prefer 5-10 meaningful steps for involved problems, fewer for simple problems.
-- If a derivation is long, compress algebra into meaningful transformations instead of expanding every substep.
+- The steps array must contain 3-8 meaningful items for most solved problems. Never return more than 8 unless the problem truly requires it.
+- Prefer 3-5 steps for simple problems, 4-7 for moderate problems, and 5-8 for advanced vector calculus.
+- Each step must correspond to a mathematical idea: theorem application, parameterization, symmetry, coordinate transformation, integral evaluation, or verification.
+- Consecutive algebra manipulations must be merged into one conceptual step.
+- Avoid separate steps for substituting z=0, evaluating \\ln(1), evaluating \\sin(0), removing zero terms, or other trivial algebra.
 - Every step must transform or materially justify the math.
 - Every step must include an anchors array, even when empty.
 - Generate at most 3 anchors per step and at most 20 anchors across the whole solution.
@@ -84,6 +86,8 @@ Quality rules:
 - Keep each reasoning field to 1-2 concise sentences, maximum 35 words.
 - Do not restate the entire original problem inside step 1; start with the first meaningful transformation or theorem setup.
 - Do not repeat long problem text in both problemLatex and steps[].latex.
+- Simplify displayed equations before returning them: \\sin(0)=0, \\cos(0)=1, \\ln(1)=0, e^0=1, zero products vanish, and additive zero terms are removed.
+- The final answer belongs in finalAnswerLatex and, if included in steps, only as one clearly titled "Final Answer" step at the end.
 - For verification sections, use compact equations instead of prose-heavy derivations.
 - Return JSON only. Do not include markdown, comments, code fences, or explanatory prose outside JSON.`;
 }

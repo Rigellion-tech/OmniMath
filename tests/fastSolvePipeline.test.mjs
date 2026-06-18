@@ -32,12 +32,13 @@ describe("fast solve pipeline", () => {
     }, { originalProblem: "" });
 
     assert.equal(explanation.originalProblem, "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf{F})\\,dV");
-    assert.equal(explanation.steps[0].math, "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf{F})\\,dV");
-    assert.equal(explanation.steps[1].math, "\\nabla \\cdot (\\nabla \\times \\mathbf{F})=0");
+    assert.equal(explanation.expression, "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf{F})\\,dV");
+    assert.equal(explanation.steps[0].math, "\\nabla \\cdot (\\nabla \\times \\mathbf{F})=0");
+    assert.match(explanation.steps.at(-1).label, /Final answer/i);
     assert.equal(explanation.finalAnswerLatex, "0");
   });
 
-  it("keeps the regression integral as the first rendered line and removes filler steps", () => {
+  it("preserves the source expression while removing filler problem-restatement steps", () => {
     const explanation = convertFastSolveToMathExplanation({
       title: "Evaluate Integral",
       problemLatex: REGRESSION_INTEGRAL,
@@ -79,11 +80,12 @@ describe("fast solve pipeline", () => {
       numericCheck: "",
     }, { originalProblem: REGRESSION_INTEGRAL });
 
-    assert.equal(explanation.steps[0].math, renderMathLatex(REGRESSION_INTEGRAL));
+    assert.equal(explanation.expression, renderMathLatex(REGRESSION_INTEGRAL));
+    assert.equal(explanation.steps[0].math, "t=\\arctan x");
     assert.equal(explanation.steps.some((step) => step.math === "dx"), false);
     assert.equal(explanation.steps.some((step) => /Define integral/i.test(step.label)), false);
 
-    const rendered = renderMathLatex(explanation.steps[0].math);
+    const rendered = renderMathLatex(explanation.expression);
     const html = katex.renderToString(rendered, { throwOnError: false });
     assert.equal(html.includes("merror"), false);
     assert.equal(html.includes("katex-error"), false);
@@ -127,6 +129,27 @@ describe("fast solve pipeline", () => {
     }
   });
 
+  it("simplifies dead terms before displayed equations reach the UI", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Clean substitution",
+      problemLatex: "\\mathbf{F}(x,y,z)",
+      steps: [{
+        id: "step-1",
+        heading: "Substitute the boundary",
+        latex: "\\left\\langle 0\\cdot\\sin(0),8\\cos^3\\theta+\\ln(1)+\\frac{\\cos(0)}{1+4\\cos^2\\theta+9\\sin^2\\theta},\\arctan(2\\cos\\theta-3\\sin\\theta)+0\\right\\rangle",
+        reasoning: "Evaluate the vector field on the boundary.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "18\\pi",
+      numericCheck: "",
+    });
+
+    const rendered = explanation.steps[0].math;
+    assert.match(rendered, /\\langle\s*0,8\\cos\^3\\theta\+\\frac\{1\}\{1\+4\\cos\^2\\theta\+9\\sin\^2\\theta\},\\arctan/);
+    assert.doesNotMatch(rendered, /\\sin\(0\)|\\ln\(1\)|\\cos\(0\)|\+0/);
+    assert.match(explanation.steps.at(-1).label, /Final answer/i);
+  });
+
   it("repairs joined prose artifacts without splitting ordinary function words", () => {
     assert.equal(normalizeDisplayText("dsointegrandbecomes"), "so the integrand becomes");
     assert.equal(normalizeDisplayText("Use the cosine identity"), "Use the cosine identity");
@@ -150,6 +173,8 @@ describe("fast solve pipeline", () => {
 
     assert.equal(explanation.finalAnswer, "\\frac{\\pi}{2}\\ln^2(2)");
     assert.equal(explanation.numericCheck, "0.7546938294602481");
+    assert.equal(explanation.steps.some((step) => /Start with the problem/i.test(step.label)), false);
+    assert.match(explanation.steps.at(-1).label, /Final answer/i);
     assert.equal(explanation.steps.at(-1).math, "\\frac{\\pi}{2}\\ln^2(2)");
   });
 
@@ -186,7 +211,8 @@ describe("fast solve pipeline", () => {
     assert.equal(explanation.extractedProblemText, "Differentiate x squared with respect to x.");
     assert.equal(explanation.extractedProblemLatex, "\\frac{d}{dx} x^2");
     assert.equal(explanation.problem.includes("Please solve"), false);
-    assert.equal(explanation.steps[0].math, "\\frac{d}{dx}x^2=2x");
+    assert.equal(explanation.steps.at(-1).math, "2x");
+    assert.match(explanation.steps.at(-1).label, /Final answer/i);
     assert.equal(explanation.finalAnswerLatex, "2x");
   });
 

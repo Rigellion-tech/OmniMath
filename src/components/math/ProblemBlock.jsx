@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Columns2, Eye, LayoutPanelTop } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Columns2, Eye, FileText, LayoutPanelTop } from "lucide-react";
 import KeyboardShortcutsModal from "./KeyboardShortcutsModal";
 import { InteractiveMathLine } from "./MathStep";
 import MathRenderer from "./MathRenderer";
@@ -8,7 +8,7 @@ import SolutionFlow from "./SolutionFlow";
 import WorkspaceCompareView from "./WorkspaceCompareView";
 import { useHover } from "@/lib/HoverContext";
 import { annotateMathExplanation } from "@/lib/mathAnnotator";
-import { cleanLatexSnippet, getProblemLabel, hasLatexSyntax } from "@/lib/problemLabels";
+import { classifyProblem, cleanLatexSnippet, getProblemLabel, hasLatexSyntax } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 
@@ -72,7 +72,122 @@ function problemStatementLines(problem) {
   return lines;
 }
 
+function getProblemSourceText(problem) {
+  return String(
+    problem?.imageSource?.finalProblemText
+    || problem?.extractedProblemText
+    || problem?.imageSource?.cleanedExtractedText
+    || problem?.imageSource?.rawExtractedText
+    || problem?.originalProblem
+    || problem?.problem
+    || problem?.problemLatex
+    || problem?.expression
+    || ""
+  ).trim();
+}
+
+function getProblemSubtitle(problem, text = "") {
+  const source = `${text} ${problem?.expression || ""} ${problem?.problemLatex || ""}`.toLowerCase();
+  if (/ellipsoid|x\^2\/?4|y\^2\/?9|upper/.test(source)) return "Surface integral over upper ellipsoid cap";
+  if (/paraboloid|z\s*=|9-x\^2-y\^2|9\s*-\s*x/.test(source)) return "Surface integral over upward-oriented paraboloid cap";
+  if (/stokes|curl|\\nabla\s*\\times|\\oint/.test(source)) return "Boundary integral setup from a vector field";
+  if (/green/.test(source)) return "Planar circulation or flux integral";
+  if (/surface\s+integral|vector\s+field/.test(source)) return "Dense vector-calculus expression";
+  return cleanLatexSnippet(text || problem?.title || "", "Reviewed math problem", 78);
+}
+
+function getProblemMetadata(problem) {
+  const parts = [];
+  if (problem?.imageSource || problem?.extractedProblemText || problem?.extractedProblemLatex) {
+    parts.push("From image OCR");
+  }
+  if (problem?.imageSource?.solveDecision === "edited" || problem?.imageSource?.editedBeforeSolving) {
+    parts.push("edited extraction");
+  } else if (problem?.imageSource || problem?.extractedProblemText || problem?.extractedProblemLatex) {
+    parts.push("reviewed extraction");
+  }
+  const confidence = problem?.confidence ?? problem?.extractionValidation?.confidence;
+  if (Number.isFinite(confidence)) parts.push(`${Math.round(confidence)}% confidence`);
+  return parts.join(" · ") || "Solved problem";
+}
+
+function ProblemSummaryCard({ problem, lines }) {
+  const [expanded, setExpanded] = useState(false);
+  const sourceText = getProblemSourceText(problem);
+  const title = classifyProblem(problem, getProblemLabel(problem, "Math Problem"));
+  const subtitle = getProblemSubtitle(problem, sourceText);
+  const metadata = getProblemMetadata(problem);
+  const hasFullProblem = Boolean(sourceText || lines.length > 0);
+
+  return (
+    <div className="omni-problem-summary-card mt-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0">
+          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-teal-100/70">
+            Problem summary
+          </p>
+          <h3 className="mt-1 text-xl font-semibold leading-7 text-cyan-50 md:text-2xl">
+            {title}
+          </h3>
+          <p className="mt-1 text-base leading-7 text-slate-200/78">
+            {subtitle}
+          </p>
+          <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.12em] text-slate-400/72">
+            {metadata}
+          </p>
+        </div>
+        {hasFullProblem && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-teal-300/[0.18] bg-teal-300/[0.055] px-3 text-sm font-semibold text-teal-50/88 transition-colors hover:bg-teal-300/[0.09] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45"
+            aria-expanded={expanded}
+          >
+            <FileText className="h-4 w-4" />
+            {expanded ? "Hide full problem" : "View full problem"}
+            <ChevronDown className={cn("h-4 w-4 transition-transform", expanded && "rotate-180")} />
+          </button>
+        )}
+      </div>
+
+      {expanded && (
+        <div className="mt-4 grid gap-3 border-t border-white/[0.07] pt-4">
+          {sourceText && (
+            <div className="rounded-xl border border-white/[0.07] bg-black/15 px-4 py-3">
+              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+                Full problem text
+              </p>
+              <p className="omni-text-wrap-safe mt-2 whitespace-pre-wrap text-base leading-8 text-slate-100/84">
+                {sourceText}
+              </p>
+            </div>
+          )}
+
+          {lines.length > 0 && (
+            <div className="rounded-xl border border-teal-300/[0.12] bg-teal-300/[0.035] px-4 py-3">
+              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-100/62">
+                Math preview
+              </p>
+              <div className="mt-2 grid gap-3">
+                {lines.map((line) => (
+                  <div
+                    key={line.id}
+                    className="min-w-0 max-w-full font-serif text-[20px] italic leading-[2.2rem] text-cyan-50/90 md:text-[22px] md:leading-[2.45rem]"
+                  >
+                    <InteractiveMathLine line={line} stepId="full-problem-preview" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ExtractionReview({ problem }) {
+  const [expanded, setExpanded] = useState(false);
   const extractedText = problem.extractedProblemText || "";
   const extractedLatex = problem.extractedProblemLatex || "";
   const displaySegments = Array.isArray(problem.displaySegments)
@@ -141,15 +256,38 @@ function ExtractionReview({ problem }) {
         )}
       </div>
 
-      {extractedText && (
-        <p className="mt-3 whitespace-pre-wrap break-normal text-sm leading-6 text-slate-200/82 [overflow-wrap:anywhere]">
-          {extractedText}
+      <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <p className="omni-text-wrap-safe text-sm leading-6 text-slate-200/78">
+          {classifyProblem(extractedText || extractedLatex, "Reviewed extracted problem")}
+          {extractedText ? " · Full OCR text is available for review." : ""}
         </p>
+        {(extractedText || shouldShowRenderedFallback || latexLine) && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.035] px-2.5 text-xs font-semibold text-slate-200/78 transition-colors hover:bg-white/[0.06] hover:text-teal-100"
+            aria-expanded={expanded}
+          >
+            {expanded ? "Hide OCR details" : "View OCR details"}
+            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+          </button>
+        )}
+      </div>
+
+      {expanded && extractedText && (
+        <div className="mt-3 rounded-xl border border-white/[0.06] bg-black/15 px-3 py-2.5">
+          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+            Full OCR text
+          </p>
+          <p className="omni-text-wrap-safe mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200/82">
+            {extractedText}
+          </p>
+        </div>
       )}
 
-      {shouldShowRenderedFallback && (
+      {expanded && shouldShowRenderedFallback && (
         <div className="omni-problem-preview mt-3 rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 omni-scrollbar">
-          <div className="flex min-w-max flex-wrap items-baseline gap-x-2 gap-y-1 text-sm leading-7 text-slate-200/86">
+          <div className="flex min-w-0 max-w-full flex-wrap items-baseline gap-x-2 gap-y-1 text-sm leading-7 text-slate-200/86">
             {displaySegments.map((segment, index) => (
               segment.type === "math" ? (
                 <span key={`math-${index}`} className="font-serif italic text-cyan-50/92">
@@ -160,14 +298,14 @@ function ExtractionReview({ problem }) {
                   />
                 </span>
               ) : (
-                <span key={`text-${index}`}>{segment.text}</span>
+                <span key={`text-${index}`} className="omni-text-wrap-safe">{segment.text}</span>
               )
             ))}
           </div>
         </div>
       )}
 
-      {latexLine && (
+      {expanded && latexLine && (
         <div className="omni-problem-preview mt-2 rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 font-serif italic text-cyan-50/92 omni-scrollbar">
           <InteractiveMathLine line={latexLine} stepId="extracted-problem" />
         </div>
@@ -290,28 +428,19 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
 
   return (
     <section className="solution-board min-w-0 max-w-full overflow-x-hidden">
-      <div className="mb-5 grid gap-4">
-        <div className="flex flex-col gap-4 border-b border-white/[0.07] pb-5 md:flex-row md:items-end md:justify-between">
+      <div className="mb-6 grid gap-4">
+        <div className="flex max-w-[96rem] flex-col gap-4 border-b border-white/[0.07] pb-6 md:flex-row md:items-end md:justify-between">
           <div className="min-w-0 w-full max-w-full">
             <h2 className="text-2xl font-semibold tracking-normal text-cyan-50 md:text-3xl">
               {solutionTitle}
             </h2>
             {description && (
-              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300/66">
+              <p className="omni-text-wrap-safe mt-2 max-w-5xl text-[15px] leading-7 text-slate-300/68">
                 {description}
               </p>
             )}
             {hasExpression ? (
-              <div className="omni-problem-preview mt-4 grid gap-2 border-l border-teal-300/25 py-2 pl-4">
-                {problemLines.map((line) => (
-                  <div
-                    key={line.id}
-                    className="omni-math-block font-serif italic text-cyan-50/92 omni-scrollbar"
-                  >
-                    <InteractiveMathLine line={line} stepId="problem-statement" />
-                  </div>
-                ))}
-              </div>
+              <ProblemSummaryCard problem={problem} lines={problemLines} />
             ) : (
               <div className="mt-3 rounded-xl border border-teal-300/[0.12] bg-teal-300/[0.045] px-4 py-3 text-sm leading-6 text-slate-300/62">
                 Enter a problem or upload an image to begin.
@@ -334,7 +463,7 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
         </div>
       ) : (
         <>
-          <div className="mb-2 flex flex-wrap gap-1.5 border-b border-white/[0.04] pb-2">
+          <div className="mb-3 flex max-w-[96rem] flex-wrap gap-1.5 border-b border-white/[0.04] pb-3">
             {[
               { key: "board", label: "Main board", icon: LayoutPanelTop },
               { key: "compare", label: "Compare Methods", icon: Columns2 },

@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 
 const OPERATOR_PATTERN = /^(=|\+|-|\\le|\\ge|<=|>=|<|>|\\cdot|\u00b7|,|\(|\)|\\Rightarrow|\\to)$/;
 const noop = () => {};
+const LARGE_ANNOTATED_CHUNK_CHARS = 48;
 
 function safeText(value, fallback = "") {
   if (value === null || value === undefined) return fallback;
@@ -63,6 +64,11 @@ function tokenHitboxWeight(token) {
 
 function isOperatorToken(token) {
   return token?.role === "operator" || OPERATOR_PATTERN.test(String(token?.display || token?.latex || "").trim());
+}
+
+function isLargeAnnotatedToken(token, parts = []) {
+  const compact = safeText(token?.display || token?.latex || token?.text).replace(/\s+/g, "");
+  return parts.length > 2 && compact.length > LARGE_ANNOTATED_CHUNK_CHARS;
 }
 
 function isPowerToken(token) {
@@ -184,6 +190,7 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
     <span
       data-subtoken="true"
       data-token-id={safePart.id}
+      data-token-latex={safePart.latex}
       data-token-depth={depth}
       data-token-role={safePart.role || "other"}
       data-explainable="true"
@@ -376,6 +383,7 @@ function MathChunk({ chunk, stepId }) {
   const parts = safeChunk.parts;
   const hasParts = parts.length > 0;
   const isOperator = isOperatorToken(safeChunk);
+  const deferToSubTokens = isLargeAnnotatedToken(safeChunk, parts);
 
   const handleClick = (event) => {
     event.stopPropagation();
@@ -461,26 +469,29 @@ function MathChunk({ chunk, stepId }) {
   return (
     <span
       ref={tokenRef}
-      data-explainable="true"
+      data-explainable={deferToSubTokens ? undefined : "true"}
       data-inspectable="math-token"
+      data-token-id={safeChunk.id}
+      data-token-latex={safeChunk.latex}
       data-token-role={safeChunk.role || (isOperator ? "operator" : "other")}
       data-hover-active="false"
-      tabIndex={0}
+      tabIndex={deferToSubTokens ? undefined : 0}
       aria-label={accessibleTitle}
-      onMouseEnter={hasParts ? handleAnnotatedEnter : undefined}
-      onMouseMove={hasParts ? handleAnnotatedMove : undefined}
-      onMouseLeave={hasParts ? handleAnnotatedLeave : undefined}
-      onMouseDown={(event) => beginTokenSelection(safeChunk, stepId, event)}
-      onMouseUp={finishTokenSelection}
-      onFocus={handleFocus}
-      onBlur={handleBlur}
-      onContextMenu={(event) => {
+      onMouseEnter={hasParts && !deferToSubTokens ? handleAnnotatedEnter : undefined}
+      onMouseMove={hasParts && !deferToSubTokens ? handleAnnotatedMove : undefined}
+      onMouseLeave={hasParts && !deferToSubTokens ? handleAnnotatedLeave : undefined}
+      onMouseDown={deferToSubTokens ? undefined : (event) => beginTokenSelection(safeChunk, stepId, event)}
+      onMouseUp={deferToSubTokens ? undefined : finishTokenSelection}
+      onFocus={deferToSubTokens ? undefined : handleFocus}
+      onBlur={deferToSubTokens ? undefined : handleBlur}
+      onContextMenu={deferToSubTokens ? undefined : (event) => {
         handleChunkRightClick(safeChunk, stepId, event);
       }}
-      onClick={handleClick}
+      onClick={deferToSubTokens ? undefined : handleClick}
       className={cn(
         "math-token explainable-token relative -mx-0.5 inline-block cursor-help select-none rounded-sm px-0.5 py-0 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45",
         hasParts && "math-token-group",
+        deferToSubTokens && "math-token-defer-subtokens cursor-default",
         isOperator && "math-token-operator",
         isSelected && "omni-token-selected",
         isSiblingActive && !isPinned && !isConceptRelated && "opacity-45",

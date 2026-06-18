@@ -1,4 +1,6 @@
 import { loadEnvFiles } from "./env.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { Agent } from "undici";
 import {
   assertCompareMethods,
   assertCompactSolveResponse,
@@ -25,6 +27,9 @@ const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 4200;
 const DEFAULT_LAZY_MAX_OUTPUT_TOKENS = 700;
 const DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1700;
+const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 60000;
+const DEFAULT_OPENAI_IMAGE_EXTRACTION_TIMEOUT_MS = 45000;
+const DEFAULT_OPENAI_RETRY_BASE_DELAY_MS = 500;
 const COMPLEX_SOLVE_MAX_OUTPUT_TOKENS = 6500;
 const COMPACT_SOLVE_MAX_OUTPUT_TOKENS = 2400;
 const DEFAULT_INPUT_COST_PER_1M_TOKENS = 5;
@@ -53,6 +58,22 @@ export function assertOpenAiConfigured() {
 function readPositiveNumber(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function getOpenAiRequestTimeoutMs(modelPath = "solver") {
+  const fallback = modelPath === "imageExtraction"
+    ? DEFAULT_OPENAI_IMAGE_EXTRACTION_TIMEOUT_MS
+    : DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
+  return readPositiveNumber("OPENAI_REQUEST_TIMEOUT_MS", fallback);
+}
+
+function getOpenAiRetryBaseDelayMs() {
+  return readPositiveNumber("OPENAI_RETRY_BASE_DELAY_MS", DEFAULT_OPENAI_RETRY_BASE_DELAY_MS);
+}
+
+function getOpenAiMaxAttempts(modelPath = "solver") {
+  if (modelPath === "solver") return 3;
+  return 2;
 }
 
 export function getOpenAiModel() {
@@ -110,6 +131,7 @@ export function getOpenAiRuntimeConfig() {
     solveMaxOutputTokens: getSolveMaxOutputTokens(),
     lazyMaxOutputTokens: getLazyMaxOutputTokens(),
     imageExtractionMaxOutputTokens: getImageExtractionMaxOutputTokens(),
+    requestTimeoutMs: getOpenAiRequestTimeoutMs("solver"),
     organizationConfigured: Boolean(process.env.OPENAI_ORG_ID || process.env.OPENAI_ORGANIZATION),
     projectConfigured: Boolean(process.env.OPENAI_PROJECT_ID || process.env.OPENAI_PROJECT),
   };
@@ -232,6 +254,184 @@ function logOpenAiNonProviderError({ purpose, error }) {
       : null,
     stack: error.stack,
   });
+}
+
+const TRANSIENT_NETWORK_CODES = new Set([
+  "ECONNRESET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "AbortError",
+  "TimeoutError",
+]);
+const RETRYABLE_PROVIDER_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504]);
+const NON_RETRYABLE_PROVIDER_CODES = new Set([
+  "invalid_api_key",
+  "insufficient_quota",
+  "billing_hard_limit_reached",
+  "billing_not_active",
+  "context_length_exceeded",
+  "invalid_request_error",
+  "authentication_error",
+  "permission_error",
+]);
+const openAiAgents = new Map();
+
+function getOpenAiAgent(timeoutMs) {
+  const key = String(timeoutMs);
+  if (!openAiAgents.has(key)) {
+    openAiAgents.set(key, new Agent({ connect: { timeout: timeoutMs } }));
+  }
+  return openAiAgents.get(key);
+}
+
+function getErrorCauseCode(error) {
+  return error?.cause?.code
+    || error?.code
+    || error?.cause?.name
+    || error?.name
+    || null;
+}
+
+function getErrorCauseMessage(error) {
+  return error?.cause?.message || error?.message || "";
+}
+
+function isTransientNetworkError(error) {
+  const code = getErrorCauseCode(error);
+  if (TRANSIENT_NETWORK_CODES.has(code)) return true;
+  const message = getErrorCauseMessage(error);
+  if (code === "ENOTFOUND") {
+    return /api\.openai\.com|getaddrinfo|dns|resolve/i.test(message);
+  }
+  return /connect timeout|timed out|connection.*reset|network.*temporar/i.test(message);
+}
+
+function isRetryableProviderError(response, responseBody) {
+  if (!RETRYABLE_PROVIDER_STATUSES.has(response.status)) return false;
+  const providerCode = responseBody?.error?.code || responseBody?.error?.type || null;
+  if (providerCode && NON_RETRYABLE_PROVIDER_CODES.has(providerCode)) return false;
+  if (response.status === 429 && /quota|billing/i.test(String(responseBody?.error?.message || ""))) return false;
+  return true;
+}
+
+function createOpenAiUnavailableError(error, { statusCode = 503 } = {}) {
+  return Object.assign(new Error(`OpenAI request failed: ${getErrorCauseMessage(error) || "service unavailable"}`, { cause: error }), {
+    statusCode,
+    code: "AI_SERVICE_UNAVAILABLE",
+    publicMessage: "The AI service is temporarily unreachable. Check your internet connection and try again.",
+    providerStatus: error?.providerStatus || null,
+    providerCode: error?.providerCode || null,
+    networkCauseCode: getErrorCauseCode(error),
+    networkCauseMessage: getErrorCauseMessage(error),
+  });
+}
+
+function createProviderError(response, responseBody) {
+  const providerCode = responseBody.error?.code || responseBody.error?.type || null;
+  const message = responseBody.error?.message || `OpenAI request failed with status ${response.status}`;
+  return Object.assign(new Error(message), {
+    statusCode: response.status === 429 ? 429 : 502,
+    code: response.status === 429 ? "AI_PROVIDER_RATE_LIMITED" : "AI_SERVICE_ERROR",
+    providerStatus: response.status,
+    providerCode,
+    publicMessage: response.status === 429
+      ? "The AI service is busy or rate limited. Please try again later."
+      : "The AI service could not complete the request.",
+  });
+}
+
+function getOpenAiRetryDelayMs(attempt) {
+  const base = getOpenAiRetryBaseDelayMs();
+  const planned = attempt <= 1 ? base : Math.round(base * 3 * (attempt - 1));
+  const jitter = Math.round(Math.random() * Math.max(25, base * 0.25));
+  return planned + jitter;
+}
+
+function logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error, response }) {
+  console.warn("[omnimath:openai-retry]", {
+    purpose,
+    model,
+    attempt,
+    maxAttempts,
+    causeCode: response?.status || getErrorCauseCode(error),
+    causeMessage: response
+      ? response.statusText || `HTTP ${response.status}`
+      : getErrorCauseMessage(error),
+    elapsedMs: Date.now() - startedAt,
+  });
+}
+
+async function readOpenAiResponseBody(response) {
+  const responseText = await response.text();
+  try {
+    return responseText ? JSON.parse(responseText) : {};
+  } catch {
+    return { error: { message: responseText } };
+  }
+}
+
+async function fetchOpenAiWithRetry({ purpose, modelPath, payload }) {
+  const model = payload.model;
+  const maxAttempts = getOpenAiMaxAttempts(modelPath);
+  const timeoutMs = getOpenAiRequestTimeoutMs(modelPath);
+  const startedAt = Date.now();
+  let lastRetryableError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(OPENAI_RESPONSES_URL, {
+        method: "POST",
+        headers: createOpenAiHeaders(),
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+        dispatcher: getOpenAiAgent(timeoutMs),
+      });
+    } catch (error) {
+      logOpenAiNonProviderError({ purpose, error });
+      if (error.code === "SERVER_CONFIG_ERROR") throw error;
+      if (!isTransientNetworkError(error) || attempt >= maxAttempts) {
+        throw createOpenAiUnavailableError(error);
+      }
+
+      lastRetryableError = error;
+      logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error });
+      await delay(getOpenAiRetryDelayMs(attempt));
+      continue;
+    }
+
+    const responseBody = await readOpenAiResponseBody(response);
+    if (response.ok) {
+      return responseBody;
+    }
+
+    logOpenAiProviderError({ purpose, response, responseBody });
+    if (!isRetryableProviderError(response, responseBody)) {
+      throw createProviderError(response, responseBody);
+    }
+
+    const providerError = Object.assign(
+      new Error(responseBody.error?.message || `OpenAI request failed with status ${response.status}`),
+      {
+        providerStatus: response.status,
+        providerCode: responseBody.error?.code || responseBody.error?.type || null,
+        code: `HTTP_${response.status}`,
+      }
+    );
+
+    if (attempt >= maxAttempts) {
+      throw createOpenAiUnavailableError(providerError, {
+        statusCode: response.status === 429 ? 502 : 503,
+      });
+    }
+
+    lastRetryableError = providerError;
+    logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error: providerError, response });
+    await delay(getOpenAiRetryDelayMs(attempt));
+  }
+
+  throw createOpenAiUnavailableError(lastRetryableError || new Error("OpenAI request failed."));
 }
 
 export function estimatePromptTokens(text = "") {
@@ -423,107 +623,24 @@ async function requestOpenAi({
       },
     },
   };
-  let response;
-  try {
-    logOpenAiModelSelection(modelPath, { purpose });
-    logOpenAiRequest({ purpose, payload });
-    response = await fetch(OPENAI_RESPONSES_URL, {
-      method: "POST",
-      headers: createOpenAiHeaders(),
-      body: JSON.stringify(payload),
-    });
-  } catch (error) {
-    logOpenAiNonProviderError({ purpose, error });
-    if (error.code === "SERVER_CONFIG_ERROR") throw error;
-    throw Object.assign(new Error(`OpenAI request failed: ${error.message}`, { cause: error }), {
-      statusCode: 502,
-      code: "AI_SERVICE_UNAVAILABLE",
-      publicMessage: "The AI service is temporarily unreachable.",
-      providerStatus: null,
-      providerCode: null,
-      networkCauseCode: error.cause?.code || error.code || null,
-      networkCauseMessage: error.cause?.message || error.message,
-    });
-  }
-
-  const responseText = await response.text();
-  let responseBody;
-  try {
-    responseBody = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    responseBody = { error: { message: responseText } };
-  }
-
-  if (!response.ok) {
-    logOpenAiProviderError({ purpose, response, responseBody });
-    const providerCode = responseBody.error?.code || responseBody.error?.type || null;
-    const message = responseBody.error?.message || `OpenAI request failed with status ${response.status}`;
-    throw Object.assign(new Error(message), {
-      statusCode: response.status === 429 ? 429 : 502,
-      code: response.status === 429 ? "AI_PROVIDER_RATE_LIMITED" : "AI_SERVICE_ERROR",
-      providerStatus: response.status,
-      providerCode,
-      publicMessage: response.status === 429
-        ? "The AI service is busy or rate limited. Please try again later."
-        : "The AI service could not complete the request.",
-    });
-  }
+  logOpenAiModelSelection(modelPath, { purpose });
+  logOpenAiRequest({ purpose, payload });
+  const responseBody = await fetchOpenAiWithRetry({ purpose, modelPath, payload });
 
   logOpenAiResponse({ purpose, responseBody, outputText: extractOutputText(responseBody) });
   return responseBody;
 }
 
 async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "text_completion", modelPath = "solver" }) {
+  const model = getOpenAiModelForPath(modelPath);
   const payload = {
-    model: getOpenAiModelForPath(modelPath),
+    model,
     input: [{ role: "user", content }],
     max_output_tokens: maxOutputTokens,
   };
-  let response;
-  try {
-    logOpenAiModelSelection(modelPath, { purpose });
-    logOpenAiRequest({ purpose, payload });
-    response = await fetch(OPENAI_RESPONSES_URL, {
-      method: "POST",
-      headers: createOpenAiHeaders(),
-      body: JSON.stringify(payload),
-    });
-  } catch (error) {
-    logOpenAiNonProviderError({ purpose, error });
-    if (error.code === "SERVER_CONFIG_ERROR") throw error;
-    throw Object.assign(new Error(`OpenAI request failed: ${error.message}`, { cause: error }), {
-      statusCode: 502,
-      code: "AI_SERVICE_UNAVAILABLE",
-      publicMessage: "The AI service is temporarily unreachable.",
-      providerStatus: null,
-      providerCode: null,
-      networkCauseCode: error.cause?.code || error.code || null,
-      networkCauseMessage: error.cause?.message || error.message,
-    });
-  }
-
-  const responseText = await response.text();
-  let responseBody;
-  try {
-    responseBody = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    responseBody = { error: { message: responseText } };
-  }
-
-  if (!response.ok) {
-    logOpenAiProviderError({ purpose, response, responseBody });
-    const providerCode = responseBody.error?.code || responseBody.error?.type || null;
-    const message = responseBody.error?.message || `OpenAI request failed with status ${response.status}`;
-    throw Object.assign(new Error(message), {
-      statusCode: response.status === 429 ? 429 : 502,
-      code: response.status === 429 ? "AI_PROVIDER_RATE_LIMITED" : "AI_SERVICE_ERROR",
-      providerStatus: response.status,
-      providerCode,
-      publicMessage: response.status === 429
-        ? "The AI service is busy or rate limited. Please try again later."
-        : "The AI service could not complete the request.",
-    });
-  }
+  logOpenAiModelSelection(modelPath, { purpose });
+  logOpenAiRequest({ purpose, payload });
+  const responseBody = await fetchOpenAiWithRetry({ purpose, modelPath, payload });
 
   return {
     text: extractOutputText(responseBody).trim(),
@@ -627,7 +744,7 @@ export async function createMathExplanation({ prompt, image, originalProblem = "
   }
   const result = image
     ? convertImageSolveToMathExplanation(parsed)
-    : convertFastSolveToMathExplanation(parsed, { originalProblem, includeProblemStep: !compactFallback });
+    : convertFastSolveToMathExplanation(parsed, { originalProblem, includeProblemStep: false });
 
   if (compactFallback) {
     result.runtimeNotice = "Compact explanation generated because the full structured response was too long.";

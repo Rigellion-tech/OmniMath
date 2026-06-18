@@ -9,7 +9,7 @@ import { useHover } from "@/lib/HoverContext";
 import { userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { getProblemLabel } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
-import { getTooltipPositionFromRect } from "@/lib/tooltipPosition";
+import { clampTooltipPosition, getTooltipPositionFromRect } from "@/lib/tooltipPosition";
 import { cn } from "@/lib/utils";
 
 const DEPTHS = [
@@ -764,7 +764,7 @@ export function ExplanationPopover() {
     if (!tooltip || !anchor) return;
 
     const tooltipRect = tooltip.getBoundingClientRect();
-    const hoveredRects = Array.from(document.querySelectorAll("[data-explainable='true']:hover, .omni-solution-line:hover"))
+    const hoveredRects = Array.from(document.querySelectorAll("[data-explainable='true']:hover"))
       .map((node) => node.getBoundingClientRect())
       .filter((rect) => rect.width > 0 && rect.height > 0);
     const collisionAnchor = hoveredRects.reduce((current, rect) => ({
@@ -792,10 +792,22 @@ export function ExplanationPopover() {
       width: tooltipRect.width,
       height: tooltipRect.height,
     };
+    const gap = 12;
+    const padding = 12;
     const candidates = [
-      getTooltipPositionFromRect(collisionAnchor, { size, viewport, gap: 12, padding: 12 }),
-      getTooltipPositionFromRect(collisionAnchor, { index: 1, size, viewport, gap: 12, padding: 12 }),
-    ];
+      { x: collisionAnchor.right + gap, y: collisionAnchor.top },
+      { x: collisionAnchor.left - gap - size.width, y: collisionAnchor.top },
+      {
+        x: collisionAnchor.left + collisionAnchor.width / 2 - size.width / 2,
+        y: collisionAnchor.bottom + gap,
+      },
+      {
+        x: collisionAnchor.left + collisionAnchor.width / 2 - size.width / 2,
+        y: collisionAnchor.top - gap - size.height,
+      },
+      getTooltipPositionFromRect(collisionAnchor, { size, viewport, gap, padding }),
+      getTooltipPositionFromRect(collisionAnchor, { index: 1, size, viewport, gap, padding }),
+    ].map((candidate) => clampTooltipPosition(candidate.x, candidate.y, size, viewport, padding));
     const next = candidates.find((candidate) => {
       const rect = {
         left: candidate.x,
@@ -811,7 +823,7 @@ export function ExplanationPopover() {
         ? current
         : next
     ));
-  }, [hoverLens]);
+  }, [hoverLens, lazyState.data, lazyState.error, lazyState.loading]);
 
   if (!hoverLens) return null;
 

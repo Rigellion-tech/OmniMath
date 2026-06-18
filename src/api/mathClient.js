@@ -8,8 +8,11 @@ async function parseResponse(response) {
     const message = typeof body === "object" && body !== null
       ? body.message || body.error
       : body;
+    const friendlyMessage = typeof body === "object" && body?.code === "AI_SERVICE_UNAVAILABLE"
+      ? "AI service timed out or connection dropped. Try again."
+      : message;
     throw Object.assign(
-      new Error(message || `Request failed with status ${response.status}`),
+      new Error(friendlyMessage || `Request failed with status ${response.status}`),
       { status: response.status, body }
     );
   }

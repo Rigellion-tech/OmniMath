@@ -707,6 +707,41 @@ function compactLatex(value = "") {
     .replace(/\\left|\\right|\{|\}/g, "");
 }
 
+function normalizeLatexForComparison(value = "") {
+  return compactLatex(value).replace(/\\,/g, "");
+}
+
+function simplifyDisplayedLatex(value = "") {
+  let output = String(value || "");
+  let previous = "";
+  const zeroProductPatterns = [
+    /(?:^|(?<=[=,+\-]))\s*0\s*\\cdot\s*[^,+\-=&]+/g,
+    /(?:^|(?<=[=,+\-]))\s*[^,+\-=&]+\s*\\cdot\s*0(?=\s*(?:[,+\-=&]|$))/g,
+  ];
+
+  while (output !== previous) {
+    previous = output;
+    output = output
+      .replace(/\\sin\s*(?:\{0\}|\(0\)|0\b)/g, "0")
+      .replace(/\\cos\s*(?:\{0\}|\(0\)|0\b)/g, "1")
+      .replace(/\\ln\s*(?:\{1\}|\(1\)|1\b)/g, "0")
+      .replace(/e\^\{0\}|e\^0\b/g, "1");
+
+    for (const pattern of zeroProductPatterns) {
+      output = output.replace(pattern, "0");
+    }
+
+    output = output
+      .replace(/\+\s*0(?=\s*(?:[,+\-\]&]|\\right|\\rangle|$))/g, "")
+      .replace(/(?<=[=,\[\{(])\s*0\s*\+\s*/g, "")
+      .replace(/-\s*0(?=\s*(?:[,+\-\]&]|\\right|\\rangle|$))/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  return output;
+}
+
 function evaluateSimpleLatexNumber(value = "") {
   const text = compactLatex(value)
     .replace(/^\\boxed/, "")
@@ -771,7 +806,6 @@ function correctRegressionFinalAnswerIfNeeded(solve) {
 }
 
 function isDuplicateProblemStep(step, problemLatex, index = 0) {
-  if (index !== 0) return false;
   const stepLatex = sanitizeGeneratedLatex(step?.latex);
   if (!stepLatex || !problemLatex) return false;
   if (compactLatex(stepLatex) === compactLatex(problemLatex)) return true;
@@ -779,38 +813,73 @@ function isDuplicateProblemStep(step, problemLatex, index = 0) {
     && compactLatex(stepLatex).includes(compactLatex(problemLatex).slice(0, 32));
 }
 
-export function assertFastSolveResponse(value, originalProblem = "", { includeProblemStep = true } = {}) {
-  if (!value || typeof value !== "object") {
-    throw createInvalidResponseError("Model returned an invalid solve response.");
-  }
+function isFinalAnswerHeading(value = "") {
+  return /final\s+answer|answer$/iu.test(safeString(value));
+}
 
-  const problemLatex = sanitizeGeneratedLatex(value.problemLatex || originalProblem);
-  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex);
-  const rawSteps = Array.isArray(value.steps) ? value.steps : [];
-  if (!isString(value.title) || !problemLatex || rawSteps.length === 0 || !finalAnswerLatex) {
-    throw createInvalidResponseError("Model response is missing required solve fields.");
-  }
+function isRedundantFinalAnswerStep(step, finalAnswerLatex = "") {
+  if (!finalAnswerLatex) return false;
+  const stepLatex = normalizeLatexForComparison(sanitizeGeneratedLatex(step?.latex));
+  const finalLatex = normalizeLatexForComparison(finalAnswerLatex);
+  return Boolean(stepLatex && finalLatex && stepLatex === finalLatex);
+}
 
+function normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex } = {}) {
   const steps = rawSteps
     .map((step, index) => ({
       id: normalizeStepId(step?.id, index),
       heading: safeString(step?.heading || `Step ${index + 1}`),
-      latex: sanitizeGeneratedLatex(step?.latex),
+      latex: simplifyDisplayedLatex(sanitizeGeneratedLatex(step?.latex)),
       reasoning: safeString(step?.reasoning),
       anchors: Array.isArray(step?.anchors) ? step.anchors : [],
     }))
     .filter((step, index) => (
       step.latex
-      && (index === 0 || !isStandaloneDifferential(step.latex))
+      && !isStandaloneDifferential(step.latex)
       && !isFillerHeading(step.heading)
+      && !isDuplicateProblemStep(step, problemLatex, index)
     ));
+
+  const nonFinalSteps = steps.filter((step) => !isRedundantFinalAnswerStep(step, finalAnswerLatex));
+  if (finalAnswerLatex) {
+    const finalStep = steps.find((step) => isRedundantFinalAnswerStep(step, finalAnswerLatex));
+    return [
+      ...nonFinalSteps,
+      finalStep
+        ? { ...finalStep, id: "final-answer", heading: "Final Answer", latex: finalAnswerLatex }
+        : {
+            id: "final-answer",
+            heading: "Final Answer",
+            latex: finalAnswerLatex,
+            reasoning: "This is the simplified final result.",
+            anchors: [],
+          },
+    ];
+  }
+
+  return steps;
+}
+
+export function assertFastSolveResponse(value, originalProblem = "", { includeProblemStep = false } = {}) {
+  if (!value || typeof value !== "object") {
+    throw createInvalidResponseError("Model returned an invalid solve response.");
+  }
+
+  const problemLatex = sanitizeGeneratedLatex(value.problemLatex || originalProblem);
+  const finalAnswerLatex = simplifyDisplayedLatex(sanitizeGeneratedLatex(value.finalAnswerLatex));
+  const rawSteps = Array.isArray(value.steps) ? value.steps : [];
+  if (!isString(value.title) || !problemLatex || rawSteps.length === 0 || !finalAnswerLatex) {
+    throw createInvalidResponseError("Model response is missing required solve fields.");
+  }
+
+  const steps = normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex });
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Model response does not contain meaningful solution steps.");
   }
 
   const firstStep = steps[0];
-  if (includeProblemStep && firstStep.latex !== problemLatex) {
+  if (includeProblemStep && firstStep?.latex !== problemLatex) {
     steps.unshift({
       id: "step-1",
       heading: "Start with the problem",
@@ -853,17 +922,22 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
     .map((step, index) => ({
       id: normalizeStepId(step?.id, index),
       heading: safeString(step?.heading || `Step ${index + 1}`),
-      latex: sanitizeGeneratedLatex(step?.latex),
+      latex: simplifyDisplayedLatex(sanitizeGeneratedLatex(step?.latex)),
       reasoning: safeString(step?.reasoning),
       anchors: [],
     }))
-    .filter((step) => step.latex && !isStandaloneDifferential(step.latex) && !isFillerHeading(step.heading));
+    .filter((step, index) => (
+      step.latex
+      && !isStandaloneDifferential(step.latex)
+      && !isFillerHeading(step.heading)
+      && !isDuplicateProblemStep(step, problemLatex, index)
+    ));
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Compact model response does not contain meaningful solution steps.");
   }
 
-  const finalAnswerLatex = steps.at(-1)?.latex || problemLatex;
+  const finalAnswerLatex = simplifyDisplayedLatex(steps.at(-1)?.latex || problemLatex);
   return {
     title: safeString(value.title),
     problemLatex,
@@ -886,7 +960,7 @@ export function assertImageSolveResponse(value) {
 
   const extractedProblemLatex = sanitizeGeneratedLatex(value.extractedProblemLatex);
   const extractedProblemText = safeString(value.extractedProblemText);
-  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex);
+  const finalAnswerLatex = simplifyDisplayedLatex(sanitizeGeneratedLatex(value.finalAnswerLatex));
   const rawSteps = Array.isArray(value.steps) ? value.steps : [];
   if (!isString(value.title) || !extractedProblemLatex || !extractedProblemText || rawSteps.length === 0 || !finalAnswerLatex) {
     throw createInvalidResponseError("Image model response is missing required extracted solve fields.");
@@ -956,7 +1030,7 @@ export function assertImageExtractionResponse(value) {
 
 export function convertFastSolveToMathExplanation(value, {
   originalProblem = "",
-  includeProblemStep = true,
+  includeProblemStep = false,
   preserveProblemLatex = false,
 } = {}) {
   const solve = correctRegressionFinalAnswerIfNeeded(assertFastSolveResponse(value, originalProblem, { includeProblemStep }));

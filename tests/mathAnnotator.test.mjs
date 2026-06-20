@@ -5,6 +5,7 @@ import {
   annotateExpression,
   annotateMathExplanation,
   hasCompleteTokenHierarchy,
+  hierarchicalTokensEnabled,
   normalizeMathText,
   renderMathLatex,
 } from "../src/lib/mathAnnotator.js";
@@ -18,6 +19,73 @@ function tokenLatex(expression) {
 }
 
 describe("mathAnnotator", () => {
+  it("adds hierarchical token contract fields without removing legacy fields", () => {
+    const expression = annotateExpression({
+      id: "expr-contract",
+      latex: "3x+45=67",
+      role: "equation",
+      problemId: "contract",
+    });
+    const root = expression.tokens[0];
+    const coefficient = flattenTokens(expression.tokens).find((token) => token.latex === "3");
+
+    assert.equal(root.kind, "equation");
+    assert.equal(root.rawText, "3x+45=67");
+    assert.deepEqual(root.sourceRange, { start: 0, end: root.end });
+    assert.equal(typeof root.explanationId, "string");
+    assert.equal(coefficient.role, "coefficient");
+    assert.equal(coefficient.kind, "coefficient");
+    assert.equal(coefficient.children.length, 0);
+  });
+
+  it("keeps the parent token as the fallback target when hierarchy parsing is disabled or unsafe", () => {
+    const previous = process.env.VITE_ENABLE_HIERARCHICAL_TOKENS;
+    process.env.VITE_ENABLE_HIERARCHICAL_TOKENS = "false";
+    try {
+      assert.equal(hierarchicalTokensEnabled(), false);
+      const disabled = annotateExpression({ id: "expr-disabled", latex: "3x+45=67" });
+      assert.equal(disabled.tokens.length, 1);
+      assert.equal(disabled.tokens[0].children.length, 0);
+      assert.equal(disabled.tokens[0].latex, "3x+45=67");
+    } finally {
+      if (previous === undefined) delete process.env.VITE_ENABLE_HIERARCHICAL_TOKENS;
+      else process.env.VITE_ENABLE_HIERARCHICAL_TOKENS = previous;
+    }
+
+    const unsafe = annotateExpression({ id: "expr-unsafe", latex: "\\frac{x" });
+    assert.equal(unsafe.tokens.length, 1);
+    assert.ok(Array.isArray(unsafe.tokens[0].children));
+  });
+
+  it("supports required algebra interaction targets", () => {
+    const expression = annotateExpression({
+      id: "expr-algebra-targets",
+      latex: "3x + 45 = 67",
+      role: "equation",
+      problemId: "targets",
+    });
+    const latex = tokenLatex(expression);
+
+    for (const target of ["3x+45=67", "3x", "3", "x", "45", "67"]) {
+      assert.ok(latex.includes(target), target);
+    }
+  });
+
+  it("supports required vector-calculus interaction targets from unicode math", () => {
+    const expression = annotateExpression({
+      id: "expr-vector-targets",
+      latex: "∬_S (∇ × F) · n dS = 18π",
+      role: "equation",
+      problemId: "targets",
+    });
+    const latex = tokenLatex(expression);
+
+    for (const target of ["S", "\\nabla\\times F", "\\nabla", "F", "n", "dS", "18\\pi"]) {
+      assert.ok(latex.includes(target), target);
+    }
+    assert.equal(expression.tokens[0].role, "equation");
+  });
+
   it("normalizes common OCR and plaintext math variants", () => {
     assert.equal(normalizeMathText("0 <= theta <= 2 pi"), "0\\le\\theta\\le2\\pi");
     assert.equal(normalizeMathText("sqrt(3) >= phi"), "\\sqrt{3}\\ge\\phi");

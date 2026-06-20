@@ -761,6 +761,54 @@
     filter: none;
   }
 
+  .math-semantic-overlay-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .math-semantic-hitbox {
+    position: absolute;
+    display: block;
+    min-width: 1px;
+    min-height: 1px;
+    border: 0;
+    background: transparent;
+    opacity: 0;
+    pointer-events: auto;
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox {
+    border: 1px solid rgba(45, 212, 191, 0.48);
+    background: rgba(45, 212, 191, 0.12);
+    opacity: 1;
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-active-target="true"] {
+    border-color: rgba(251, 191, 36, 0.9);
+    background: rgba(251, 191, 36, 0.18);
+  }
+
+  .math-semantic-active-label {
+    position: absolute;
+    left: 0;
+    top: -1.4rem;
+    max-width: 28rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border-radius: 0.35rem;
+    background: rgba(8, 19, 25, 0.92);
+    color: rgba(204, 251, 241, 0.95);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    line-height: 1rem;
+    padding: 0.05rem 0.35rem;
+    pointer-events: none;
+  }
+
   .omni-related-token {
     background: rgba(34, 211, 238, 0.035);
     box-shadow: 0 0 14px rgba(34, 211, 238, 0.08);

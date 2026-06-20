@@ -53,6 +53,7 @@ const FUNCTION_NAMES = new Set([
 const SORTED_FUNCTION_NAMES = [...FUNCTION_NAMES].sort((left, right) => right.length - left.length);
 const FUNCTION_NAME_PATTERN = SORTED_FUNCTION_NAMES.join("|");
 const DIFFERENTIAL_WORD_PATTERN = "theta|phi|rho|alpha|beta|gamma|delta|lambda|mu|sigma|omega|[a-zA-Z]";
+const INTEGRAL_COMMAND_PATTERN = /^\\(?:iiint|iint|oint|int)/;
 const SQUISHED_PROSE_REPLACEMENTS = new Map([
   ["sphericalsymmetry", "spherical symmetry"],
   ["rotationallysymmetric", "rotationally symmetric"],
@@ -70,6 +71,14 @@ const SQUISHED_PROSE_REPLACEMENTS = new Map([
 ]);
 
 const explanationCache = new Map();
+
+export function hierarchicalTokensEnabled(override) {
+  if (override !== undefined) return override !== false && override !== "false";
+  const viteFlag = typeof import.meta !== "undefined" ? import.meta.env?.VITE_ENABLE_HIERARCHICAL_TOKENS : undefined;
+  const processFlag = globalThis.process?.env?.VITE_ENABLE_HIERARCHICAL_TOKENS;
+  const flag = viteFlag ?? processFlag;
+  return flag === undefined || flag === "" || flag === "true" || flag === true;
+}
 
 function cleanIdPart(value) {
   return String(value || "token")
@@ -173,7 +182,18 @@ function normalizeEscapedLatexInput(value = "") {
       .replace(/\\\\(?=[{}_^])/g, "\\");
   }
 
-  return text;
+  return text
+    .replace(/∭/g, "\\iiint")
+    .replace(/∬/g, "\\iint")
+    .replace(/∮/g, "\\oint")
+    .replace(/∫/g, "\\int")
+    .replace(/∇/g, "\\nabla")
+    .replace(/×/g, "\\times")
+    .replace(/·/g, "\\cdot")
+    .replace(/θ/g, "\\theta")
+    .replace(/φ/g, "\\phi")
+    .replace(/ρ/g, "\\rho")
+    .replace(/π/g, "\\pi");
 }
 
 function normalizeLatexFunctionSpacing(text) {
@@ -291,6 +311,11 @@ function displayText(latex) {
     .replace(/\\ge/g, "≥")
     .replace(/\\to/g, "→")
     .replace(/\\cdot/g, "·")
+    .replace(/\\times/g, "×")
+    .replace(/\\iint/g, "∬")
+    .replace(/\\iiint/g, "∭")
+    .replace(/\\oint/g, "∮")
+    .replace(/\\int/g, "∫")
     .replace(/\\sqrt/g, "√")
     .replace(/\\frac/g, "fraction")
     .replace(/\\([a-zA-Z]+)/g, (match) => GREEK_LABELS.get(match) || match.slice(1))
@@ -412,6 +437,10 @@ function explainToken(role, latex, expressionKey) {
     medium = `${plain} is a fixed value in this expression.`;
     deep = "Constants set exact endpoints, coefficients, or known quantities in a formula.";
     if (/pi/i.test(plain)) medium = "Pi is the circle constant used for angular measure in radians.";
+  } else if (role === "coefficient") {
+    short = "Coefficient";
+    medium = `${plain} scales the variable or factor attached to it.`;
+    deep = "A coefficient multiplies a neighboring variable or expression, setting how strongly that part contributes to the term.";
   } else if (role === "power") {
     short = "Power expression";
     medium = `${plain} uses an exponent to show repeated multiplication or growth.`;
@@ -440,6 +469,18 @@ function explainToken(role, latex, expressionKey) {
     short = "Differential group";
     medium = `${plain} gives the group of differentials in this expression.`;
     deep = "A differential group identifies the variables and order used by a product of infinitesimal integration elements.";
+  } else if (role === "integral") {
+    short = "Integral";
+    medium = `${plain} accumulates the integrand over the stated domain or variable.`;
+    deep = "The integral sign, domain, integrand, and differential work together to describe what is being accumulated and where.";
+  } else if (role === "domain") {
+    short = "Domain";
+    medium = `${plain} names the region or set over which the operation is performed.`;
+    deep = "A domain label restricts the expression to a specific curve, surface, region, interval, or event space.";
+  } else if (role === "vector_operation") {
+    short = "Vector operation";
+    medium = `${plain} combines vector quantities with an operation such as curl, dot product, or cross product.`;
+    deep = "Vector operations encode geometric interaction between fields, directions, and oriented pieces of space.";
   } else if (role === "product") {
     short = "Product structure";
     medium = `${plain} is built from multiplied factors.`;
@@ -468,14 +509,19 @@ function createNode({ latex, role, idPrefix, index, start = 0, end = null, expre
   const normalizedLatex = normalizeMathValue(latex);
   const explanation = explainToken(role, normalizedLatex, expressionKey);
   const id = `${idPrefix}-${index}-${cleanIdPart(normalizedLatex || role)}`;
+  const sourceEnd = end ?? start + normalizedLatex.length;
   return {
     id,
+    kind: role,
+    rawText: String(latex ?? ""),
     text: displayText(normalizedLatex),
     latex: normalizedLatex,
     display: normalizedLatex,
     role,
     start,
-    end: end ?? start + normalizedLatex.length,
+    end: sourceEnd,
+    sourceRange: { start, end: sourceEnd },
+    explanationId: `${id}:explanation`,
     explanation: explanation.medium,
     short: explanation.short,
     medium: explanation.medium,
@@ -572,6 +618,42 @@ function splitTopLevelProducts(text) {
 
   if (pieces.length > 0 && tokenStart < text.length) {
     pieces.push({ value: text.slice(tokenStart), start: tokenStart, separator: pendingSeparator });
+  }
+
+  return pieces;
+}
+
+function compactStructuralLatex(value = "") {
+  const text = String(value || "").replace(/\\\s+/g, "\\,");
+  if (/\\text\{/.test(text)) return text;
+  return text
+    .replace(/\s+/g, "")
+    .replace(/\\(langle|rangle)(?=[A-Za-z0-9])/g, "\\$1 ")
+    .replace(/\\(times|cdot)(?=[A-Za-z0-9\\])/g, "\\$1 ");
+}
+
+function splitTopLevelVectorOperations(text) {
+  const pieces = [];
+  let depth = 0;
+  let tokenStart = 0;
+  const operators = ["\\times"];
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "{" || char === "(" || char === "[") depth += 1;
+    if (char === "}" || char === ")" || char === "]") depth -= 1;
+    if (depth !== 0) continue;
+
+    const operator = operators.find((item) => text.startsWith(item, index));
+    if (!operator) continue;
+    if (tokenStart < index) pieces.push({ type: "expr", value: text.slice(tokenStart, index), start: tokenStart });
+    pieces.push({ type: "operator", value: operator, start: index });
+    index += operator.length - 1;
+    tokenStart = index + 1;
+  }
+
+  if (pieces.length > 0 && tokenStart < text.length) {
+    pieces.push({ type: "expr", value: text.slice(tokenStart), start: tokenStart });
   }
 
   return pieces;
@@ -755,6 +837,35 @@ function parseFunction(text) {
   }
 
   return null;
+}
+
+function parseIntegral(text) {
+  const command = text.match(INTEGRAL_COMMAND_PATTERN)?.[0];
+  if (!command) return null;
+
+  let index = command.length;
+  let lower = null;
+  let upper = null;
+
+  if (text[index] === "_") {
+    const script = readScript(text, index + 1);
+    if (script) {
+      lower = script.value;
+      index = script.endIndex;
+    }
+  }
+
+  if (text[index] === "^") {
+    const script = readScript(text, index + 1);
+    if (script) {
+      upper = script.value;
+      index = script.endIndex;
+    }
+  }
+
+  const body = text.slice(index);
+  if (!lower && !upper && !body) return null;
+  return { command, lower, upper, body };
 }
 
 function readScript(text, startIndex) {
@@ -964,8 +1075,11 @@ function splitImplicitProduct(text) {
 
 function atomicRole(text) {
   if (/^(\\le|\\ge|<=|>=|≤|≥|=|<|>|\+|-|\\cdot|·)$/.test(text)) return "operator";
+  if (/^\\times$/.test(text)) return "operator";
+  if (/^\\nabla$/.test(text)) return "operator";
   if (/^d(\\[a-zA-Z]+|[a-zA-Z]+)$/.test(text)) return "differential";
   if (/^[0-9]+(\.[0-9]+)?$/.test(text) || GREEK_LABELS.has(text)) return GREEK_LABELS.has(text) && text !== "\\pi" ? "variable" : "constant";
+  if (/^(e|i)$/.test(text)) return "constant";
   if (/^\\[a-zA-Z]+$/.test(text)) return GREEK_LABELS.has(text) && text !== "\\pi" ? "variable" : "function";
   if (FUNCTION_NAMES.has(text)) return "function";
   if (/^[a-zA-Z]$/.test(text)) return "variable";
@@ -1013,6 +1127,8 @@ function groupDifferentials(nodes, idPrefix, expressionKey) {
 
 function productChildRole(value) {
   const normalized = stripWrapping(normalizeMathValue(value));
+  if (parseIntegral(compactStructuralLatex(normalized))) return "integral";
+  if (splitTopLevelVectorOperations(compactStructuralLatex(normalized)).length > 0) return "vector_operation";
   if (readKnownFunctionCall(normalized)?.token === normalized) return "function";
   if (parseFraction(normalized) || parseSlashFraction(normalized)) return "fraction";
   if (findPowerSplit(normalized)?.endIndex === normalized.length) return "power";
@@ -1022,7 +1138,7 @@ function productChildRole(value) {
 
 function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
   if (depth > 4) return [];
-  const normalized = stripWrapping(normalizeMathValue(text));
+  const normalized = compactStructuralLatex(stripWrapping(normalizeMathValue(text)));
   if (!normalized) return [];
 
   const relations = splitTopLevelRelations(normalized);
@@ -1062,6 +1178,15 @@ function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
     return nodesForAdditiveExpression(normalized, idPrefix, expressionKey, depth);
   }
 
+  const vectorOps = splitTopLevelVectorOperations(normalized);
+  if (vectorOps.length > 0) {
+    return vectorOps.map((piece, index) => (
+      piece.type === "operator"
+        ? createNode({ latex: piece.value, role: "operator", idPrefix, index, start: piece.start, expressionKey })
+        : parseNode(piece.value, atomicRole(piece.value), idPrefix, index, piece.start, expressionKey, depth + 1)
+    ));
+  }
+
   const products = splitTopLevelProducts(normalized);
   if (products.length > 0) {
     const productNodes = products.flatMap((piece, pieceIndex) => {
@@ -1071,7 +1196,7 @@ function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
       }
       return adjacent.map((child, childIndex) => parseNode(
         child.value,
-        productChildRole(child.value),
+        childIndex === 0 && /^[0-9]+(\.[0-9]+)?$/.test(child.value) ? "coefficient" : productChildRole(child.value),
         idPrefix,
         pieceIndex * 10 + childIndex,
         piece.start + child.start,
@@ -1086,7 +1211,7 @@ function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
   if (factorSequence.length > 0) {
     return factorSequence.map((piece, index) => parseNode(
       piece.value,
-      productChildRole(piece.value),
+      index === 0 && /^[0-9]+(\.[0-9]+)?$/.test(piece.value) ? "coefficient" : productChildRole(piece.value),
       idPrefix,
       index,
       piece.start,
@@ -1116,6 +1241,17 @@ function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
     ];
   }
 
+  const functionPower = normalized.match(new RegExp(`^(\\\\(?:${FUNCTION_NAME_PATTERN}))\\^(\\{[^}]+\\}|[A-Za-z0-9]+)(.+)$`));
+  if (functionPower) {
+    const exponent = stripWrapping(functionPower[2]);
+    const argument = stripWrapping(functionPower[3]);
+    return [
+      createNode({ latex: functionPower[1], role: "function", idPrefix, index: 0, expressionKey }),
+      parseNode(exponent, "exponent", idPrefix, 1, normalized.indexOf("^") + 1, expressionKey, depth + 1),
+      ...(argument ? [parseNode(argument, "argument", idPrefix, 2, normalized.indexOf(functionPower[3]), expressionKey, depth + 1)] : []),
+    ];
+  }
+
   const fn = parseFunction(normalized);
   if (fn) {
     return [
@@ -1128,7 +1264,7 @@ function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
   if (productParts.length > 0) {
     return productParts.map((piece, index) => parseNode(
       piece,
-      atomicRole(piece),
+      index === 0 && /^[0-9]+(\.[0-9]+)?$/.test(piece) ? "coefficient" : atomicRole(piece),
       idPrefix,
       index,
       normalized.indexOf(piece),
@@ -1137,11 +1273,27 @@ function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
     ));
   }
 
+  const integral = parseIntegral(normalized);
+  if (integral) {
+    const children = [];
+    if (integral.lower) {
+      children.push(parseNode(integral.lower, "domain", idPrefix, "domain", normalized.indexOf("_") + 1, expressionKey, depth + 1));
+    }
+    if (integral.upper) {
+      children.push(parseNode(integral.upper, "bound", idPrefix, "upper", normalized.indexOf("^") + 1, expressionKey, depth + 1));
+    }
+    const body = stripWrapping(integral.body);
+    if (body) {
+      children.push(parseNode(body, inferCompoundRole(body), idPrefix, "body", normalized.indexOf(integral.body), expressionKey, depth + 1));
+    }
+    return children;
+  }
+
   const adjacentParts = splitAdjacentMathTokens(normalized);
   if (adjacentParts.length > 0) {
     return adjacentParts.map((piece, index) => parseNode(
       piece.value,
-      productChildRole(piece.value),
+      index === 0 && /^[0-9]+(\.[0-9]+)?$/.test(piece.value) ? "coefficient" : productChildRole(piece.value),
       idPrefix,
       index,
       piece.start,
@@ -1155,8 +1307,11 @@ function parseExpressionChildren(text, idPrefix, expressionKey, depth = 0) {
 
 function inferCompoundRole(text, preferredRole) {
   if (preferredRole && preferredRole !== "other") return preferredRole;
+  const normalized = compactStructuralLatex(stripWrapping(normalizeMathValue(text)));
   if (/\\le|\\ge|<=|>=|≤|≥|<|>/.test(text)) return "bound";
   if (/=/.test(text)) return "equation";
+  if (parseIntegral(normalized)) return "integral";
+  if (splitTopLevelVectorOperations(normalized).length > 0) return "vector_operation";
   if (/\\frac/.test(text) || parseSlashFraction(stripWrapping(normalizeMathValue(text)))) return "fraction";
   if (/\\sqrt/.test(text)) return "radical";
   if (/\\,|\\;|\\cdot|·/.test(text)) return "product";
@@ -1193,6 +1348,21 @@ export function annotateExpression({ id = "expr-1", latex = "", role = "other", 
   let children = [];
 
   try {
+    if (!hierarchicalTokensEnabled()) {
+      return {
+        id,
+        latex: normalizedLatex,
+        role: rootRole,
+        tokens: [createNode({
+          latex: normalizedLatex,
+          role: rootRole,
+          idPrefix: id,
+          index: 0,
+          expressionKey,
+          children: [],
+        })],
+      };
+    }
     children = parseExpressionChildren(normalizedLatex, `${id}-root`, expressionKey);
   } catch (error) {
     console.error("Failed to parse math expression:", { latex: normalizedLatex, error });
@@ -1218,6 +1388,8 @@ export function annotateExpression({ id = "expr-1", latex = "", role = "other", 
 function tokenToChunkPart(token) {
   return {
     id: token.id,
+    kind: token.kind || token.role,
+    rawText: token.rawText || token.latex || token.display || "",
     display: token.latex || token.display,
     short: token.short,
     medium: token.medium,
@@ -1227,6 +1399,8 @@ function tokenToChunkPart(token) {
     role: token.role,
     start: token.start,
     end: token.end,
+    sourceRange: token.sourceRange || (Number.isFinite(token.start) && Number.isFinite(token.end) ? { start: token.start, end: token.end } : null),
+    explanationId: token.explanationId || `${token.id}:explanation`,
     explanation: token.explanation,
     conceptIds: token.conceptIds || [],
     relatedTokenIds: token.relatedTokenIds || [],
@@ -1239,6 +1413,8 @@ function tokenToLineToken(token, fallbackId) {
   const explanation = explainToken(token?.role || inferCompoundRole(display), display, "line-token");
   return {
     id: token?.id || fallbackId,
+    kind: token?.kind || token?.role || inferCompoundRole(display),
+    rawText: token?.rawText || token?.latex || token?.display || token?.text || display,
     display,
     latex: normalizeMathValue(token?.latex || display),
     text: normalizeDisplayText(token?.text || displayText(display)),
@@ -1249,6 +1425,8 @@ function tokenToLineToken(token, fallbackId) {
     explanation: token?.explanation || token?.medium || explanation.medium,
     conceptIds: token?.conceptIds || [],
     relatedTokenIds: token?.relatedTokenIds || [],
+    sourceRange: token?.sourceRange || (Number.isFinite(token?.start) && Number.isFinite(token?.end) ? { start: token.start, end: token.end } : null),
+    explanationId: token?.explanationId || `${token?.id || fallbackId}:explanation`,
     parts: Array.isArray(token?.children) ? token.children.map(tokenToChunkPart) : [],
     children: Array.isArray(token?.children) ? token.children.map(tokenToChunkPart) : [],
   };
@@ -1384,6 +1562,8 @@ function normalizeExistingPart(part, fallbackId) {
   return {
     ...part,
     id: part?.id || fallbackId,
+    kind: part?.kind || part?.role || inferCompoundRole(display),
+    rawText: part?.rawText || part?.latex || part?.display || part?.text || display,
     display,
     latex: normalizeMathValue(part?.latex || display),
     text: normalizeDisplayText(part?.text || displayText(display)),
@@ -1392,6 +1572,8 @@ function normalizeExistingPart(part, fallbackId) {
     medium: part?.medium || part?.explanation || explanation.medium,
     deep: part?.deep || explanation.deep,
     explanation: part?.explanation || part?.medium || explanation.medium,
+    sourceRange: part?.sourceRange || (Number.isFinite(part?.start) && Number.isFinite(part?.end) ? { start: part.start, end: part.end } : null),
+    explanationId: part?.explanationId || `${part?.id || fallbackId}:explanation`,
     children: Array.isArray(part?.children)
       ? part.children.map((child, index) => normalizeExistingPart(child, `${fallbackId}-${index}`))
       : [],

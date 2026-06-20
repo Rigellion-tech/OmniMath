@@ -180,6 +180,48 @@ function createLongLatexApiResponse() {
   };
 }
 
+function createHierarchicalTokenApiResponse() {
+  const annotated = annotateMathExplanation({
+    title: "Hierarchical token targets",
+    problem: "Inspect algebra and vector-calculus tokens.",
+    expression: "3x+45=67",
+    steps: [
+      {
+        id: "hierarchy-step-1",
+        label: "Algebra target",
+        math: "3x + 45 = 67",
+        summary: "Keep the equation, term, coefficient, variable, and constants inspectable.",
+      },
+      {
+        id: "hierarchy-step-2",
+        label: "Vector calculus target",
+        math: "∬_S (∇ × F) · n dS = 18π",
+        summary: "Keep the surface integral and its nested vector-calculus pieces inspectable.",
+      },
+      {
+        id: "hierarchy-step-3",
+        label: "Cosine power integral",
+        math: "\\int_0^{2\\pi} \\cos^4\\theta\\,d\\theta = \\frac{3\\pi}{4}",
+        summary: "Integral of cos^4 over [0, 2π].",
+      },
+    ],
+    finalAnswerLatex: "18\\pi",
+  });
+
+  return {
+    ...annotated,
+    usage: {
+      kind: "explanation",
+      tier: "test",
+      remaining: 999,
+      limit: 999,
+    },
+    saved: false,
+    source: "playwright hierarchy fixture",
+    demoMode: true,
+  };
+}
+
 async function installApiFixtures(page) {
   await page.route("**/api/explain", async (route) => {
     const requestBody = route.request().postDataJSON();
@@ -230,6 +272,44 @@ async function installLongLatexApiFixtures(page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(createLazyExplanationResponse()),
+    });
+  });
+}
+
+async function installHierarchicalTokenApiFixtures(page, { lazyRequests = [] } = {}) {
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createHierarchicalTokenApiResponse()),
+    });
+  });
+
+  await page.route("**/api/explain-token", async (route) => {
+    lazyRequests.push({ endpoint: "hover", body: route.request().postDataJSON() });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}" ? "3π/4 value" : "Parent expression",
+        explanation: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}"
+          ? "The value 3π/4 is the evaluated result of the integral, separate from the integral setup."
+          : "Parent expression was selected.",
+      }),
+    });
+  });
+
+  await page.route("**/api/explain-pin", async (route) => {
+    lazyRequests.push({ endpoint: "pin", body: route.request().postDataJSON() });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}" ? "3π/4 value" : "Parent expression",
+        explanation: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}"
+          ? "The value 3π/4 is the evaluated result of the integral, separate from the integral setup."
+          : "Parent expression was selected.",
+      }),
     });
   });
 }
@@ -400,6 +480,106 @@ test("Stokes theorem solution stays contained and renderable at browser zoom lev
   expect(browserConsoleErrors).toEqual([]);
 });
 
+test("hierarchical math tokens expose nested hover, pin, drag, tooltip, and KaTeX targets", async ({ page }) => {
+  await installHierarchicalTokenApiFixtures(page);
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect 3x + 45 = 67 and a Stokes surface integral.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  await expect(page.getByRole("button", { name: /Algebra target/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Vector calculus target/i })).toBeVisible();
+
+  for (const latex of ["3x", "3", "x", "45", "67", "S", "\\\\nabla", "F", "n", "dS", "18\\\\pi"]) {
+    await expect(page.locator(`[data-inspectable='math-subtoken'][data-token-latex='${latex}']`).first()).toBeVisible();
+  }
+
+  const xToken = page.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
+  await xToken.evaluate((node) => node.setAttribute("data-layout-hover-target", "true"));
+  const xTokenBox = await xToken.boundingBox();
+  expect(xTokenBox).not.toBeNull();
+  await page.mouse.move(xTokenBox.x + xTokenBox.width / 2, xTokenBox.y + xTokenBox.height / 2);
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await assertLayoutIntegrity(page, { checkHover: true });
+  await xToken.evaluate((node) => node.removeAttribute("data-layout-hover-target"));
+
+  const nablaBox = await page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\nabla']").first().boundingBox();
+  expect(nablaBox).not.toBeNull();
+  await page.mouse.click(nablaBox.x + nablaBox.width / 2, nablaBox.y + nablaBox.height / 2, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+
+  const start = await page.locator("[data-inspectable='math-subtoken'][data-token-latex='3']").first().boundingBox();
+  const end = await page.locator("[data-inspectable='math-subtoken'][data-token-latex='67']").first().boundingBox();
+  expect(start).not.toBeNull();
+  expect(end).not.toBeNull();
+  await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-solution-flow .omni-token-selected")).not.toHaveCount(0);
+
+  await assertLayoutIntegrity(page);
+
+  await page.reload();
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Reload hierarchy fixture.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='dS']").first()).toBeVisible();
+  await expect(page.locator(".omni-solution-flow .katex")).not.toHaveCount(0);
+  await assertLayoutIntegrity(page);
+});
+
+test("fraction result hit-testing prefers the fraction child over the integral parent", async ({ page }) => {
+  const lazyRequests = [];
+  await installHierarchicalTokenApiFixtures(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Evaluate the cosine power integral.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  await expect(page.getByRole("button", { name: /Cosine power integral/i })).toBeVisible();
+  const fraction = page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\frac{3\\\\pi}{4}']").first();
+  await expect(fraction).toBeVisible();
+
+  await fraction.scrollIntoViewIfNeeded();
+  const fractionBox = await fraction.boundingBox();
+  expect(fractionBox).not.toBeNull();
+  const hitX = fractionBox.x + fractionBox.width / 2;
+  const hitY = fractionBox.y + fractionBox.height / 2;
+  await page.mouse.move(hitX, hitY);
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\frac{3\\pi}{4}");
+  await expect(page.locator(".omni-quick-tooltip")).not.toContainText("Integral of cos4 over");
+
+  const hoverSemanticTarget = async (locator, expectedLatex) => {
+    await locator.scrollIntoViewIfNeeded();
+    const box = await locator.boundingBox();
+    expect(box).not.toBeNull();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe(expectedLatex);
+  };
+
+  await hoverSemanticTarget(
+    page.locator("[data-inspectable='math-subtoken'][data-token-role='numerator'][data-token-latex='3\\\\pi']").first(),
+    "3\\pi"
+  );
+  await hoverSemanticTarget(
+    page.locator("[data-inspectable='math-subtoken'][data-token-role='denominator'][data-token-latex='4']").first(),
+    "4"
+  );
+  await hoverSemanticTarget(
+    page.locator("[data-inspectable='math-subtoken'][data-token-role='exponent'][data-token-latex='4']").first(),
+    "4"
+  );
+  await hoverSemanticTarget(
+    page.locator("[data-inspectable='math-subtoken'][data-token-latex='d\\\\theta']").first(),
+    "d\\theta"
+  );
+
+  await page.mouse.click(hitX, hitY, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+  await expect.poll(() => lazyRequests.find((request) => request.endpoint === "pin")?.body?.selectedLatex).toBe("\\frac{3\\pi}{4}");
+  await expect(page.locator(".omni-floating-window")).toContainText("value");
+  await expect(page.locator(".omni-floating-window")).not.toContainText("Integral of cos4 over");
+});
+
 test("long vector-field equations scroll inside math containers without page overflow", async ({ page }) => {
   await installLongLatexApiFixtures(page);
   await page.setViewportSize({ width: 1680, height: 1050 });
@@ -513,7 +693,7 @@ test("long vector-field equations scroll inside math containers without page ove
   expect(layout.mathShells.every((shell) => shell.width > 0 && shell.height > 0 && !shell.escapesViewport)).toBe(true);
   expect(layout.hasInternalMathScroll).toBe(true);
 
-  await expect(page.locator(".omni-solution-flow .math-token-defer-subtokens[data-explainable='true']")).toHaveCount(0);
+  await expect(page.locator(".omni-solution-flow .math-token-defer-subtokens .math-interaction-layer")).toHaveCount(0);
   const xCubedToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='x^3']").first();
   await expect(xCubedToken).toBeVisible();
   const cosineToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='\\\\cos(xy)']").first();
@@ -532,11 +712,18 @@ test("long vector-field equations scroll inside math containers without page ove
   expect(tokenTarget.inspectable).toBe("math-subtoken");
   expect(tokenTarget.width).toBeGreaterThan(0);
   expect(tokenTarget.width).toBeLessThan(tokenTarget.stepWidth / 3);
-  await xCubedToken.hover();
+  const moveToToken = async (locator) => {
+    await locator.scrollIntoViewIfNeeded();
+    const box = await locator.boundingBox();
+    expect(box).not.toBeNull();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  };
+
+  await moveToToken(xCubedToken);
   await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
-  await cosineToken.hover();
+  await moveToToken(cosineToken);
   await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
-  await arctanToken.hover();
+  await moveToToken(arctanToken);
   await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
 
   const xBox = await xCubedToken.boundingBox();
@@ -549,7 +736,13 @@ test("long vector-field equations scroll inside math containers without page ove
   await page.mouse.up();
   await expect(page.locator(".omni-solution-flow .omni-token-selected")).not.toHaveCount(0);
 
-  await xCubedToken.click({ button: "right" });
+  const xCubedBoxForPin = await xCubedToken.boundingBox();
+  expect(xCubedBoxForPin).not.toBeNull();
+  await page.mouse.click(
+    xCubedBoxForPin.x + xCubedBoxForPin.width / 2,
+    xCubedBoxForPin.y + xCubedBoxForPin.height / 2,
+    { button: "right" }
+  );
   await expect(page.locator(".omni-floating-window")).toBeVisible();
 
   const hoverTarget = page.locator("[data-explainable='true']").first();

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createMathExplanation, parseJsonResponse } from "../server/openai.js";
+import { assertFastSolveResponse } from "../server/mathExplanationSchema.js";
 
 process.env.OPENAI_API_KEY ||= "test-key";
 process.env.OPENAI_RETRY_BASE_DELAY_MS = "1";
@@ -41,6 +42,26 @@ function fastSolveOutput(problemLatex = "x+1=2") {
   }));
 }
 
+function compactSolveOutput(problemLatex = "x+1=2") {
+  return body(JSON.stringify({
+    title: "Compact solve",
+    problemLatex,
+    steps: [
+      {
+        id: "s1",
+        heading: "Compact final",
+        latex: "x=1",
+        reasoning: "Compact solve step.",
+        anchors: [],
+      },
+    ],
+  }));
+}
+
+function requestPromptText(payload) {
+  return payload?.input?.[0]?.content?.find((item) => item.type === "input_text")?.text || "";
+}
+
 function jsonResponse(status, payload, statusText = status === 200 ? "OK" : "Error") {
   return {
     ok: status >= 200 && status < 300,
@@ -78,6 +99,8 @@ describe("openai JSON parsing", () => {
     assert.throws(
       () => parseJsonResponse(body('{"title":"Cut","steps":[{"id":"s1"'), assertObject),
       (error) => error.code === "AI_RESPONSE_INVALID"
+        && error.responseFailureType === "truncated"
+        && error.compactRetryable === true
     );
   });
 
@@ -85,6 +108,32 @@ describe("openai JSON parsing", () => {
     assert.throws(
       () => parseJsonResponse(body('{"title":"Cut"', { incomplete_details: { reason: "max_output_tokens" } }), assertObject),
       (error) => error.code === "AI_RESPONSE_TRUNCATED"
+        && error.responseFailureType === "truncated"
+        && error.compactRetryable === true
+    );
+  });
+
+  it("classifies malformed complete JSON as a JSON parse failure", () => {
+    assert.throws(
+      () => parseJsonResponse(body('{"title":}'), assertObject),
+      (error) => error.code === "AI_RESPONSE_INVALID"
+        && error.responseFailureType === "json_parse"
+        && error.compactRetryable === true
+    );
+  });
+
+  it("classifies assert/schema errors as schema contract failures", () => {
+    assert.throws(
+      () => parseJsonResponse(body('{"title":"Missing"}'), () => {
+        throw Object.assign(new Error("Model response is missing required solve fields."), {
+          statusCode: 502,
+          code: "AI_RESPONSE_INVALID",
+          compactRetryable: true,
+        });
+      }),
+      (error) => error.code === "AI_RESPONSE_INVALID"
+        && error.responseFailureType === "schema_contract"
+        && error.compactRetryable === true
     );
   });
 });
@@ -146,11 +195,249 @@ describe("createMathExplanation compact fallback", () => {
 
       assert.equal(requests.length, 2);
       assert.equal(requests[0].max_output_tokens >= 6500, true);
+      assert.equal(requests[0].temperature, 0);
+      assert.equal(requests[0].top_p, 1);
       assert.equal(requests[1].text.format.name, "math_compact_solve");
+      assert.match(requestPromptText(requests[1]), /cut off or incomplete/i);
+      assert.doesNotMatch(requestPromptText(requests[1]), /final_answer_splits_into_multiple_unrelated_fragments/);
+      assert.equal(requests[1].temperature, 0);
+      assert.equal(requests[1].top_p, 1);
       assert.equal(result.runtimeNotice, "Compact explanation generated because the full structured response was too long.");
       assert.equal(result.steps.length, 2);
       assert.equal(result._aiCallCount, 2);
       assert.equal(result._aiUsage.total_tokens, 60);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("retries with compact schema when the full solve JSON is malformed", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requests.push(payload);
+      return jsonResponse(200, requests.length === 1
+        ? body('{"title":"Cut","steps":[{"id":"s1"')
+        : compactSolveOutput());
+    };
+
+    try {
+      const result = await createMathExplanation({ prompt: "Solve x+1=2", originalProblem: "x+1=2" });
+
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].text.format.name, "math_compact_solve");
+      assert.match(requestPromptText(requests[1]), /cut off or incomplete/i);
+      assert.equal(result.runtimeNotice, "Compact explanation generated because the full structured response was too long.");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("retries with compact schema when the full solve fails schema validation", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requests.push(payload);
+      return jsonResponse(200, requests.length === 1
+        ? body(JSON.stringify({ title: "Missing solve fields" }))
+        : compactSolveOutput());
+    };
+
+    try {
+      const result = await createMathExplanation({ prompt: "Solve x+1=2", originalProblem: "x+1=2" });
+
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].text.format.name, "math_compact_solve");
+      assert.match(requestPromptText(requests[1]), /did not match the required solve schema/i);
+      assert.equal(result.runtimeNotice, "Compact explanation generated because the full structured response was too long.");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not compact retry non-retryable quality-class parse errors", async () => {
+    assert.throws(
+      () => parseJsonResponse(body('{"title":"Quality invalid"}'), () => {
+        throw Object.assign(new Error("Solution failed quality validation."), {
+          statusCode: 502,
+          code: "AI_SOLUTION_QUALITY_INVALID",
+          compactRetryable: false,
+        });
+      }),
+      (error) => error.code === "AI_SOLUTION_QUALITY_INVALID" && error.compactRetryable === false
+    );
+  });
+
+  it("passes final-answer structure feedback into compact retry", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requests.push(payload);
+      if (requests.length === 1) {
+        return jsonResponse(200, body(JSON.stringify({
+          title: "Bad final field",
+          problemLatex: "I=\\int_0^1 x\\,dx",
+          steps: [
+            {
+              id: "s1",
+              heading: "Evaluate",
+              latex: "I=\\frac{1}{2}",
+              reasoning: "Evaluate the integral.",
+              anchors: [],
+            },
+          ],
+          finalAnswerLatex: "I'=0\\Rightarrow I=\\frac{1}{2}",
+          numericCheck: "",
+        })));
+      }
+      return jsonResponse(200, compactSolveOutput("I=\\int_0^1 x\\,dx"));
+    };
+
+    try {
+      const result = await createMathExplanation({
+        prompt: "Solve I=int_0^1 x dx",
+        originalProblem: "I=\\int_0^1 x\\,dx",
+      });
+
+      const retryPrompt = requestPromptText(requests[1]);
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].text.format.name, "math_compact_solve");
+      assert.match(retryPrompt, /final-answer field contract/i);
+      assert.match(retryPrompt, /final_answer_contains_derivation_arrow/);
+      assert.match(retryPrompt, /exactly one standalone mathematical expression/i);
+      assert.match(retryPrompt, /Do not include \\Rightarrow/);
+      assert.match(retryPrompt, /Do not include line breaks/);
+      assert.match(retryPrompt, /last step latex contains only the final standalone result/i);
+      assert.doesNotMatch(retryPrompt, /previous full structured response was cut off/i);
+      assert.equal(result.runtimeNotice, "Compact explanation generated because the full structured response was too long.");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("passes the exact multi-fragment final-answer issue into compact retry", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requests.push(payload);
+      if (requests.length === 1) {
+        return jsonResponse(200, body(JSON.stringify({
+          title: "Bad final field",
+          problemLatex: "\\int_0^1 x\\,dx",
+          steps: [
+            {
+              id: "s1",
+              heading: "Evaluate",
+              latex: "I=\\frac{1}{2}",
+              reasoning: "Evaluate the integral.",
+              anchors: [],
+            },
+          ],
+          finalAnswerLatex: "J=0 \\int_0^1 x\\,dx=\\frac{1}{2}",
+          numericCheck: "",
+        })));
+      }
+      return jsonResponse(200, compactSolveOutput("\\int_0^1 x\\,dx"));
+    };
+
+    try {
+      await createMathExplanation({
+        prompt: "Evaluate int_0^1 x dx",
+        originalProblem: "\\int_0^1 x\\,dx",
+      });
+
+      const retryPrompt = requestPromptText(requests[1]);
+      assert.match(retryPrompt, /final_answer_splits_into_multiple_unrelated_fragments/);
+      assert.match(retryPrompt, /Do not include multiple unrelated equations/);
+      assert.doesNotMatch(retryPrompt, /previous full structured response was cut off/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("classifies final-answer structure failures separately from malformed LaTeX syntax", () => {
+    let structureError;
+    assert.throws(
+      () => parseJsonResponse(body(JSON.stringify({
+        title: "Bad final field",
+        problemLatex: "I=\\int_0^1 x\\,dx",
+        steps: [{
+          id: "s1",
+          heading: "Evaluate",
+          latex: "I=\\frac{1}{2}",
+          reasoning: "Evaluate the integral.",
+          anchors: [],
+        }],
+        finalAnswerLatex: "I'=0\\Rightarrow I=\\frac{1}{2}",
+        numericCheck: "",
+      })), assertFastSolveResponse),
+      (error) => {
+        structureError = error;
+        return true;
+      }
+    );
+    assert.equal(structureError.responseFailureType, "field_structure");
+  });
+});
+
+describe("OpenAI solver sampling", () => {
+  it("passes explicit low-temperature sampling settings on initial solves", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requests.push(payload);
+      return jsonResponse(200, fastSolveOutput());
+    };
+
+    try {
+      await createMathExplanation({
+        prompt: "Solve x+1=2",
+        originalProblem: "x+1=2",
+        debugContext: {
+          requestId: "sampling-initial",
+          normalizedProblem: "x+1=2",
+          promptHash: "prompt-initial",
+        },
+      });
+
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].temperature, 0);
+      assert.equal(requests[0].top_p, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("passes the same explicit sampling settings on quality repair solves", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requests.push(payload);
+      return jsonResponse(200, fastSolveOutput());
+    };
+
+    try {
+      await createMathExplanation({
+        prompt: "Repair the prior invalid solve for x+1=2",
+        originalProblem: "x+1=2",
+        debugContext: {
+          requestId: "sampling-repair",
+          normalizedProblem: "x+1=2",
+          promptHash: "prompt-repair",
+          retryPurpose: "quality-repair",
+          attemptType: "repair",
+        },
+      });
+
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].temperature, 0);
+      assert.equal(requests[0].top_p, 1);
     } finally {
       globalThis.fetch = originalFetch;
     }

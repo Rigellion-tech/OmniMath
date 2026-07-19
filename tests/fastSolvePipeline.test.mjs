@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import katex from "katex";
-import { convertFastSolveToMathExplanation, convertImageSolveToMathExplanation } from "../server/mathExplanationSchema.js";
+import {
+  assertCompactSolveResponse,
+  convertFastSolveToMathExplanation,
+  convertImageSolveToMathExplanation,
+} from "../server/mathExplanationSchema.js";
 import { normalizeDisplayText, renderMathLatex } from "../src/lib/mathAnnotator.js";
 
 const REGRESSION_INTEGRAL = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
@@ -156,7 +160,7 @@ describe("fast solve pipeline", () => {
     assert.equal(normalizeDisplayText("Use \\quad only inside math"), "Use only inside math");
   });
 
-  it("corrects the regression integral final answer when the exact form fails the numeric check", () => {
+  it("preserves the regression integral final answer for validation instead of auto-correcting it", () => {
     const explanation = convertFastSolveToMathExplanation({
       title: "Evaluate Integral",
       problemLatex: REGRESSION_INTEGRAL,
@@ -171,11 +175,10 @@ describe("fast solve pipeline", () => {
       numericCheck: "0.7546938294602481",
     }, { originalProblem: REGRESSION_INTEGRAL });
 
-    assert.equal(explanation.finalAnswer, "\\frac{\\pi}{2}\\ln^2(2)");
+    assert.equal(explanation.finalAnswer, "\\frac{7\\pi}{8}\\zeta(3)");
     assert.equal(explanation.numericCheck, "0.7546938294602481");
     assert.equal(explanation.steps.some((step) => /Start with the problem/i.test(step.label)), false);
-    assert.match(explanation.steps.at(-1).label, /Final answer/i);
-    assert.equal(explanation.steps.at(-1).math, "\\frac{\\pi}{2}\\ln^2(2)");
+    assert.equal(explanation.steps.at(-1).math, "\\frac{7\\pi}{8}\\zeta(3)");
   });
 
   it("uses extracted image problem fields instead of the generic upload prompt", () => {
@@ -254,5 +257,230 @@ describe("fast solve pipeline", () => {
     assert.equal(explanation.steps[0].lines[0].text, "");
     assert.equal(explanation.steps.some((step) => /Start with the problem/i.test(step.label)), false);
     assert.equal(explanation.finalAnswerLatex, "0");
+  });
+
+  it("drops empty non-final solve steps while keeping a complete final answer", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Solve simple equation",
+      problemLatex: "x+35^2=0",
+      steps: [
+        {
+          id: "empty",
+          heading: "Solve the square equation",
+          latex: "",
+          reasoning: "",
+          anchors: [],
+        },
+        {
+          id: "evaluate",
+          heading: "Evaluate the square",
+          latex: "x+1225=0",
+          reasoning: "Since 35^2=1225, substitute 1225.",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "x=-1225",
+      numericCheck: "",
+    });
+
+    assert.equal(explanation.steps.some((step) => /Solve the square equation/i.test(step.label)), false);
+    assert.equal(explanation.steps.some((step) => step.math === "x+1225=0"), true);
+    assert.equal(explanation.finalAnswerLatex, "x=-1225");
+  });
+
+  it("canonicalizes a model-provided final answer step instead of appending a duplicate", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Solve quadratic",
+      problemLatex: "3x^2+5x-18=0",
+      steps: [
+        {
+          id: "factor",
+          heading: "Factor",
+          latex: "(3x-4)(x+3)=0",
+          reasoning: "Factor the quadratic.",
+          anchors: [],
+        },
+        {
+          id: "model-final",
+          heading: "Final answer",
+          latex: "\\boxed{x=\\frac{4}{3}\\quad\\text{or}\\quad x=-3}",
+          reasoning: "The two roots solve the factored equation.",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "x=\\frac{4}{3}\\quad\\text{or}\\quad x=-3",
+      numericCheck: "",
+    });
+
+    const finalSteps = explanation.steps.filter((step) => /final\s+answer/i.test(step.label));
+
+    assert.equal(finalSteps.length, 1);
+    assert.equal(explanation.steps.at(-1).id, "final-answer");
+    assert.equal(explanation.steps.at(-1).math, "x=\\frac{4}{3}\\quad \\text{or}\\quad x=-3");
+  });
+
+  it("rejects malformed generated command remnants before rendering", () => {
+    assert.throws(() => convertFastSolveToMathExplanation({
+      title: "Malformed fraction",
+      problemLatex: "x=1",
+      steps: [{
+        id: "bad",
+        heading: "Malformed",
+        latex: "x={frac}{1}{2}",
+        reasoning: "Bad generated LaTeX.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "{frac}{1}{2}",
+      numericCheck: "",
+    }), (error) => error.responseFailureType === "latex_syntax");
+  });
+
+  it("rejects unmatched generated LaTeX before it reaches KaTeX rendering", () => {
+    assert.throws(() => convertFastSolveToMathExplanation({
+      title: "Malformed braces",
+      problemLatex: "x=1",
+      steps: [{
+        id: "bad",
+        heading: "Malformed",
+        latex: "x=\\frac{1}{2",
+        reasoning: "Bad generated LaTeX.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "\\frac{1}{2",
+      numericCheck: "",
+    }), (error) => error.responseFailureType === "latex_syntax");
+  });
+
+  it("accepts a single final expression", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Integral",
+      problemLatex: "\\int_0^\\infty f(x)\\,dx",
+      steps: [{
+        id: "final",
+        heading: "Final Answer",
+        latex: "\\frac{\\pi^3}{12}",
+        reasoning: "This is the evaluated result.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "\\frac{\\pi^3}{12}",
+      numericCheck: "",
+    });
+
+    assert.equal(explanation.finalAnswerLatex, "\\frac{\\pi^3}{12}");
+  });
+
+  it("accepts a single equation assigning the original expression to a value", () => {
+    const finalAnswerLatex = "\\int_0^\\infty f(x)\\,dx=\\frac{\\pi^3}{12}";
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Integral",
+      problemLatex: "\\int_0^\\infty f(x)\\,dx",
+      steps: [{
+        id: "final",
+        heading: "Final Answer",
+        latex: finalAnswerLatex,
+        reasoning: "This is the evaluated result.",
+        anchors: [],
+      }],
+      finalAnswerLatex,
+      numericCheck: "",
+    });
+
+    assert.equal(explanation.finalAnswerLatex, finalAnswerLatex);
+  });
+
+  it("rejects detached multiline final-answer fragments as field structure", () => {
+    assert.throws(() => convertFastSolveToMathExplanation({
+      title: "Detached final",
+      problemLatex: "I=\\int_0^1 x\\,dx",
+      steps: [{
+        id: "solve",
+        heading: "Evaluate",
+        latex: "I=\\frac{1}{2}",
+        reasoning: "Evaluate the integral.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "I=2\n\\frac{1}{2}",
+      numericCheck: "",
+    }), (error) => {
+      assert.equal(error.responseFailureType, "field_structure");
+      assert.equal(error.publicMessage, "The generated solution used an invalid final-answer structure.");
+      assert.ok(error.solutionIssues.includes("invalid_latex:finalAnswerLatex:final_answer_contains_multiple_physical_lines"));
+      return true;
+    });
+  });
+
+  it("rejects same-line derivation arrows in finalAnswerLatex as field structure", () => {
+    assert.throws(() => convertFastSolveToMathExplanation({
+      title: "Arrow final",
+      problemLatex: "I=\\int_0^1 x\\,dx",
+      steps: [{
+        id: "solve",
+        heading: "Evaluate",
+        latex: "I=\\frac{1}{2}",
+        reasoning: "Evaluate the integral.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "I'=0\\Rightarrow I=\\frac{1}{2}",
+      numericCheck: "",
+    }), (error) => error.responseFailureType === "field_structure"
+      && error.solutionIssues.includes("invalid_latex:finalAnswerLatex:final_answer_contains_derivation_arrow"));
+  });
+
+  it("rejects prose plus math in finalAnswerLatex as field structure", () => {
+    assert.throws(() => convertFastSolveToMathExplanation({
+      title: "Prose final",
+      problemLatex: "\\int_0^1 x\\,dx",
+      steps: [{
+        id: "solve",
+        heading: "Evaluate",
+        latex: "\\frac{1}{2}",
+        reasoning: "Evaluate the integral.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "Therefore the answer is \\frac{1}{2}",
+      numericCheck: "",
+    }), (error) => error.responseFailureType === "field_structure"
+      && error.solutionIssues.includes("invalid_latex:finalAnswerLatex:final_answer_contains_prose"));
+  });
+
+  it("rejects multiple unrelated equations in finalAnswerLatex as field structure", () => {
+    assert.throws(() => convertFastSolveToMathExplanation({
+      title: "Unrelated equations",
+      problemLatex: "A+B",
+      steps: [{
+        id: "solve",
+        heading: "Evaluate",
+        latex: "A=B",
+        reasoning: "Evaluate the expression.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "A=B,\\quad C=D",
+      numericCheck: "",
+    }), (error) => error.responseFailureType === "field_structure"
+      && error.solutionIssues.includes("invalid_latex:finalAnswerLatex:final_answer_contains_multiple_unrelated_equations"));
+  });
+
+  it("applies the standalone final-answer contract to the compact last step", () => {
+    assert.throws(() => assertCompactSolveResponse({
+      title: "Compact solve",
+      problemLatex: "I=\\int_0^1 x\\,dx",
+      steps: [
+        {
+          id: "s1",
+          heading: "Evaluate",
+          latex: "I=\\frac{1}{2}",
+          reasoning: "Evaluate the integral.",
+          anchors: [],
+        },
+        {
+          id: "s2",
+          heading: "Final Answer",
+          latex: "I'=0\\Rightarrow I=\\frac{1}{2}",
+          reasoning: "State the final answer.",
+          anchors: [],
+        },
+      ],
+    }, "I=\\int_0^1 x\\,dx"), (error) => error.responseFailureType === "field_structure"
+      && error.solutionIssues.includes("invalid_latex:finalAnswerLatex:final_answer_contains_derivation_arrow"));
   });
 });

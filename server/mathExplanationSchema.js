@@ -1,8 +1,10 @@
 import { annotateMathExplanation, renderMathLatex } from "./mathAnnotator.js";
+import {
+  collectGeneratedLatexValidationIssues,
+  isFinalAnswerFieldStructureIssue,
+} from "./generatedLatexValidation.js";
+import { splitEquationChainLatex } from "../src/lib/equationChains.js";
 import { normalizeLatexForKatex, shouldPreserveLatex, traceMathStage } from "../src/lib/mathNode.js";
-
-const REGRESSION_INTEGRAL_KEY = "\\int_0^\\infty\\frac\\ln(1+x^2)\\arctanxx(1+x^2)\\,dx";
-const REGRESSION_INTEGRAL_VALUE = 0.7546938294602481;
 
 export const difficultyExplanationSchema = {
   type: "object",
@@ -529,12 +531,35 @@ validateMathExplanationSchema(imageExtractionSchema);
 validateMathExplanationSchema(lazyTokenExplanationSchema);
 validateMathExplanationSchema(compareMethodsSchema);
 
-function createInvalidResponseError(message) {
+export const RESPONSE_FAILURE_TYPES = {
+  JSON_PARSE: "json_parse",
+  SCHEMA_CONTRACT: "schema_contract",
+  LATEX_SYNTAX: "latex_syntax",
+  FIELD_STRUCTURE: "field_structure",
+  TRUNCATED: "truncated",
+  GENERATED_VALIDATION: "generated_validation",
+};
+
+function createInvalidResponseError(message, {
+  responseFailureType = RESPONSE_FAILURE_TYPES.SCHEMA_CONTRACT,
+  publicMessage = "The AI service returned an invalid explanation.",
+  compactRetryable = true,
+} = {}) {
   return Object.assign(new Error(message), {
     statusCode: 502,
     code: "AI_RESPONSE_INVALID",
-    publicMessage: "The AI service returned an invalid explanation.",
+    compactRetryable,
+    responseFailureType,
+    publicMessage,
   });
+}
+
+function solveDiagnosticsEnabled() {
+  return process.env.NODE_ENV !== "production" && (
+    process.env.OMNIMATH_DEBUG_SOLVE === "true"
+    || process.env.OMNIMATH_DEBUG_SOLVE === "1"
+    || process.env.VITE_DEBUG_SOLUTION_STATE === "true"
+  );
 }
 
 function isString(value) {
@@ -630,6 +655,7 @@ export function sanitizeGeneratedLatex(value = "") {
     .replace(/\\hat([A-Za-z])/g, "\\hat{$1}")
     .replace(/\\mathbf\{dr\}/g, "d\\mathbf{r}")
     .replace(/\\mathbf\{d\}r/g, "d\\mathbf{r}")
+    .replace(/\\cdot\s*d(?=\\mathbf\{[A-Za-z]\})/g, "\\cdot d")
     .replace(/\\iint\s+(?:lim\s*its|limits)\s*_\s*([A-Za-z])/gi, "\\iint_{$1}")
     .replace(/\\int\s+(?:lim\s*its|limits)\s*_\s*([A-Za-z])/gi, "\\int_{$1}")
     .replace(/∭/g, "\\iiint")
@@ -708,7 +734,195 @@ function compactLatex(value = "") {
 }
 
 function normalizeLatexForComparison(value = "") {
-  return compactLatex(value).replace(/\\,/g, "");
+  return compactLatex(value)
+    .replace(/\\,/g, "")
+    .replace(/^\\boxed/, "")
+    .replace(/\\text(?:or|and)/gi, "")
+    .replace(/\\quad(?:\\text(?:or|and))?\\quad/gi, "")
+    .replace(/\\mathrm(?:or|and)/gi, "");
+}
+
+function parsePerfectSquareQuadratic(problemLatex = "") {
+  const compact = compactLatex(problemLatex);
+  const match = compact.match(/^x\^2([+-])(\d+)x([+-])(\d+)=0$/i);
+  if (!match) return null;
+
+  const middleCoefficient = (match[1] === "-" ? -1 : 1) * Number(match[2]);
+  const constant = (match[3] === "-" ? -1 : 1) * Number(match[4]);
+  if (!Number.isSafeInteger(middleCoefficient) || !Number.isSafeInteger(constant) || constant <= 0) return null;
+  if (middleCoefficient % 2 !== 0) return null;
+
+  const signedK = middleCoefficient / 2;
+  const absK = Math.abs(signedK);
+  if (absK ** 2 !== constant) return null;
+
+  const sign = signedK < 0 ? "-" : "+";
+  const originalLeft = `x^2${sign}${Math.abs(middleCoefficient)}x+${constant}`;
+  return {
+    absK,
+    sign,
+    originalEquation: `${originalLeft}=0`,
+    groupedEquation: `(x${sign}${absK})^2=0`,
+    linearEquation: `x${sign}${absK}=0`,
+    finalAnswer: `x=${-signedK}`,
+    invalidChain: `${originalLeft}=(x${sign}${absK})^2=0`,
+  };
+}
+
+function isSolveForXHeading(value = "") {
+  return /solve\s+for\s+x|set\s+the\s+equation\s+and\s+solve|solve\s+the\s+(?:linear|resulting|repeated root)/iu.test(safeString(value));
+}
+
+function isInvalidPerfectSquareEqualityChain(latex = "", perfectSquare = null) {
+  if (!perfectSquare) return false;
+  return compactLatex(latex) === compactLatex(perfectSquare.invalidChain);
+}
+
+function repairPerfectSquareSteps(steps = [], perfectSquare = null, finalAnswerLatex = "") {
+  if (!perfectSquare) return steps;
+  const expectedFinal = finalAnswerLatex || perfectSquare.finalAnswer;
+
+  return steps.map((step) => {
+    if (isInvalidPerfectSquareEqualityChain(step.latex, perfectSquare)) {
+      return {
+        ...step,
+        latex: `${perfectSquare.originalEquation}\n${perfectSquare.groupedEquation}`,
+        reasoning: step.reasoning || "Rewrite the perfect-square trinomial as a grouped square while preserving the original equation.",
+      };
+    }
+
+    if (!step.latex && isSolveForXHeading(step.heading)) {
+      return {
+        ...step,
+        latex: `${perfectSquare.groupedEquation}\n${perfectSquare.linearEquation}\n${expectedFinal}`,
+        reasoning: step.reasoning || "Solve the repeated-root linear equation.",
+      };
+    }
+
+    return step;
+  });
+}
+
+function renderStepLatexLines(value = "") {
+  const sourceLines = String(value || "")
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lines = sourceLines.length > 0 ? sourceLines : [value];
+  return lines.flatMap((line) => splitEquationChainLatex(renderMathLatex(line))).filter(Boolean);
+}
+
+function createLatexValidationError(issues = []) {
+  const issueNames = issues.flatMap((issue) => issue.issues.map((name) => `invalid_latex:${issue.fieldPath}:${name}`));
+  const hasFinalAnswerStructureIssue = issues.some((issue) => (
+    issue.fieldPath === "finalAnswerLatex"
+    && issue.issues.some((name) => isFinalAnswerFieldStructureIssue(name))
+  ));
+  const error = createInvalidResponseError(
+    hasFinalAnswerStructureIssue
+      ? "Generated solution has invalid final-answer structure."
+      : "Generated solution contains invalid LaTeX.",
+    {
+      responseFailureType: hasFinalAnswerStructureIssue
+        ? RESPONSE_FAILURE_TYPES.FIELD_STRUCTURE
+        : RESPONSE_FAILURE_TYPES.LATEX_SYNTAX,
+      publicMessage: hasFinalAnswerStructureIssue
+        ? "The generated solution used an invalid final-answer structure."
+        : "Generated solution contains invalid LaTeX.",
+    }
+  );
+  error.solutionIssues = issueNames.length > 0 ? issueNames : ["invalid_latex"];
+  error.latexValidationIssues = issues;
+  return error;
+}
+
+function assertGeneratedLatexFields(fields = []) {
+  const issues = collectGeneratedLatexValidationIssues(fields);
+  if (issues.length > 0) {
+    if (solveDiagnosticsEnabled()) {
+      console.warn("[omnimath:latex-validation]", {
+        status: "fail",
+        issues: issues.map((issue) => ({
+          fieldPath: issue.fieldPath,
+          value: issue.value,
+          issues: issue.issues,
+        })),
+      });
+    }
+    throw createLatexValidationError(issues);
+  }
+  if (solveDiagnosticsEnabled()) {
+    console.info("[omnimath:latex-validation]", {
+      status: "pass",
+      fieldCount: fields.length,
+    });
+  }
+}
+
+function assertRawGeneratedLatexFields(fields = []) {
+  const issues = collectGeneratedLatexValidationIssues(fields.map((field) => ({
+    ...field,
+    strictParse: false,
+  })));
+  if (issues.length > 0) {
+    if (solveDiagnosticsEnabled()) {
+      console.warn("[omnimath:latex-validation]", {
+        status: "raw-fail",
+        issues: issues.map((issue) => ({
+          fieldPath: issue.fieldPath,
+          value: issue.value,
+          issues: issue.issues,
+        })),
+      });
+    }
+    throw createLatexValidationError(issues);
+  }
+  if (solveDiagnosticsEnabled()) {
+    console.info("[omnimath:latex-validation]", {
+      status: "raw-pass",
+      fieldCount: fields.length,
+    });
+  }
+}
+
+function solveLatexFields({ problemLatex = "", finalAnswerLatex = "", steps = [] } = {}) {
+  return [
+    { fieldPath: "problemLatex", value: problemLatex },
+    { fieldPath: "finalAnswerLatex", value: finalAnswerLatex, finalAnswer: true, strictFinalAnswerContract: true },
+    ...steps.flatMap((step, stepIndex) => [
+      { fieldPath: `steps[${stepIndex}].latex`, value: step.latex },
+      ...String(step.latex || "")
+        .split(/\r?\n+/)
+        .map((line, lineIndex) => ({
+          fieldPath: `steps[${stepIndex}].lines[${lineIndex}]`,
+          value: line,
+        })),
+      ...(Array.isArray(step.anchors) ? step.anchors.map((anchor, anchorIndex) => ({
+        fieldPath: `steps[${stepIndex}].anchors[${anchorIndex}].latex`,
+        value: anchor?.latex,
+      })) : []),
+    ]),
+  ].filter((field) => typeof field.value === "string" && field.value.trim());
+}
+
+function rawSolveLatexFields({ problemLatex = "", finalAnswerLatex = "", steps = [], includeProblemLatex = true } = {}) {
+  return [
+    includeProblemLatex ? { fieldPath: "problemLatex", value: problemLatex } : null,
+    { fieldPath: "finalAnswerLatex", value: finalAnswerLatex, finalAnswer: true, strictFinalAnswerContract: true },
+    ...steps.flatMap((step, stepIndex) => [
+      { fieldPath: `steps[${stepIndex}].latex`, value: step?.latex },
+      ...String(step?.latex || "")
+        .split(/\r?\n+/)
+        .map((line, lineIndex) => ({
+          fieldPath: `steps[${stepIndex}].lines[${lineIndex}]`,
+          value: line,
+        })),
+      ...(Array.isArray(step?.anchors) ? step.anchors.map((anchor, anchorIndex) => ({
+        fieldPath: `steps[${stepIndex}].anchors[${anchorIndex}].latex`,
+        value: anchor?.latex,
+      })) : []),
+    ]),
+  ].filter((field) => field && typeof field.value === "string" && field.value.trim());
 }
 
 function simplifyDisplayedLatex(value = "") {
@@ -742,69 +956,6 @@ function simplifyDisplayedLatex(value = "") {
   return output;
 }
 
-function evaluateSimpleLatexNumber(value = "") {
-  const text = compactLatex(value)
-    .replace(/^\\boxed/, "")
-    .replace(/^\\displaystyle/, "");
-  const ln2 = Math.log(2);
-  if (
-    /^\\frac\\pi2\\ln\^?2?2$/.test(text)
-    || /^\\frac\\pi2\\ln2\^2$/.test(text)
-    || /^\\frac\\pi2\\ln\^2\(2\)$/.test(text)
-  ) {
-    return (Math.PI / 2) * ln2 ** 2;
-  }
-  const numeric = Number(text);
-  return Number.isFinite(numeric) ? numeric : null;
-}
-
-function getVerifiedNumericCheck(problemLatex, finalAnswerLatex, modelNumericCheck) {
-  if (compactLatex(problemLatex) !== REGRESSION_INTEGRAL_KEY) return modelNumericCheck;
-  const finalValue = evaluateSimpleLatexNumber(finalAnswerLatex);
-  if (Number.isFinite(finalValue)) return String(finalValue);
-  return String(REGRESSION_INTEGRAL_VALUE);
-}
-
-function correctRegressionFinalAnswerIfNeeded(solve) {
-  if (compactLatex(solve.problemLatex) !== REGRESSION_INTEGRAL_KEY) return solve;
-  const finalValue = evaluateSimpleLatexNumber(solve.finalAnswerLatex);
-  if (Number.isFinite(finalValue) && Math.abs(finalValue - REGRESSION_INTEGRAL_VALUE) <= 1e-6) {
-    return solve;
-  }
-
-  const correctedFinalAnswer = "\\frac{\\pi}{2}\\ln^2(2)";
-  console.warn("[omnimath:numeric-check-warning]", {
-    reason: "corrected regression final answer",
-    previousFinalAnswer: solve.finalAnswerLatex,
-    correctedFinalAnswer,
-    expected: REGRESSION_INTEGRAL_VALUE,
-  });
-
-  const steps = [...solve.steps];
-  const finalStep = {
-    id: "final-answer",
-    heading: "Final answer",
-    latex: correctedFinalAnswer,
-    reasoning: "The exact value matches the numerical check for the original integral.",
-    anchors: [{
-      id: "final-answer",
-      latex: correctedFinalAnswer,
-      type: "final answer",
-      priority: "high",
-    }],
-  };
-
-  if (steps.length >= 10) steps[steps.length - 1] = finalStep;
-  else steps.push(finalStep);
-
-  return {
-    ...solve,
-    steps,
-    finalAnswerLatex: correctedFinalAnswer,
-    numericCheck: String(REGRESSION_INTEGRAL_VALUE),
-  };
-}
-
 function isDuplicateProblemStep(step, problemLatex, index = 0) {
   const stepLatex = sanitizeGeneratedLatex(step?.latex);
   if (!stepLatex || !problemLatex) return false;
@@ -817,22 +968,89 @@ function isFinalAnswerHeading(value = "") {
   return /final\s+answer|answer$/iu.test(safeString(value));
 }
 
+function stepHeadingValue(step = {}) {
+  return step?.heading || step?.label || step?.title || "";
+}
+
+function stepLatexValue(step = {}) {
+  return step?.latex || step?.math || step?.display || "";
+}
+
+function finalAnswerCandidateContains(stepLatex = "", finalAnswerLatex = "") {
+  const step = normalizeLatexForComparison(stepLatex);
+  const finalAnswer = normalizeLatexForComparison(finalAnswerLatex);
+  if (!step || !finalAnswer) return false;
+  if (step === finalAnswer) return true;
+  if (step.includes(finalAnswer)) return true;
+
+  const stepParts = step.split(/(?:\\text\{?(?:or|and)\}?|or|and|,|;)/i).filter(Boolean);
+  return stepParts.some((part) => part === finalAnswer || part.endsWith(`=${finalAnswer}`));
+}
+
 function isRedundantFinalAnswerStep(step, finalAnswerLatex = "") {
   if (!finalAnswerLatex) return false;
-  const stepLatex = normalizeLatexForComparison(sanitizeGeneratedLatex(step?.latex));
+  const stepLatex = normalizeLatexForComparison(sanitizeGeneratedLatex(stepLatexValue(step)));
   const finalLatex = normalizeLatexForComparison(finalAnswerLatex);
   return Boolean(stepLatex && finalLatex && stepLatex === finalLatex);
 }
 
+function isFinalAnswerStep(step, finalAnswerLatex = "") {
+  return isFinalAnswerHeading(stepHeadingValue(step))
+    || isRedundantFinalAnswerStep(step, finalAnswerLatex)
+    || (isFinalAnswerHeading(stepHeadingValue(step)) && finalAnswerCandidateContains(sanitizeGeneratedLatex(stepLatexValue(step)), finalAnswerLatex));
+}
+
+function summarizeSolvePipelineStage(stage, steps = [], extra = {}) {
+  if (!solveDiagnosticsEnabled()) return;
+  const finalAnswerSteps = steps.filter((step) => isFinalAnswerStep(step, extra.finalAnswerLatex));
+  const duplicateFinalAnswerNodes = Math.max(0, finalAnswerSteps.length - 1);
+  console.info("[omnimath:solve-pipeline]", {
+    stage,
+    stepCount: steps.length,
+    stepIds: steps.map((step) => step?.id || null),
+    finalAnswerStepIds: finalAnswerSteps.map((step) => step?.id || null),
+    duplicateFinalAnswerNodes,
+    semanticNodeCount: steps.reduce((count, step) => count + (Array.isArray(step?.expressions) ? step.expressions.length : 0), 0),
+    leafTokenCount: steps.reduce((count, step) => count + (Array.isArray(step?.anchors) ? step.anchors.length : 0), 0),
+    annotatedTokenCount: steps.reduce((count, step) => count + (Array.isArray(step?.tokens) ? step.tokens.length : 0), 0),
+    generatedHitboxCount: 0,
+    skippedNodes: extra.skippedNodes || [],
+    parserFailures: extra.parserFailures || [],
+    fallbackUsage: extra.fallbackUsage || [],
+    retries: extra.retries || 0,
+    exceptions: extra.exceptions || [],
+    ...extra,
+  });
+}
+
+function assertSingleFinalAnswerStep(steps = [], finalAnswerLatex = "", stage = "step-normalization") {
+  const finalAnswerSteps = steps.filter((step) => isFinalAnswerStep(step, finalAnswerLatex));
+  if (finalAnswerSteps.length <= 1) return;
+  const diagnostic = {
+    stage,
+    finalAnswerLatex,
+    duplicateFinalAnswerNodes: finalAnswerSteps.length,
+    stepIds: steps.map((step) => step.id),
+    finalAnswerStepIds: finalAnswerSteps.map((step) => step.id),
+    finalAnswerStepLatex: finalAnswerSteps.map(stepLatexValue),
+  };
+  console.error("[omnimath:solve-pipeline-invariant]", diagnostic);
+  if (process.env.NODE_ENV !== "production") {
+    throw createInvalidResponseError(`Duplicate Final Answer steps after ${stage}.`);
+  }
+}
+
 function normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex } = {}) {
-  const steps = rawSteps
+  const perfectSquare = parsePerfectSquareQuadratic(problemLatex);
+  summarizeSolvePipelineStage("LLM response", Array.isArray(rawSteps) ? rawSteps : [], { finalAnswerLatex });
+  const steps = repairPerfectSquareSteps(rawSteps
     .map((step, index) => ({
       id: normalizeStepId(step?.id, index),
       heading: safeString(step?.heading || `Step ${index + 1}`),
       latex: simplifyDisplayedLatex(sanitizeGeneratedLatex(step?.latex)),
       reasoning: safeString(step?.reasoning),
       anchors: Array.isArray(step?.anchors) ? step.anchors : [],
-    }))
+    })), perfectSquare, finalAnswerLatex)
     .filter((step, index) => (
       step.latex
       && !isStandaloneDifferential(step.latex)
@@ -840,10 +1058,18 @@ function normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex } = {}) 
       && !isDuplicateProblemStep(step, problemLatex, index)
     ));
 
-  const nonFinalSteps = steps.filter((step) => !isRedundantFinalAnswerStep(step, finalAnswerLatex));
+  summarizeSolvePipelineStage("step normalization", steps, { finalAnswerLatex });
+
+  const finalSteps = steps.filter((step) => (
+    isRedundantFinalAnswerStep(step, finalAnswerLatex)
+    || (isFinalAnswerHeading(step.heading) && finalAnswerCandidateContains(step.latex, finalAnswerLatex))
+  ));
+  const finalStep = finalSteps.find((step) => isRedundantFinalAnswerStep(step, finalAnswerLatex))
+    || finalSteps[finalSteps.length - 1]
+    || null;
+  const nonFinalSteps = steps.filter((step) => !isFinalAnswerStep(step, finalAnswerLatex));
   if (finalAnswerLatex) {
-    const finalStep = steps.find((step) => isRedundantFinalAnswerStep(step, finalAnswerLatex));
-    return [
+    const normalizedSteps = [
       ...nonFinalSteps,
       finalStep
         ? { ...finalStep, id: "final-answer", heading: "Final Answer", latex: finalAnswerLatex }
@@ -855,8 +1081,18 @@ function normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex } = {}) 
             anchors: [],
           },
     ];
+    summarizeSolvePipelineStage("duplicate removal", normalizedSteps, {
+      finalAnswerLatex,
+      skippedNodes: finalSteps.slice(0, Math.max(0, finalSteps.length - 1)).map((step) => ({
+        id: step.id,
+        reason: "merged duplicate final-answer candidate",
+      })),
+    });
+    assertSingleFinalAnswerStep(normalizedSteps, finalAnswerLatex);
+    return normalizedSteps;
   }
 
+  assertSingleFinalAnswerStep(steps, finalAnswerLatex);
   return steps;
 }
 
@@ -871,8 +1107,15 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
   if (!isString(value.title) || !problemLatex || rawSteps.length === 0 || !finalAnswerLatex) {
     throw createInvalidResponseError("Model response is missing required solve fields.");
   }
+  assertRawGeneratedLatexFields(rawSolveLatexFields({
+    problemLatex: value.problemLatex,
+    finalAnswerLatex: value.finalAnswerLatex,
+    steps: rawSteps,
+    includeProblemLatex: isString(value.problemLatex),
+  }));
 
   const steps = normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex });
+  assertGeneratedLatexFields(solveLatexFields({ problemLatex, finalAnswerLatex, steps }));
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Model response does not contain meaningful solution steps.");
@@ -917,6 +1160,12 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
   if (!isString(value.title) || !problemLatex || rawSteps.length === 0) {
     throw createInvalidResponseError("Compact model response is missing required solve fields.");
   }
+  assertRawGeneratedLatexFields(rawSolveLatexFields({
+    problemLatex: value.problemLatex,
+    finalAnswerLatex: rawSteps.at(-1)?.latex,
+    steps: rawSteps,
+    includeProblemLatex: isString(value.problemLatex),
+  }));
 
   const steps = rawSteps
     .map((step, index) => ({
@@ -938,6 +1187,7 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
   }
 
   const finalAnswerLatex = simplifyDisplayedLatex(steps.at(-1)?.latex || problemLatex);
+  assertGeneratedLatexFields(solveLatexFields({ problemLatex, finalAnswerLatex, steps }));
   return {
     title: safeString(value.title),
     problemLatex,
@@ -965,6 +1215,18 @@ export function assertImageSolveResponse(value) {
   if (!isString(value.title) || !extractedProblemLatex || !extractedProblemText || rawSteps.length === 0 || !finalAnswerLatex) {
     throw createInvalidResponseError("Image model response is missing required extracted solve fields.");
   }
+  assertRawGeneratedLatexFields(rawSolveLatexFields({
+    problemLatex: value.extractedProblemLatex,
+    finalAnswerLatex: value.finalAnswerLatex,
+    steps: rawSteps.map((step) => ({
+      ...step,
+      latex: step?.equationLatex,
+      anchors: Array.isArray(step?.tokens)
+        ? step.tokens.map((token) => ({ latex: token?.latex }))
+        : [],
+    })),
+    includeProblemLatex: true,
+  }));
 
   const steps = rawSteps
     .map((step, index) => ({
@@ -984,6 +1246,11 @@ export function assertImageSolveResponse(value) {
         : [],
     }))
     .filter((step) => step.latex);
+  assertGeneratedLatexFields(solveLatexFields({
+    problemLatex: extractedProblemLatex,
+    finalAnswerLatex,
+    steps,
+  }));
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Image model response does not contain meaningful solution steps.");
@@ -1010,6 +1277,7 @@ export function assertImageExtractionResponse(value) {
   if (!extractedProblemLatex || !extractedProblemText) {
     throw createInvalidResponseError("Image extraction response is missing extracted problem fields.");
   }
+  assertGeneratedLatexFields([{ fieldPath: "extractedProblemLatex", value: extractedProblemLatex }]);
 
   const confidence = Math.max(0, Math.min(100, Math.round(Number(value.confidence) || 0)));
   const issues = Array.isArray(value.issues)
@@ -1033,7 +1301,8 @@ export function convertFastSolveToMathExplanation(value, {
   includeProblemStep = false,
   preserveProblemLatex = false,
 } = {}) {
-  const solve = correctRegressionFinalAnswerIfNeeded(assertFastSolveResponse(value, originalProblem, { includeProblemStep }));
+  const solve = assertFastSolveResponse(value, originalProblem, { includeProblemStep });
+  summarizeSolvePipelineStage("schema validation", solve.steps, { finalAnswerLatex: solve.finalAnswerLatex });
   let anchorBudget = 20;
   const anchorsByStepId = new Map();
   const steps = solve.steps.map((step, index) => {
@@ -1117,17 +1386,27 @@ export function convertFastSolveToMathExplanation(value, {
     tokens,
     steps,
   });
+  summarizeSolvePipelineStage("annotation generation", annotated.steps || [], {
+    finalAnswerLatex: solve.finalAnswerLatex,
+    semanticNodeCount: (annotated.steps || []).reduce((count, step) => (
+      count + (step.expressions || []).reduce((exprCount, expression) => (
+        exprCount + (expression.tokens || []).reduce((tokenCount, token) => (
+          tokenCount + 1 + (Array.isArray(token.children) ? token.children.length : 0)
+        ), 0)
+      ), 0)
+    ), 0),
+    annotatedTokenCount: (annotated.steps || []).reduce((count, step) => (
+      count + (step.lines || []).reduce((lineCount, line) => lineCount + (line.tokens || []).length, 0)
+    ), 0),
+  });
   annotated.expression = preserveProblemLatex ? solve.problemLatex : renderMathLatex(solve.problemLatex);
   annotated.finalAnswer = renderMathLatex(solve.finalAnswerLatex);
   annotated.finalAnswerLatex = renderMathLatex(solve.finalAnswerLatex);
-  annotated.numericCheck = getVerifiedNumericCheck(
-    solve.problemLatex,
-    solve.finalAnswerLatex,
-    solve.numericCheck
-  );
+  annotated.numericCheck = solve.numericCheck;
   annotated.steps = annotated.steps.map((step, index) => {
     const sourceStep = solve.steps[index];
-    const displayLatex = renderMathLatex(sourceStep?.latex || step.math || "");
+    const displayLatexLines = renderStepLatexLines(sourceStep?.latex || step.math || "");
+    const renderedStepMath = displayLatexLines.join("\n");
     const sourceAnchors = anchorsByStepId.get(step.id) || [];
     const sourceParts = sourceAnchors.map((sourceAnchor, partIndex) => {
       const anchorLatex = renderMathLatex(sourceAnchor?.latex || "");
@@ -1153,26 +1432,46 @@ export function convertFastSolveToMathExplanation(value, {
           chunkIndex === 0
             ? {
                 ...chunk,
-                display: displayLatex,
-                latex: displayLatex,
+                display: renderedStepMath,
+                latex: renderedStepMath,
                 parts: sourceParts,
               }
             : chunk
         ))
       : step.chunks;
+    const renderedMathLines = displayLatexLines.map((latex, lineOffset) => ({
+      id: `${step.id}-line-${lineOffset + 1}`,
+      kind: "math",
+      role: index === 0 ? "problem" : index === solve.steps.length - 1 ? "final_answer" : "solution_step",
+      text: "",
+      latex,
+      tokens: displayLatexLines.length === 1 ? chunks || [] : [],
+    }));
     return {
       ...step,
-      math: displayLatex,
+      math: renderedStepMath,
       chunks,
       lines: Array.isArray(step.lines)
-        ? step.lines.map((line, lineIndex) => (
+        ? step.lines.flatMap((line, lineIndex) => (
             lineIndex === 0 && line.kind === "math"
-              ? { ...line, latex: displayLatex, tokens: chunks || [] }
-              : line
+              ? renderedMathLines
+              : [line]
           ))
         : step.lines,
     };
   });
+  summarizeSolvePipelineStage("KaTeX render preparation", annotated.steps || [], {
+    finalAnswerLatex: solve.finalAnswerLatex,
+  });
+  assertSingleFinalAnswerStep(
+    (annotated.steps || []).map((step) => ({
+      id: step.id,
+      heading: step.label || step.title,
+      latex: step.math,
+    })),
+    solve.finalAnswerLatex,
+    "conversion"
+  );
   return annotated;
 }
 

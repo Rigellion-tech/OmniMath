@@ -10,6 +10,13 @@ export const DEFAULT_OPENAI_MODELS = {
   pinned: "gpt-4.1-mini",
 };
 
+export const DEFAULT_OPENAI_SAMPLING = {
+  solver: {
+    temperature: 0,
+    top_p: 1,
+  },
+};
+
 export function getOpenAiModels() {
   const legacyModel = process.env.OPENAI_MODEL;
   const legacyLazyModel = process.env.OPENAI_LAZY_MODEL;
@@ -27,11 +34,16 @@ export function getOpenAiModelForPath(path) {
   return getOpenAiModels()[path] || getOpenAiModels().solver;
 }
 
+export function getOpenAiSamplingForPath(path) {
+  return DEFAULT_OPENAI_SAMPLING[path] ? { ...DEFAULT_OPENAI_SAMPLING[path] } : {};
+}
+
 export function logOpenAiModelSelection(path, extra = {}) {
   if (process.env.NODE_ENV === "production") return;
   console.info("[omnimath:openai-model]", {
     path,
     model: getOpenAiModelForPath(path),
+    sampling: getOpenAiSamplingForPath(path),
     ...extra,
   });
 }

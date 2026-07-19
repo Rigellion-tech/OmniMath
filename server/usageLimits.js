@@ -22,6 +22,11 @@ function isProductionRuntime() {
   return process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
 }
 
+function logUsageDev(event, details = {}) {
+  if (isProductionRuntime()) return;
+  console.info("[omnimath:usage]", { event, ...details });
+}
+
 function readPositiveInteger(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -265,13 +270,20 @@ async function addUsage(key, amount, ttlSeconds, currentPeriodPrefixes) {
   if (amount === 0) return readUsage(key);
 
   const kvCount = await addKvUsage(key, amount, ttlSeconds);
-  if (kvCount !== null) return kvCount;
+  if (kvCount !== null) {
+    logUsageDev("write", { source: "kv", key, amount, count: kvCount });
+    return kvCount;
+  }
+  logUsageDev("write", { source: "local-file", key, amount });
   return addLocalUsage(key, amount, currentPeriodPrefixes);
 }
 
 async function readUsage(key) {
   const kvCount = await readKvUsage(key);
-  if (kvCount !== null) return kvCount;
+  if (kvCount !== null) {
+    logUsageDev("read", { source: "kv", key, count: kvCount });
+    return kvCount;
+  }
   if (isProductionRuntime()) {
     throw Object.assign(new Error("A Redis REST usage store is required in production."), {
       statusCode: 500,
@@ -280,7 +292,9 @@ async function readUsage(key) {
     });
   }
   const data = await readLocalStore();
-  return Math.max(0, Number(data[key]?.count || 0));
+  const count = Math.max(0, Number(data[key]?.count || 0));
+  logUsageDev("read", { source: "local-file", key, count });
+  return count;
 }
 
 function createPeriodPayload({ count, limit, resetDate }) {
@@ -716,6 +730,16 @@ export async function checkAndReserveUsage({
     throw createSpendLimitError(currentUsage, "monthly");
   }
 
+  logUsageDev("allowed", {
+    kind,
+    subject: usageIdentity.subject,
+    tier: usageIdentity.tier,
+    dailyRequests: `${requestCounts.daily}/${limits.requests.daily}`,
+    monthlyRequests: `${requestCounts.monthly}/${limits.requests.monthly}`,
+    estimatedTokens,
+    estimatedCostMicros: normalizedEstimatedCostMicros,
+  });
+
   const dailyTtl = getSecondsUntilReset(state.dailyResetDate) + 3600;
   const monthlyTtl = getSecondsUntilReset(state.monthlyResetDate) + 3600;
 
@@ -808,13 +832,34 @@ export async function checkAndReserveUsage({
   };
 }
 
-export async function settleTokenUsage(reservation, actualTokens = 0, actualCostMicros = 0) {
+export async function settleTokenUsage(reservation, actualTokens = 0, actualCostMicros = 0, {
+  actualInputTokens = 0,
+  actualOutputTokens = 0,
+  providerCalls = 1,
+  settlementReason = "success",
+} = {}) {
   if (!reservation) return null;
 
   const normalizedActualTokens = Math.max(0, Math.ceil(Number(actualTokens) || 0));
   const normalizedActualCostMicros = Math.max(0, Math.ceil(Number(actualCostMicros) || 0));
+  const normalizedProviderCalls = Math.max(0, Math.ceil(Number(providerCalls) || 0));
+  const requestDelta = normalizedProviderCalls - 1;
   const tokenDelta = normalizedActualTokens - reservation.estimatedTokens;
   const costDelta = normalizedActualCostMicros - reservation.estimatedCostMicros;
+  if (requestDelta !== 0) {
+    await addUsage(
+      reservation.keys.requests.daily,
+      requestDelta,
+      reservation.dailyTtl,
+      reservation.currentPeriodPrefixes
+    );
+    await addUsage(
+      reservation.keys.requests.monthly,
+      requestDelta,
+      reservation.monthlyTtl,
+      reservation.currentPeriodPrefixes
+    );
+  }
   if (tokenDelta !== 0) {
     await addUsage(
       reservation.keys.tokens.daily,
@@ -856,12 +901,29 @@ export async function settleTokenUsage(reservation, actualTokens = 0, actualCost
     );
   }
 
-  return createCurrentUsage(reservation.identity, reservation.kind);
+  const usage = await createCurrentUsage(reservation.identity, reservation.kind);
+  usage.settlement = {
+    reservedTokens: reservation.estimatedTokens,
+    actualInputTokens: Math.max(0, Math.ceil(Number(actualInputTokens) || 0)),
+    actualOutputTokens: Math.max(0, Math.ceil(Number(actualOutputTokens) || 0)),
+    actualTotalTokens: normalizedActualTokens,
+    estimatedTokens: reservation.estimatedTokens,
+    providerCalls: normalizedProviderCalls,
+    settledTokens: normalizedActualTokens,
+    releasedTokens: Math.max(0, reservation.estimatedTokens - normalizedActualTokens),
+    reservedCostMicros: reservation.estimatedCostMicros,
+    actualCostMicros: normalizedActualCostMicros,
+    settlementReason,
+  };
+  return usage;
 }
 
-export async function releaseTokenReservation(reservation) {
-  if (!reservation || (reservation.estimatedTokens <= 0 && reservation.estimatedCostMicros <= 0)) return null;
-  return settleTokenUsage(reservation, 0, 0);
+export async function releaseTokenReservation(reservation, {
+  providerCalls = 1,
+  settlementReason = "released",
+} = {}) {
+  if (!reservation) return null;
+  return settleTokenUsage(reservation, 0, 0, { providerCalls, settlementReason });
 }
 
 export async function getUsageSnapshot({ req, identity } = {}) {

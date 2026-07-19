@@ -1,3 +1,11 @@
+import {
+  canonicalProblemFromExtraction,
+  createCanonicalProblemPayload,
+  diffCanonicalProblemPayloads,
+  getCanonicalSolverInput,
+  logCanonicalProblem,
+} from "../lib/canonicalProblem.js";
+
 async function parseResponse(response) {
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json")
@@ -44,6 +52,15 @@ function summarizeToken(token) {
   };
 }
 
+function createClientRequestId(prefix = "client") {
+  const random = Math.random().toString(36).slice(2, 8);
+  return `${prefix}-${Date.now().toString(36)}-${random}`;
+}
+
+function objectOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
 function logAuthDebug(endpoint, details) {
   if (!import.meta.env.DEV) return;
   console.info("[omnimath:frontend-auth]", {
@@ -77,6 +94,12 @@ async function getAuthHeaders(getToken, endpoint) {
 }
 
 export async function explainProblem({ problem, history, getToken }) {
+  const debugRequestId = createClientRequestId("typed-solve");
+  const canonicalProblem = createCanonicalProblemPayload({
+    canonicalText: problem,
+    source: "typed",
+  });
+  logCanonicalProblem("solve request", canonicalProblem, { endpoint: "/api/explain" });
   const authHeaders = await getAuthHeaders(getToken, "/api/explain");
   const response = await fetch("/api/explain", {
     method: "POST",
@@ -85,8 +108,10 @@ export async function explainProblem({ problem, history, getToken }) {
       ...authHeaders,
     },
     body: JSON.stringify({
-      problem,
+      problem: canonicalProblem.canonicalText,
+      canonicalProblem,
       history,
+      debugRequestId,
     }),
   });
 
@@ -200,6 +225,25 @@ export function buildExtractionSubmissionPayload(options = {}) {
   const exactRawText = normalizeLineBreaks(rawText || extraction?.rawExtractedText || extraction?.rawOcrText || extraction?.extractedProblemText || "");
   const editableDisplayText = normalizeLineBreaks(displayText || extraction?.displayText || extraction?.cleanedPlainText || extraction?.extractedProblemText || exactRawText);
   const normalizedText = normalizeOcrTextForSubmission(editableDisplayText || exactRawText);
+  const source = options.source || (solveDecision === "direct" && normalizedText === normalizeOcrTextForSubmission(extraction?.extractedProblemText || exactRawText)
+    ? "ocr-direct"
+    : "ocr-reviewed");
+  const canonicalProblem = canonicalProblemFromExtraction({
+    extraction,
+    canonicalText: normalizedText,
+    source,
+  });
+  if (extraction?.canonicalProblem?.hash && extraction.canonicalProblem.hash !== canonicalProblem.hash) {
+    logCanonicalProblem("hash divergence", canonicalProblem, {
+      previousHash: extraction.canonicalProblem.hash,
+      differences: diffCanonicalProblemPayloads(extraction.canonicalProblem, canonicalProblem),
+      path: "buildExtractionSubmissionPayload",
+    });
+  }
+  logCanonicalProblem("review continue", canonicalProblem, {
+    solveDecision,
+    path: "buildExtractionSubmissionPayload",
+  });
   const previewMath = Array.isArray(extraction?.displaySegments)
     ? extraction.displaySegments
     : Array.isArray(extraction?.imageSource?.displaySegments)
@@ -213,11 +257,13 @@ export function buildExtractionSubmissionPayload(options = {}) {
     validationText: normalizedText,
     previewMath,
     submittedProblemSource: "ocr-review-state",
+    canonicalProblem,
   };
 
   return {
-    problem: normalizedText,
+    problem: getCanonicalSolverInput(canonicalProblem),
     problemText: editableDisplayText,
+    canonicalProblem,
     extraction: payloadExtraction,
     solveDecision,
   };
@@ -228,9 +274,21 @@ export async function solveExtractedProblem({
   problemLatex = "",
   problemText = "",
   extraction = {},
+  canonicalProblem = null,
   solveDecision = "direct",
   getToken,
 }) {
+  const debugRequestId = createClientRequestId("solve-extracted");
+  const safeExtraction = objectOrEmpty(extraction);
+  const frozenCanonicalProblem = canonicalProblem || safeExtraction.canonicalProblem || createCanonicalProblemPayload({
+    canonicalText: problem,
+    canonicalLatex: problemLatex,
+    source: safeExtraction.submittedProblemSource ? "ocr-reviewed" : "typed",
+    extractionWarnings: safeExtraction.issues || safeExtraction.extractionValidation?.issues || [],
+    extractionConfidence: safeExtraction.confidence ?? safeExtraction.extractionValidation?.confidence,
+  });
+  const canonicalInput = getCanonicalSolverInput(frozenCanonicalProblem, problem);
+  logCanonicalProblem("solve request", frozenCanonicalProblem, { endpoint: "/api/solve-extracted-problem" });
   const authHeaders = await getAuthHeaders(getToken, "/api/solve-extracted-problem");
   const response = await fetch("/api/solve-extracted-problem", {
     method: "POST",
@@ -239,11 +297,16 @@ export async function solveExtractedProblem({
       ...authHeaders,
     },
     body: JSON.stringify({
-      problem,
+      problem: canonicalInput,
       problemLatex,
       problemText,
-      extraction,
+      canonicalProblem: frozenCanonicalProblem,
+      extraction: {
+        ...safeExtraction,
+        canonicalProblem: frozenCanonicalProblem,
+      },
       solveDecision,
+      debugRequestId,
     }),
   });
 
@@ -295,6 +358,12 @@ export async function explainPin({ payload, getToken, signal }) {
 }
 
 export async function compareMethods({ payload, getToken }) {
+  const canonicalProblem = payload?.canonicalProblem || createCanonicalProblemPayload({
+    canonicalText: payload?.problemLatex || payload?.problem || "",
+    canonicalLatex: payload?.problemLatex || "",
+    source: payload?.imageSource || payload?.extraction ? "ocr-reviewed" : "typed",
+  });
+  logCanonicalProblem("compare request", canonicalProblem, { endpoint: "/api/compare-methods" });
   const authHeaders = await getAuthHeaders(getToken, "/api/compare-methods");
   const response = await fetch("/api/compare-methods", {
     method: "POST",
@@ -302,7 +371,11 @@ export async function compareMethods({ payload, getToken }) {
       "Content-Type": "application/json",
       ...authHeaders,
     },
-    body: JSON.stringify(payload || {}),
+    body: JSON.stringify({
+      ...(payload || {}),
+      problemLatex: getCanonicalSolverInput(canonicalProblem, payload?.problemLatex || payload?.problem || ""),
+      canonicalProblem,
+    }),
   });
 
   return parseResponse(response);

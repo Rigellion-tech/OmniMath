@@ -48,6 +48,11 @@ import {
 } from "./explanationCache.js";
 import { traceMathStage } from "../src/lib/mathNode.js";
 import {
+  getCanonicalSolverInput,
+  logCanonicalProblem,
+  normalizeCanonicalProblem,
+} from "./solveRequestContext.js";
+import {
   createUserSessionForRequest,
   getCurrentUserData,
   getCurrentUserHistory,
@@ -603,9 +608,11 @@ async function getUsageForKind(req, kind, identity) {
   return snapshot.usage?.[kind];
 }
 
-function buildResponse(result, { usage, saved, source, demoMode }) {
+function buildResponse(result, { usage, saved, source, demoMode, canonicalProblem = null }) {
   return {
     ...result,
+    canonicalProblem: canonicalProblem || result.canonicalProblem || null,
+    canonicalInputHash: canonicalProblem?.hash || result.canonicalProblem?.hash || null,
     usage,
     savedExplanationId: saved?.id,
     runtime: {
@@ -781,7 +788,9 @@ export async function handleExplainRequest(req, res) {
     assertAiEnabled();
     const body = await readJson(req);
     requireObject(body);
-    const problem = requireTextProblem(body.problem ?? body.prompt);
+    const canonicalProblem = normalizeCanonicalProblem(body, { source: "typed" });
+    const problem = requireTextProblem(getCanonicalSolverInput(canonicalProblem));
+    logCanonicalProblem("solve request", canonicalProblem, { endpoint: "/api/explain" });
     const history = parseHistory(body.history);
     const { reference, depth } = getCacheRequestFields(body);
     const cacheKey = createExplanationCacheKey({
@@ -803,7 +812,7 @@ export async function handleExplainRequest(req, res) {
       sendJson(
         res,
         200,
-        buildResponse(cached, { usage, source: "cached", demoMode: !isOpenAiConfigured() }),
+        buildResponse(cached, { usage, source: "cached", demoMode: !isOpenAiConfigured(), canonicalProblem }),
         createUsageHeaders(usage)
       );
       return;
@@ -853,6 +862,8 @@ export async function handleExplainRequest(req, res) {
         throw error;
       }
 
+      result.canonicalProblem = canonicalProblem;
+      result.canonicalInputHash = canonicalProblem.hash;
       setCachedExplanation(cacheKey, result);
       logSolveTiming({
         endpoint: "/api/explain",
@@ -884,6 +895,7 @@ export async function handleExplainRequest(req, res) {
         saved,
         source: duplicate ? `${source} (deduplicated)` : source,
         demoMode: !isOpenAiConfigured(),
+        canonicalProblem,
       }),
       createUsageHeaders(usage)
     );
@@ -1059,12 +1071,20 @@ export async function handleSolveExtractedProblemRequest(req, res) {
     assertAiEnabled();
     const body = requireObject(await readJson(req));
     const requestBodyChars = JSON.stringify(body).length;
-    const problemLatex = requireTextProblem(body.problem || body.problemLatex || body.extractedProblemLatex);
-    const problemText = optionalShortText(body.problemText || body.extractedProblemText || "", "Problem text", MAX_PROBLEM_CHARS);
     const extraction = requireObject(body.extraction || {}, "Extraction");
     const solveDecision = ["direct", "anyway", "edited"].includes(body.solveDecision)
       ? body.solveDecision
       : "direct";
+    const canonicalProblem = normalizeCanonicalProblem(body, {
+      canonicalText: body.problem || body.problemText || body.extractedProblemText || extraction.normalizedText || extraction.validationText || "",
+      canonicalLatex: body.problemLatex || body.extractedProblemLatex || extraction.extractedProblemLatex || "",
+      source: extraction?.canonicalProblem?.source || (solveDecision === "direct" ? "ocr-direct" : "ocr-reviewed"),
+      extractionWarnings: extraction.issues || extraction.extractionValidation?.issues || [],
+      extractionConfidence: extraction.confidence ?? extraction.extractionValidation?.confidence,
+    });
+    const problemLatex = requireTextProblem(getCanonicalSolverInput(canonicalProblem));
+    const problemText = optionalShortText(body.problemText || body.extractedProblemText || "", "Problem text", MAX_PROBLEM_CHARS);
+    logCanonicalProblem("solve request", canonicalProblem, { endpoint: "/api/solve-extracted-problem", solveDecision });
     const prompt = buildMathExplanationPrompt({ problem: problemLatex });
     logImageUploadDebug("solve-extracted-input", {
       problemChars: problemLatex.length,
@@ -1169,7 +1189,11 @@ export async function handleSolveExtractedProblemRequest(req, res) {
             : extraction.extractionValidation?.issues || extraction.imageSource?.issues || [],
           solveDecision,
           editedBeforeSolving: solveDecision === "edited",
+          canonicalProblem,
+          canonicalInputHash: canonicalProblem.hash,
         };
+        result.canonicalProblem = canonicalProblem;
+        result.canonicalInputHash = canonicalProblem.hash;
         result.extractedProblemText = result.imageSource.finalProblemText || result.imageSource.cleanedExtractedText || result.imageSource.rawExtractedText;
         result.extractedProblemLatex = result.imageSource.rawExtractedLatex;
         result.extractionValidation = extraction.extractionValidation || {
@@ -1200,6 +1224,8 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       }
 
       setCachedExplanation(cacheKey, result);
+      result.canonicalProblem = canonicalProblem;
+      result.canonicalInputHash = canonicalProblem.hash;
       const saved = await saveExplanationBestEffort(req, { source: "image", problem: problemLatex, result });
       return { result, usage, saved, source };
     });
@@ -1223,6 +1249,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
         saved,
         source: duplicate ? `${source} (deduplicated)` : source,
         demoMode: !isOpenAiConfigured(),
+        canonicalProblem,
       }),
       createUsageHeaders(usage)
     );
@@ -1525,11 +1552,13 @@ export async function handleCompareMethodsRequest(req, res) {
     throttleRequest(req, identity, "ai");
     assertAiEnabled();
     const body = requireObject(await readJson(req));
+    const canonicalProblem = normalizeCanonicalProblem(body, { source: "typed" });
     const problemLatex = requireShortText(
-      body.problemLatex || body.problem,
+      getCanonicalSolverInput(canonicalProblem, body.problemLatex || body.problem),
       "Problem LaTeX",
       MAX_PROBLEM_CHARS
     );
+    logCanonicalProblem("solve request", canonicalProblem, { endpoint: "/api/compare-methods" });
     const finalAnswerLatex = typeof body.finalAnswerLatex === "string" ? body.finalAnswerLatex.slice(0, 1200) : "";
     const steps = Array.isArray(body.steps) ? body.steps.slice(0, 12) : [];
     const cacheKey = buildLazyCacheKey(identity, {
@@ -1541,7 +1570,13 @@ export async function handleCompareMethodsRequest(req, res) {
     const cached = getCachedExplanation(cacheKey);
     if (cached) {
       const usage = await getUsageForKind(req, "explanation", identity);
-      sendJson(res, 200, { ...cached, usage, cached: true }, createUsageHeaders(usage));
+      sendJson(res, 200, {
+        ...cached,
+        canonicalProblem,
+        canonicalInputHash: canonicalProblem.hash,
+        usage,
+        cached: true,
+      }, createUsageHeaders(usage));
       return;
     }
 
@@ -1586,7 +1621,11 @@ export async function handleCompareMethodsRequest(req, res) {
       throw error;
     }
 
-    const payload = { methods: result.methods };
+    const payload = {
+      methods: result.methods,
+      canonicalProblem,
+      canonicalInputHash: canonicalProblem.hash,
+    };
     setCachedExplanation(cacheKey, payload);
     logExplanationSource({
       source: isOpenAiConfigured() ? "live AI call" : "local fallback",

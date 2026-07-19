@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildExtractionSubmissionPayload, normalizeOcrTextForSubmission } from "../src/api/mathClient.js";
+import { createCanonicalProblemPayload } from "../src/lib/canonicalProblem.js";
 import { validateExtraction } from "../server/extractionValidation.js";
 
 const OCR_EXAMPLE = "Let C be the positively oriented boundary of the surface. F(x,y,z) = < y^2 z + e^{x^2} sin(yz), ln(1+z^2), cos(xy)/(1+x^2+y^2), xy e^{-z^2}, arctan(x-y) >";
 const OCR_EXAMPLE_LATEX = String.raw`\text{Let } C \text{ be the positively oriented boundary of the surface. } \mathbf{F}(x,y,z)=\left\langle y^2 z + e^{x^2}\sin(yz), \ln(1+z^2), \frac{\cos(xy)}{1+x^2+y^2}, xy e^{-z^2}, \arctan(x-y) \right\rangle`;
 const TOKEN_PER_LINE_PREVIEW = "F\n(\nx\n,\ny\n,\nz\n)\n=\ny\n^\n2\nz\n+\ne\n^\n{\nx\n^\n2\n}";
+const UPPER_ELLIPSOID_STOKES = "Let S be the upper half of the ellipsoid x^2/4 + y^2/9 + z^2 = 1, z >= 0, oriented upward. Use Stokes' theorem to evaluate the circulation of F(x,y,z)=<y^2 z + e^{x^2} sin(yz), ln(1+z^2), cos(xy)/(1+x^2+y^2)> around the boundary C.";
 
 describe("OCR submission pipeline", () => {
   it("keeps the single-line OCR transcription as readable editable text", () => {
@@ -138,13 +140,39 @@ describe("OCR submission pipeline", () => {
       displayText: canonicalText,
       rawText: canonicalText,
       solveDecision: "direct",
+      source: "ocr-reviewed",
     });
 
     assert.equal(payload.solveDecision, "direct");
     assert.equal(payload.problem, canonicalText);
     assert.equal(payload.problemLatex, undefined);
+    assert.equal(payload.canonicalProblem.source, "ocr-reviewed");
     assert.equal(payload.extraction.normalizedText, canonicalText);
     assert.equal(payload.extraction.validationText, canonicalText);
     assert.equal(payload.problem.includes("\\frac{e^{x^2}}{"), false);
+  });
+
+  it("uses the same frozen canonical hash for normal and compare-methods solves", () => {
+    const payload = buildExtractionSubmissionPayload({
+      extraction: {
+        rawExtractedText: UPPER_ELLIPSOID_STOKES,
+        extractedProblemText: UPPER_ELLIPSOID_STOKES,
+        confidence: 96,
+      },
+      displayText: UPPER_ELLIPSOID_STOKES,
+      rawText: UPPER_ELLIPSOID_STOKES,
+      solveDecision: "direct",
+    });
+    const compareCanonical = createCanonicalProblemPayload({
+      canonicalText: payload.canonicalProblem.canonicalText,
+      canonicalLatex: payload.canonicalProblem.canonicalLatex,
+      source: payload.canonicalProblem.source,
+      extractionWarnings: payload.canonicalProblem.extractionWarnings,
+      extractionConfidence: payload.canonicalProblem.extractionConfidence,
+    });
+
+    assert.equal(payload.problem, UPPER_ELLIPSOID_STOKES);
+    assert.equal(payload.canonicalProblem.hash, compareCanonical.hash);
+    assert.equal(payload.extraction.canonicalProblem.hash, payload.canonicalProblem.hash);
   });
 });

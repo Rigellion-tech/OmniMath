@@ -309,7 +309,7 @@ const RULE_SPECIFIC_REPAIR_INSTRUCTIONS = {
   ],
   unsupported_numeric_final_answer_syntax: [
     "For unsupported_numeric_final_answer_syntax:",
-    "- Rewrite the final answer using standard evaluable LaTeX such as \\frac, \\pi, \\ln, powers, and ordinary numbers.",
+    "- Rewrite the final answer using standard evaluable LaTeX syntax such as \\frac, \\ln, powers, and ordinary numbers.",
     "- Do not change only formatting if the derivation or value is mathematically wrong.",
   ],
 };

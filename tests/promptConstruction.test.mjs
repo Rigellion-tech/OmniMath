@@ -22,7 +22,7 @@ describe("math prompt construction", () => {
     const prompt = buildMathExplanationPrompt({ problem: CONFIRMED_OCR_PROBLEM });
 
     assert.match(prompt, /Each step must correspond to a mathematical transformation or theorem application/);
-    assert.match(prompt, /Avoid separate steps for substituting z=0/);
+    assert.match(prompt, /Avoid separate steps for substituting a boundary value/);
     assert.match(prompt, /Do not use the first step to restate problemLatex/);
     assert.doesNotMatch(prompt, /first step's latex must exactly match problemLatex/i);
     assert.match(prompt, /Simplify displayed equations before returning them/);
@@ -33,8 +33,8 @@ describe("math prompt construction", () => {
 
     assert.match(prompt, /each displayed steps\[\]\.latex must be a direct algebraic transformation/i);
     assert.match(prompt, /Explanatory facts and identity checks belong in steps\[\]\.reasoning/i);
-    assert.match(prompt, /1936=44\^2 and 88=2\\cdot44/);
-    assert.match(prompt, /x\^2\+88x\+1936=0, then \(x\+44\)\^2=0, then x\+44=0, then x=-44/);
+    assert.match(prompt, /coefficient-matching facts only in reasoning/);
+    assert.match(prompt, /original equation, to the factored square equation, to the linear equation, to the final answer/);
     assert.match(prompt, /Do not display identity-conversion steps/);
   });
 
@@ -54,10 +54,10 @@ describe("math prompt construction", () => {
     assert.match(prompt, /exactly one standalone mathematical expression/);
     assert.match(prompt, /one equation assigning the original expression to that value/);
     assert.match(prompt, /no prose, explanation, intermediate derivation, \\Rightarrow, multiline content/);
-    assert.match(prompt, /Valid: \\frac\{\\pi\^3\}\{12\}/);
-    assert.match(prompt, /Valid: \\int_0\^\\infty f\(x\)\\,dx = \\frac\{\\pi\^3\}\{12\}/);
-    assert.match(prompt, /Invalid: I'\(1\)=\\cdots \\\\ \\Rightarrow/);
-    assert.match(prompt, /Invalid: Therefore the answer is \\frac\{\\pi\^3\}\{12\}/);
+    assert.match(prompt, /Valid shape: A/);
+    assert.match(prompt, /Valid shape: E=A/);
+    assert.match(prompt, /Invalid shape: E_1=\\cdots \\\\ \\Rightarrow E=A/);
+    assert.match(prompt, /Invalid shape: Therefore the answer is A/);
     assert.match(prompt, /Invalid: A=B,\\quad C=D/);
     assert.match(prompt, /compact responses, the last step's latex is treated as finalAnswerLatex/i);
   });

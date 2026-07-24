@@ -63,13 +63,13 @@ Quality rules:
 - Prefer 3-5 steps for simple problems, 4-7 for moderate problems, and 5-8 for advanced vector calculus.
 - For equation solving, each displayed steps[].latex must be a direct algebraic transformation of the equation currently being solved.
 - Explanatory facts and identity checks belong in steps[].reasoning, not as standalone displayed equations.
-- Never insert a displayed equation that is only a fact about coefficients, such as 1936=44^2, 44^2=1936, or 2\\cdot44=88, unless that equation is itself the problem being solved.
+- Never insert a displayed equation that is only a fact about coefficients, such as a constant term matching a square or a linear coefficient matching twice the square root, unless that equation is itself the problem being solved.
 - For perfect-square quadratics, prefer the shortest transformation chain: original equation, factored square equation, linear equation, final answer.
-- Example style for x^2+88x+1936=0: steps[].latex should be x^2+88x+1936=0, then (x+44)^2=0, then x+44=0, then x=-44. Put "1936=44^2 and 88=2\\cdot44" only in reasoning.
-- Do not display identity-conversion steps such as x^2+88x+44^2=(x+44)^2 as separate steps; use them only as reasoning for the factoring transformation.
+- Example style for a perfect-square quadratic: steps[].latex should move from the original equation, to the factored square equation, to the linear equation, to the final answer. Put coefficient-matching facts only in reasoning.
+- Do not display identity-conversion steps that only restate a completed-square identity as separate steps; use them only as reasoning for the factoring transformation.
 - Each step must correspond to a mathematical transformation or theorem application: theorem application, parameterization, symmetry, coordinate transformation, integral evaluation, or verification.
 - Consecutive algebra manipulations must be merged into one conceptual step.
-- Avoid separate steps for substituting z=0, evaluating \\ln(1), evaluating \\sin(0), removing zero terms, or other trivial algebra.
+- Avoid separate steps for substituting a boundary value, evaluating elementary constants at boundary values, removing zero terms, or other trivial algebra.
 - Every displayed equation must transform the active expression, not merely justify it.
 - Every step must include an anchors array, even when empty.
 - Generate at most 3 anchors per step and at most 20 anchors across the whole solution.
@@ -90,10 +90,10 @@ Quality rules:
   - It must be exactly one standalone mathematical expression.
   - It may be either the exact final value or one equation assigning the original expression to that value.
   - It must contain no prose, explanation, intermediate derivation, \\Rightarrow, multiline content, display separators, or multiple unrelated equations.
-  - Valid: \\frac{\\pi^3}{12}
-  - Valid: \\int_0^\\infty f(x)\\,dx = \\frac{\\pi^3}{12}
-  - Invalid: I'(1)=\\cdots \\\\ \\Rightarrow \\int_0^\\infty f(x)\\,dx=\\cdots
-  - Invalid: Therefore the answer is \\frac{\\pi^3}{12}
+  - Valid shape: A
+  - Valid shape: E=A
+  - Invalid shape: E_1=\\cdots \\\\ \\Rightarrow E=A
+  - Invalid shape: Therefore the answer is A
   - Invalid: A=B,\\quad C=D
 - Every displayed equation must be valid LaTeX.
 - Math-rendered fields must contain only the LaTeX expression. Do not wrap math-rendered fields in Markdown fences, latex code blocks, \\[...\\], $$...$$, or $...$.
@@ -107,7 +107,7 @@ Quality rules:
 - Keep each reasoning field to 1-2 concise sentences, maximum 35 words.
 - Do not restate the entire original problem inside step 1; start with the first meaningful transformation or theorem setup.
 - Do not repeat long problem text in both problemLatex and steps[].latex.
-- Simplify displayed equations before returning them: \\sin(0)=0, \\cos(0)=1, \\ln(1)=0, e^0=1, zero products vanish, and additive zero terms are removed.
+- Simplify displayed equations before returning them: elementary boundary constants are evaluated, zero products vanish, and additive zero terms are removed.
 - The final answer belongs in finalAnswerLatex and, if included in steps, only as one clearly titled "Final Answer" step at the end.
 - For compact responses, the last step's latex is treated as finalAnswerLatex and must obey the same standalone-final-expression contract.
 - For verification sections, use compact equations instead of prose-heavy derivations.

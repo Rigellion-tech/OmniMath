@@ -139,6 +139,10 @@ function validateSolutionQualityWithDebug(result, { problem = "", requestId = ""
     unexplainedSymbols: symbolDiagnostics.unexplainedSymbols,
     fieldClassifications: symbolDiagnostics.fieldReports.map((field) => ({
       fieldPath: field.fieldPath,
+      sourceKind: field.sourceKind || field.symbolSourceKind || "math",
+      sourceType: field.sourceType || field.symbolSourceType || "",
+      rawText: field.rawText || field.symbolRawText || field.rawValue || "",
+      mathFragments: field.mathFragments || field.symbolMathFragments || [],
       symbols: field.symbols,
       unexplainedSymbols: field.unexplainedSymbols,
     })),

@@ -19,8 +19,24 @@ function normalizeUnicodeMath(value = "") {
     .replace(/∞/g, "\\infty");
 }
 
+function normalizePlainGreekWords(value = "") {
+  return String(value || "")
+    .replace(/(?<!\\)\btheta\b/giu, "\\theta")
+    .replace(/(?<!\\)\bphi\b/giu, "\\phi")
+    .replace(/(?<!\\)\brho\b/giu, "\\rho")
+    .replace(/(?<!\\)\bdelta\b/giu, "\\delta")
+    .replace(/(?<!\\)\balpha\b/giu, "\\alpha")
+    .replace(/(?<!\\)\bbeta\b/giu, "\\beta")
+    .replace(/(?<!\\)\bgamma\b/giu, "\\gamma")
+    .replace(/(?<!\\)\blambda\b/giu, "\\lambda")
+    .replace(/(?<!\\)\bmu\b/giu, "\\mu")
+    .replace(/(?<!\\)\bsigma\b/giu, "\\sigma")
+    .replace(/(?<!\\)\bomega\b/giu, "\\omega")
+    .replace(/(?<!\\)\bpi\b/giu, "\\pi");
+}
+
 export function normalizeGeneratedMathSource(value = "") {
-  let text = normalizeUnicodeMath(value)
+  let text = normalizePlainGreekWords(normalizeUnicodeMath(value))
     .replace(/\s+/g, " ")
     .trim();
   let changed = true;
@@ -82,7 +98,11 @@ function addField(fields, {
   fieldPath,
   value,
   rawValue = value,
+  rawText = rawValue,
   sourceType = "math",
+  sourceKind = "math",
+  mathFragments = null,
+  fragmentIndex = null,
   stepIndex = null,
   lineIndex = null,
   anchorIndex = null,
@@ -95,7 +115,11 @@ function addField(fields, {
     value: normalized,
     normalized,
     rawValue,
+    rawText,
     sourceType,
+    sourceKind,
+    mathFragments: Array.isArray(mathFragments) ? mathFragments : [normalized],
+    fragmentIndex,
     stepIndex,
     lineIndex,
     anchorIndex,
@@ -106,12 +130,18 @@ function addField(fields, {
 function addProseFields(fields, { basePath, value, sourceType, stepIndex = null } = {}) {
   const rawValue = safeString(value);
   if (!rawValue) return;
-  proseMathFragments(rawValue).forEach((fragment, index) => {
+  const fragments = proseMathFragments(rawValue);
+  const normalizedFragments = fragments.map((fragment) => normalizeGeneratedMathSource(fragment)).filter(Boolean);
+  normalizedFragments.forEach((fragment, index) => {
     addField(fields, {
       fieldPath: `${basePath}${index > 0 ? `#math[${index}]` : ""}`,
       value: fragment,
       rawValue,
+      rawText: rawValue,
       sourceType,
+      sourceKind: "prose",
+      mathFragments: normalizedFragments,
+      fragmentIndex: index,
       stepIndex,
     });
   });

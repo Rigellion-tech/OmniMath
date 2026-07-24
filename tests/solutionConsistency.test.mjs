@@ -45,6 +45,46 @@ test("detached relation-leading display fragments are rejected outside aligned d
   }, { problem: "1+1" }), true);
 });
 
+test("validation context records final-answer numeric parse and symbol source diagnostics", () => {
+  const result = {
+    title: "Integral answer left unevaluated",
+    problemLatex: "\\int_0^1 x\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Final expression",
+        latex: "I=t+1",
+        reasoning: "This leaves an unrelated symbol in the displayed math.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\int_0^1 x\\,dx",
+    numericCheck: "",
+  };
+
+  assert.throws(() => validateSolutionQuality(result, {
+    problem: "Evaluate the integral from 0 to 1 of x with respect to x.",
+  }), (error) => {
+    const context = error.solutionValidationContext;
+    const symbolField = context.symbolOriginDiagnostics.fieldReports
+      .find((field) => field.fieldPath === "steps[0].latex");
+
+    assert.ok(error.solutionIssues.includes("unexplained_generated_symbol:t"));
+    assert.equal(context.finalAnswerNumericDiagnostic.finalAnswerLatex, "\\int_0^1 x\\,dx");
+    assert.equal(context.finalAnswerNumericDiagnostic.parsedNumerically, false);
+    assert.equal(context.finalAnswerNumericDiagnostic.status, "symbolic");
+    assert.match(context.finalAnswerNumericDiagnostic.reason, /Unsupported token/);
+    assert.equal(context.numericalCrossCheckResult.applicable, false);
+    assert.match(context.numericalCrossCheckResult.inconclusiveReason, /not numerically evaluable/);
+    assert.equal(symbolField.sourceKind, "math");
+    assert.equal(symbolField.sourceType, "latex");
+    assert.equal(symbolField.rawText, "I=t+1");
+    assert.deepEqual(symbolField.mathFragments, ["I=t+1"]);
+    assert.deepEqual(symbolField.unexplainedSymbols, ["t"]);
+    return true;
+  });
+});
+
 test("named sign inconsistency is rejected when a final answer drops the sign", () => {
   expectValidationIssue({
     title: "Sign inconsistency",

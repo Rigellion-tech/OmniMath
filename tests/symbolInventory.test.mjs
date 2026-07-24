@@ -94,6 +94,68 @@ describe("symbol origin diagnostics", () => {
     assert.ok(analysis.explicitDefinitions.includes("\\theta"));
   });
 
+  it("does not tokenize ordinary prose fields as generated symbols", () => {
+    const result = solution("\\frac{1}{2}", [
+      {
+        label: "Start the computation",
+        title: "Set up the result",
+        summary: "This step starts with the text of the problem and keeps the explanation short.",
+        plainExplanation: "The tangent idea turns the interval into a finite interval.",
+      },
+      {
+        summary: "The next sentence contains multiple t letters but no displayed equation.",
+        plainExplanation: "It is just ordinary text, not generated mathematics.",
+      },
+    ]);
+    const collected = collectGeneratedMath(result);
+    const analysis = analyzeSymbolOrigins("1", result);
+
+    assert.equal(collected.some((field) => field.sourceKind === "prose"), false);
+    assert.equal(analysis.unexplainedSymbols.includes("t"), false);
+    assert.equal(analysis.fieldReports.some((field) => /steps\[\d+\]\.(?:label|title|summary|plainExplanation)/u.test(field.fieldPath)), false);
+  });
+
+  it("introduces theta from a prose heading equation without tokenizing surrounding words", () => {
+    const result = solution("\\frac{\\pi}{2}\\ln^2 2", [
+      {
+        heading: "Let x = tan(theta).",
+        math: "I=\\int_0^{\\pi/2}\\frac{\\theta\\ln(\\sec^2\\theta)}{\\tan\\theta}\\,d\\theta",
+        summary: "The sentence explains the substitution in words.",
+      },
+    ]);
+    const collected = collectGeneratedMath(result);
+    const headingField = collected.find((field) => field.fieldPath === "steps[0].heading");
+    const analysis = analyzeSymbolOrigins(regressionIntegralProblem, result);
+
+    assert.equal(headingField?.sourceKind, "prose");
+    assert.equal(headingField?.rawText, "Let x = tan(theta).");
+    assert.deepEqual(headingField?.mathFragments, ["x = tan(\\theta)"]);
+    assert.equal(analysis.unexplainedSymbols.includes("\\theta"), false);
+    assert.ok(analysis.explicitDefinitions.includes("\\theta"));
+    assert.equal(analysis.fieldReports.find((field) => field.fieldPath === "steps[0].heading")?.sourceKind, "prose");
+  });
+
+  it("extracts only inline math symbols from prose fields", () => {
+    const result = solution("u+1", [
+      {
+        summary: "This text contains t letters, while $u=\\sin x$ is the only inline math.",
+      },
+      {
+        math: "u+1",
+      },
+    ]);
+    const collected = collectGeneratedMath(result);
+    const summaryField = collected.find((field) => field.fieldPath === "steps[0].summary");
+    const analysis = analyzeSymbolOrigins("\\sin x", result);
+
+    assert.equal(summaryField?.sourceKind, "prose");
+    assert.equal(summaryField?.normalized, "u=\\sin x");
+    assert.equal(analysis.unexplainedSymbols.includes("t"), false);
+    assert.equal(analysis.unexplainedSymbols.includes("u"), false);
+    assert.ok(analysis.explicitDefinitions.includes("u"));
+    assert.equal(analysis.generatedSymbols.includes("t"), false);
+  });
+
   it("rejects theta when it is used before the substitution introduces it", () => {
     const result = solution("\\frac{\\pi}{2}\\ln^2 2", [
       { math: "I=\\theta+1", summary: "Use theta too early." },
@@ -120,6 +182,7 @@ describe("symbol origin diagnostics", () => {
     const substitutionAnalysis = analyzeSubstitutionConsistency(result, regressionIntegralProblem);
 
     assert.ok(collected.some((field) => field.fieldPath === "steps[0].heading" && field.normalized === "x = tan\\theta"));
+    assert.equal(collected.find((field) => field.fieldPath === "steps[0].heading")?.sourceKind, "prose");
     assert.equal(symbolAnalysis.unexplainedSymbols.includes("\\theta"), false);
     assert.equal(substitutionAnalysis.issue, null);
     assert.equal(substitutionAnalysis.verificationStatus, "supported");
@@ -141,6 +204,7 @@ describe("symbol origin diagnostics", () => {
     const substitutionAnalysis = analyzeSubstitutionConsistency(result, regressionIntegralProblem);
 
     assert.ok(collected.some((field) => field.fieldPath === "steps[0].math" && field.normalized.includes("x=\\tan\\theta")));
+    assert.equal(collected.find((field) => field.fieldPath === "steps[0].math")?.sourceKind, "math");
     assert.equal(symbolAnalysis.unexplainedSymbols.includes("\\theta"), false);
     assert.equal(substitutionAnalysis.issue, null);
     assert.equal(substitutionAnalysis.verificationStatus, "supported");
@@ -152,6 +216,25 @@ describe("symbol origin diagnostics", () => {
     assert.throws(() => validateSolutionQuality(solution("x+\\delta", [
       { math: "x+\\delta", summary: "Introduce an unexplained symbol." },
     ]), { problem: "x+1" }), /Solution failed quality validation/);
+  });
+
+  it("continues to reject a genuinely unexplained t in mathematical equations", () => {
+    const result = solution("x+t", [
+      {
+        label: "This prose label should not matter",
+        math: "x+t",
+        lines: [{ latex: "x+t" }],
+      },
+    ]);
+    const analysis = analyzeSymbolOrigins("x", result);
+
+    assert.ok(analysis.unexplainedSymbols.includes("t"));
+    assert.ok(analysis.fieldReports.some((field) => (
+      field.fieldPath === "steps[0].math"
+      && field.sourceKind === "math"
+      && field.unexplainedSymbols.includes("t")
+    )));
+    assert.throws(() => validateSolutionQuality(result, { problem: "x" }), /Solution failed quality validation/);
   });
 
   it("treats derivative and differential notation as operators, not unexplained d symbols", () => {

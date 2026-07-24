@@ -153,7 +153,9 @@ function buildArtifact({
   ].filter(Boolean);
   const issueCodes = [...new Set(validationIssueCodes)];
   const promotedDiagnostics = {
+    finalAnswerNumericDiagnostic: safeJsonClone(validation.finalAnswerNumericDiagnostic || validationContext.finalAnswerNumericDiagnostic || null),
     numericFinalAnswerAnalysis: safeJsonClone(validation.numericFinalAnswerAnalysis || validationContext.numericFinalAnswerAnalysis || null),
+    symbolOriginDiagnostics: safeJsonClone(validation.symbolOriginDiagnostics || validationContext.symbolOriginDiagnostics || null),
     signAnalysisResult: safeJsonClone(validation.signAnalysisResult || validationContext.signAnalysisResult || null),
     finalAnswerConsistencyResult: safeJsonClone(validation.finalAnswerConsistencyResult || validationContext.finalAnswerConsistencyResult || null),
     identityVerificationResult: safeJsonClone(validation.identityVerificationResult || validationContext.identityVerificationResult || null),
@@ -219,7 +221,10 @@ function buildArtifact({
       firstFailingStepId: validation.firstFailingStepId || validation.earliestFailingStepId || validationContext.firstFailingStepId || null,
       earliestFailingStepId: validation.earliestFailingStepId || validation.firstFailingStepId || validationContext.firstFailingStepId || null,
       relevantStepLatex: validation.relevantStepLatex || validationContext.relevantStepLatex || "",
+      finalAnswerLatex: result?.finalAnswerLatex || result?.finalAnswer || validationContext.finalAnswerNumericDiagnostic?.finalAnswerLatex || "",
+      finalAnswerNumericDiagnostic: promotedDiagnostics.finalAnswerNumericDiagnostic,
       numericFinalAnswerAnalysis: promotedDiagnostics.numericFinalAnswerAnalysis,
+      symbolOriginDiagnostics: promotedDiagnostics.symbolOriginDiagnostics,
       signAnalysisResult: promotedDiagnostics.signAnalysisResult,
       finalAnswerConsistencyResult: promotedDiagnostics.finalAnswerConsistencyResult,
       identityVerificationResult: promotedDiagnostics.identityVerificationResult,

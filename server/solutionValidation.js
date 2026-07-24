@@ -798,7 +798,9 @@ function createValidationContext({
         }
       : null,
     symmetryClaimed,
+    finalAnswerNumericDiagnostic: phase2Diagnostics.finalAnswerNumericDiagnostic || null,
     numericFinalAnswerAnalysis: phase2Diagnostics.numericFinalAnswerAnalysis || null,
+    symbolOriginDiagnostics: phase2Diagnostics.symbolOriginDiagnostics || null,
     finalAnswerPresenceResult: phase2Diagnostics.finalAnswerPresenceResult || null,
     setValuedAnswerAnalysis: phase2Diagnostics.setValuedAnswerAnalysis || null,
     answerTargetConsistencyResult: phase2Diagnostics.answerTargetConsistencyResult || null,
@@ -991,6 +993,23 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
   });
 
   const symbolDiagnostics = analyzeSymbolOrigins(problemText, result);
+  phase2Diagnostics.symbolOriginDiagnostics = {
+    originalSymbols: symbolDiagnostics.originalSymbols,
+    generatedSymbols: symbolDiagnostics.generatedSymbols,
+    newlyIntroducedSymbols: symbolDiagnostics.newlyIntroducedSymbols,
+    explicitDefinitions: symbolDiagnostics.explicitDefinitions,
+    unexplainedSymbols: symbolDiagnostics.unexplainedSymbols,
+    fieldReports: symbolDiagnostics.fieldReports.map((field) => ({
+      fieldPath: field.fieldPath,
+      sourceKind: field.sourceKind || field.symbolSourceKind || "math",
+      sourceType: field.sourceType || field.symbolSourceType || "",
+      rawText: field.rawText || field.symbolRawText || field.rawValue || "",
+      normalized: field.normalized || field.value || "",
+      mathFragments: field.mathFragments || field.symbolMathFragments || [],
+      symbols: field.symbols,
+      unexplainedSymbols: field.unexplainedSymbols,
+    })),
+  };
   for (const fieldReport of symbolDiagnostics.fieldReports) {
     for (const symbol of fieldReport.unexplainedSymbols) {
       addValidationRule(evaluations, issues, options, {
@@ -1002,7 +1021,7 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
         inputFields: [fieldReport.fieldPath],
         global: false,
         passed: false,
-        failureEvidence: `${symbol} in ${fieldReport.fieldPath}`,
+        failureEvidence: `${symbol} in ${fieldReport.fieldPath}; sourceKind=${fieldReport.sourceKind || fieldReport.symbolSourceKind || "math"}; sourceType=${fieldReport.sourceType || fieldReport.symbolSourceType || ""}`,
       });
     }
   }
@@ -1073,6 +1092,15 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
 
   const numericFinalAnswerAnalysis = analyzeNumericExpression(finalAnswer);
   phase2Diagnostics.numericFinalAnswerAnalysis = numericFinalAnswerAnalysis;
+  phase2Diagnostics.finalAnswerNumericDiagnostic = {
+    finalAnswerLatex: finalAnswer,
+    parsedNumerically: numericFinalAnswerAnalysis.status === "evaluable",
+    status: numericFinalAnswerAnalysis.status,
+    normalized: numericFinalAnswerAnalysis.normalized || "",
+    reason: numericFinalAnswerAnalysis.reason || "",
+    numericIntent: Boolean(numericFinalAnswerAnalysis.numericIntent),
+    value: Number.isFinite(numericFinalAnswerAnalysis.value) ? numericFinalAnswerAnalysis.value : null,
+  };
   if (numericFinalAnswerAnalysis.resourceLimit) {
     addResourceLimitRule(createResourceLimitDiagnostic({
       ...numericFinalAnswerAnalysis.resourceLimit,

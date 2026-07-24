@@ -91,6 +91,13 @@ function normalizeSymbolName(value = "") {
   return text;
 }
 
+function isSymbolInventorySource(field = {}) {
+  if (field.sourceKind === "math") return true;
+  return field.sourceKind === "prose"
+    && Array.isArray(field.mathFragments)
+    && field.mathFragments.includes(field.normalized);
+}
+
 function collectCommandSymbols(source = "", symbols) {
   for (const match of source.matchAll(/\\([A-Za-z]+)(?:\s*\{([A-Za-z])\})?/g)) {
     const command = match[1];
@@ -182,9 +189,10 @@ function extractSubstitutionIntroducedSymbols(latex = "") {
     .replace(/\\(?:quad|qquad|,|;|!| )/g, " ")
     .replace(/&/g, "");
   const definitions = new Set();
-  const variablePattern = String.raw`(\\?(?:alpha|beta|gamma|delta|epsilon|theta|phi|rho|lambda|mu|sigma|omega)|[A-Za-z])`;
+  const variable = String.raw`\\?(?:alpha|beta|gamma|delta|epsilon|theta|phi|rho|lambda|mu|sigma|omega)|[A-Za-z]`;
+  const functionName = String.raw`\\?(?:tan|sin|cos|sec|cot|ln|log|exp)`;
   const relationPattern = new RegExp(
-    String.raw`(?:^|[;\n,])\s*${variablePattern}\s*=\s*\\?(?:tan|sin|cos|sec|cot|ln|log|exp)\s*(?:\{\s*${variablePattern}\s*\}|\(\s*${variablePattern}\s*\)|\s+${variablePattern}\b|${variablePattern}\b)`,
+    String.raw`(?:^|[;\n,])\s*(${variable})\s*=\s*${functionName}\s*(?:\{\s*(${variable})\s*\}|\(\s*(${variable})\s*\)|\s+(${variable})\b|(${variable})\b)`,
     "giu"
   );
   for (const match of source.matchAll(relationPattern)) {
@@ -227,7 +235,7 @@ function isContextualStandardSymbol(symbol = "", fieldValue = "") {
 
 export function analyzeSymbolOrigins(problem = "", result = {}) {
   const originalSymbols = extractSymbolInventory(problem);
-  const fields = collectGeneratedMath(result);
+  const fields = collectGeneratedMath(result).filter(isSymbolInventorySource);
   const explicitDefinitionsSeen = new Set();
   const allExplicitDefinitions = new Set();
   const generatedSymbols = new Set();
@@ -259,6 +267,10 @@ export function analyzeSymbolOrigins(problem = "", result = {}) {
     }
     fieldReports.push({
       ...field,
+      symbolSourceKind: field.sourceKind || "math",
+      symbolSourceType: field.sourceType || "",
+      symbolRawText: field.rawText || field.rawValue || field.value || "",
+      symbolMathFragments: field.mathFragments || [field.normalized],
       symbols,
       unexplainedSymbols: symbols
         .filter((item) => item.classification === "unexplained")

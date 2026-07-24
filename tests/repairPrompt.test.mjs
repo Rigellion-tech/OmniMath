@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRepairSolvePrompt, categorizeRepairIssues } from "../server/app.js";
+import {
+  buildRepairSolvePrompt,
+  categorizeRepairIssues,
+  compareRepairCandidateStrength,
+} from "../server/app.js";
 
 function qualityError({ rule = "unsupported_integration_by_parts_setup", evidence = "" } = {}) {
   return {
@@ -227,4 +231,115 @@ test("unexplained generated symbols receive binding-specific structural repair g
   assert.match(prompt, /\\int_D f\(u\)\\,du/);
   assert.match(prompt, /using v before defining it/);
   assert.doesNotMatch(prompt, /Reconstruct the solution from scratch/);
+});
+
+test("candidate comparison preserves numerically validated initial candidate over weaker repair", () => {
+  const problem = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+  const initialCandidate = {
+    steps: [
+      {
+        latex: "-\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
+      },
+      {
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+  };
+  const repairCandidate = {
+    steps: [
+      {
+        latex: "I=\\frac{\\pi^3}{12}",
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi^3}{12}",
+    numericCheck: "2.5838563900249847",
+  };
+
+  const comparison = compareRepairCandidateStrength({
+    problem,
+    initialCandidate,
+    repairCandidate,
+    repairIssues: ["unexplained_generated_symbol:\\theta"],
+    initialError: { solutionIssues: ["unexplained_generated_symbol:\\theta"] },
+    repairError: { solutionIssues: ["numerical_final_answer_mismatch"] },
+  });
+
+  assert.equal(comparison.selectedCandidate, "initial");
+  assert.equal(comparison.repairAccepted, false);
+  assert.equal(comparison.reason, "initial_numeric_validated_repair_numerical_failure");
+  assert.equal(comparison.initialNumericallyValidated, true);
+  assert.equal(comparison.repairNumericallyFailed, true);
+  assert.equal(comparison.finalAnswerChanged, true);
+  assert.equal(comparison.derivationAgreement, false);
+  assert.equal(comparison.numericalAgreement.initial.issue, null);
+  assert.equal(comparison.numericalAgreement.repair.issue, "numerical_final_answer_mismatch");
+  assert.deepEqual(comparison.structuralFailures.initial, ["unexplained_generated_symbol:\\theta"]);
+  assert.deepEqual(comparison.mathematicalFailures.repair, ["numerical_final_answer_mismatch"]);
+});
+
+test("candidate comparison accepts structural repair only when math is preserved and structure improves", () => {
+  const problem = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+  const initialCandidate = {
+    title: "Integral with correct value and missing theta introduction",
+    problemLatex: problem,
+    steps: [
+      {
+        id: "s1",
+        heading: "Use the logarithm series",
+        latex: "-\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
+        reasoning: "The identity is used after a substitution variable should have been introduced.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: "The numerical cross-check agrees with this exact value.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+  };
+  const repairCandidate = {
+    title: "Integral with theta introduced",
+    problemLatex: problem,
+    steps: [
+      {
+        id: "s1",
+        heading: "Introduce the substitution variable",
+        latex: "x=\\tan\\theta,\\quad -\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
+        reasoning: "This preserves the existing derivation while defining theta before it is reused.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: "The same final value is preserved.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+  };
+
+  const comparison = compareRepairCandidateStrength({
+    problem,
+    initialCandidate,
+    repairCandidate,
+    repairIssues: ["unexplained_generated_symbol:\\theta"],
+    initialError: { solutionIssues: ["unexplained_generated_symbol:\\theta"] },
+  });
+
+  assert.equal(comparison.selectedCandidate, "repair");
+  assert.equal(comparison.repairAccepted, true);
+  assert.equal(comparison.reason, "repair_validated");
+  assert.equal(comparison.finalAnswerChanged, false);
+  assert.equal(comparison.derivationAgreement, true);
+  assert.equal(comparison.mathematicsUnchanged, true);
+  assert.equal(comparison.structuralIssuesReduced, true);
+  assert.deepEqual(comparison.validationFailures.repair, []);
 });

@@ -710,6 +710,57 @@ describe("failed solve diagnostics", () => {
     });
   });
 
+  it("rejects a weaker pi-cubed repair and keeps the numerically validated improper-integral candidate", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        structurallyInvalidThetaIntegralOutput(),
+        wrongPiCubedIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-integral-reject-weaker-repair",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const initialArtifact = artifacts.find((artifact) => artifact.body.metadata.failureStage === "initial");
+      const repairArtifact = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
+      const comparison = repairArtifact?.body.validation.repairFeedback.candidateComparison;
+      const repairPrompt = requests[1]?.input?.[0]?.content?.[0]?.text || "";
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 2);
+      assert.equal(body.runtime.source, "live AI call (repair rejected)");
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(body.numericCheck, "0.7546938294602481");
+
+      assert.ok(initialArtifact);
+      assert.ok(repairArtifact);
+      assert.ok(initialArtifact.body.validation.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
+      assert.equal(initialArtifact.body.validation.numericalCrossCheckResult.issue, null);
+      assert.equal(repairArtifact.body.validation.numericalCrossCheckResult.issue, "numerical_final_answer_mismatch");
+
+      assert.equal(comparison.selectedCandidate, "initial");
+      assert.equal(comparison.repairAccepted, false);
+      assert.equal(comparison.reason, "initial_numeric_validated_repair_numerical_failure");
+      assert.equal(comparison.finalAnswerChanged, true);
+      assert.equal(comparison.derivationAgreement, false);
+      assert.deepEqual(comparison.structuralFailures.initial, ["unexplained_generated_symbol:\\theta"]);
+      assert.deepEqual(comparison.mathematicalFailures.repair, ["numerical_final_answer_mismatch"]);
+
+      assert.match(repairPrompt, /Structural repair task:/);
+      assert.match(repairPrompt, /Preserve final answer/);
+      assert.match(repairPrompt, /Do not recompute/);
+    });
+  });
+
   it("captures mathematical validation diagnostics for sign and numerical failures", async () => {
     await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       const outputs = [negativeIntegralOutput(), concisePassingIntegralOutput()];

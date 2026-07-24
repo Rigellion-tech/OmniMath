@@ -41,8 +41,13 @@ import { validateExtraction } from "./extractionValidation.js";
 import { getOpenAiModelForPath, getOpenAiSamplingForPath } from "./openaiModels.js";
 import { buildExtractedProblemDisplay, normalizeExtractedProblemText } from "./ocrTextNormalization.js";
 import { validateSolutionQuality } from "./solutionValidation.js";
-import { createMethodFingerprint } from "./mathValidationAnalysis.js";
+import {
+  createMethodFingerprint,
+  finalValueExpression,
+  numericalFinalAnswerCheck,
+} from "./mathValidationAnalysis.js";
 import { analyzeSymbolOrigins } from "./symbolInventory.js";
+import { collectGeneratedMath, normalizeGeneratedMathSource } from "./generatedMathCollector.js";
 import { captureFailedSolveDiagnostic } from "./failedSolveDiagnostics.js";
 import {
   createExplanationCacheKey,
@@ -534,6 +539,174 @@ Output contract:
 - numericCheck should remain the previous decimal approximation when applicable, or an empty string.
 - Keep each reasoning field to 1-2 concise sentences, maximum 35 words.
 - The final answer belongs in finalAnswerLatex and, if included in steps, only as one clearly titled "Final Answer" step at the end.`;
+}
+
+function comparableMathText(value = "") {
+  return normalizeGeneratedMathSource(value)
+    .replace(/\\(?:,|;|!|quad|qquad|left|right)/gu, "")
+    .replace(/\s+/gu, "")
+    .trim();
+}
+
+function comparableFinalAnswer(result = {}) {
+  const finalAnswer = result?.finalAnswerLatex || result?.finalAnswer || "";
+  return comparableMathText(finalValueExpression(finalAnswer));
+}
+
+function comparableGeneratedFragments(result = {}) {
+  return [...new Set(collectGeneratedMath(result, { includeFinalAnswer: false })
+    .map((field) => comparableMathText(field.normalized))
+    .filter((fragment) => fragment.length > 2))];
+}
+
+function derivationFragmentsPreserved(initialCandidate = {}, repairCandidate = {}) {
+  const initialFragments = comparableGeneratedFragments(initialCandidate);
+  if (initialFragments.length === 0) return true;
+  const repairFragments = comparableGeneratedFragments(repairCandidate);
+  return initialFragments.every((fragment) => (
+    repairFragments.some((repairFragment) => repairFragment.includes(fragment))
+  ));
+}
+
+function issuesFromValidation(problem = "", candidate = {}, knownError = null) {
+  if (Array.isArray(knownError?.solutionIssues)) {
+    return normalizeRepairIssueList(knownError.solutionIssues);
+  }
+  try {
+    validateSolutionQuality(candidate, { problem });
+    return [];
+  } catch (error) {
+    if (Array.isArray(error.solutionIssues)) {
+      return normalizeRepairIssueList(error.solutionIssues);
+    }
+    return normalizeRepairIssueList([error.code || error.message]);
+  }
+}
+
+function assessRepairCandidate(problem = "", candidate = {}, knownError = null) {
+  const validationFailures = issuesFromValidation(problem, candidate, knownError);
+  const issueCategory = categorizeRepairIssues(validationFailures);
+  const numericalAgreement = numericalFinalAnswerCheck(problem, candidate);
+  const finalAnswer = comparableFinalAnswer(candidate);
+  return {
+    finalAnswer,
+    numericalAgreement,
+    numericalValidated: Boolean(
+      numericalAgreement?.applicable
+      && !numericalAgreement.issue
+      && Number.isFinite(numericalAgreement.numericalEstimate)
+      && Number.isFinite(numericalAgreement.proposedValue)
+    ),
+    numericalFailed: numericalAgreement?.issue === "numerical_final_answer_mismatch"
+      || validationFailures.includes("numerical_final_answer_mismatch"),
+    validationFailures,
+    structuralFailures: issueCategory.structuralIssues,
+    mathematicalFailures: issueCategory.mathematicalIssues,
+  };
+}
+
+export function compareRepairCandidateStrength({
+  problem = "",
+  initialCandidate = null,
+  repairCandidate = null,
+  initialError = null,
+  repairError = null,
+  repairIssues = [],
+} = {}) {
+  const repairCategorization = categorizeRepairIssues(repairIssues);
+  const initial = assessRepairCandidate(problem, initialCandidate || {}, initialError);
+  const repair = assessRepairCandidate(problem, repairCandidate || {}, repairError);
+  const finalAnswerChanged = Boolean(initial.finalAnswer && repair.finalAnswer && initial.finalAnswer !== repair.finalAnswer);
+  const derivationAgreement = derivationFragmentsPreserved(initialCandidate || {}, repairCandidate || {});
+  const structuralIssuesReduced = repair.structuralFailures.length < initial.structuralFailures.length;
+  const mathematicsUnchanged = !finalAnswerChanged
+    && derivationAgreement
+    && !repair.numericalFailed
+    && repair.mathematicalFailures.length === 0;
+
+  let selectedCandidate = "repair";
+  let repairAccepted = true;
+  let reason = "repair_validated";
+
+  if (initial.numericalValidated && repair.numericalFailed) {
+    selectedCandidate = "initial";
+    repairAccepted = false;
+    reason = "initial_numeric_validated_repair_numerical_failure";
+  } else if (initial.numericalValidated && finalAnswerChanged) {
+    selectedCandidate = "initial";
+    repairAccepted = false;
+    reason = "initial_numeric_validated_repair_final_answer_changed";
+  } else if (repairCategorization.category === "structural" && !(
+    mathematicsUnchanged
+    && structuralIssuesReduced
+    && repair.validationFailures.length === 0
+  )) {
+    selectedCandidate = "initial";
+    repairAccepted = false;
+    reason = "structural_repair_did_not_preserve_candidate";
+  }
+
+  return {
+    selectedCandidate,
+    repairAccepted,
+    reason,
+    repairCategory: repairCategorization.category,
+    numericalAgreement: {
+      initial: initial.numericalAgreement,
+      repair: repair.numericalAgreement,
+    },
+    initialNumericallyValidated: initial.numericalValidated,
+    repairNumericallyFailed: repair.numericalFailed,
+    derivationAgreement,
+    finalAnswerChanged,
+    mathematicsUnchanged,
+    structuralIssuesReduced,
+    validationFailures: {
+      initial: initial.validationFailures,
+      repair: repair.validationFailures,
+    },
+    structuralFailures: {
+      initial: initial.structuralFailures,
+      repair: repair.structuralFailures,
+    },
+    mathematicalFailures: {
+      initial: initial.mathematicalFailures,
+      repair: repair.mathematicalFailures,
+    },
+    finalAnswers: {
+      initial: initial.finalAnswer,
+      repair: repair.finalAnswer,
+    },
+  };
+}
+
+function shouldPreserveInitialCandidate(comparison = null) {
+  return comparison?.selectedCandidate === "initial"
+    && comparison.repairAccepted === false
+    && comparison.initialNumericallyValidated === true;
+}
+
+function validateFinalCandidateWithComparison(result, {
+  problem = "",
+  requestId = "",
+  stage = "pre-annotation-final",
+  candidateComparison = null,
+} = {}) {
+  try {
+    return validateSolutionQualityWithDebug(result, { problem, requestId, stage });
+  } catch (error) {
+    if (shouldPreserveInitialCandidate(candidateComparison)) {
+      logSolveDebug("final_validation_preserved_initial", {
+        requestId,
+        stage,
+        reason: candidateComparison.reason,
+        initialFailures: candidateComparison.validationFailures?.initial || [],
+        repairFailures: candidateComparison.validationFailures?.repair || [],
+      });
+      return true;
+    }
+    throw error;
+  }
 }
 
 export function buildRepairFeedbackDetails(issues = [], {
@@ -1715,6 +1888,7 @@ export async function handleExplainRequest(req, res) {
       let usage;
       let accumulatedAiUsage = null;
       let accumulatedAiCallCount = 0;
+      let candidateComparison = null;
 
       try {
         if (result) {
@@ -1802,6 +1976,7 @@ export async function handleExplainRequest(req, res) {
               });
               const repairPromptHash = hashDebugText(repairPrompt);
               try {
+                let repairCandidate = null;
                 result = await createMathExplanation({
                   prompt: repairPrompt,
                   originalProblem: problem,
@@ -1827,12 +2002,42 @@ export async function handleExplainRequest(req, res) {
                 accumulatedAiCallCount += aiCallCountFrom(result);
                 attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
                 result = applyLocalRulesToExplanation(result);
+                repairCandidate = result;
                 validateSolutionQualityWithDebug(result, { problem, requestId, stage: "live-ai-repair" });
-                source = "live AI repair call";
+                candidateComparison = compareRepairCandidateStrength({
+                  problem,
+                  initialCandidate: initialInvalidResult,
+                  repairCandidate,
+                  initialError: firstError,
+                  repairIssues,
+                });
+                logSolveDebug("repair_candidate_comparison", {
+                  requestId,
+                  endpoint: "/api/explain",
+                  ...candidateComparison,
+                });
+                if (shouldPreserveInitialCandidate(candidateComparison)) {
+                  result = initialInvalidResult;
+                  attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
+                  source = "live AI call (repair rejected)";
+                } else {
+                  source = "live AI repair call";
+                }
               } catch (repairError) {
                 const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(repairError));
                 const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(repairError);
                 attachAccumulatedAiUsage(repairError, failureUsage, failureCallCount);
+                const repairCandidate = result && result !== initialInvalidResult ? result : null;
+                candidateComparison = repairCandidate
+                  ? compareRepairCandidateStrength({
+                      problem,
+                      initialCandidate: initialInvalidResult,
+                      repairCandidate,
+                      initialError: firstError,
+                      repairError,
+                      repairIssues,
+                    })
+                  : null;
                 await captureSolveQualityFailure({
                   error: repairError,
                   result,
@@ -1845,19 +2050,40 @@ export async function handleExplainRequest(req, res) {
                   problemText: "",
                   canonicalProblem,
                   repairAttempted: true,
-                  repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
-                    error: repairError,
-                    previousResult: initialInvalidResult,
-                    currentResult: result,
-                  }),
+                  repairFeedback: {
+                    ...buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
+                      error: repairError,
+                      previousResult: initialInvalidResult,
+                      currentResult: result,
+                    }),
+                    candidateComparison,
+                  },
                   previousResult: initialInvalidResult,
                 });
+                if (shouldPreserveInitialCandidate(candidateComparison)) {
+                  logSolveDebug("repair_rejected_preserve_initial", {
+                    requestId,
+                    endpoint: "/api/explain",
+                    ...candidateComparison,
+                  });
+                  result = initialInvalidResult;
+                  attachAccumulatedAiUsage(result, failureUsage, failureCallCount);
+                  accumulatedAiUsage = failureUsage;
+                  accumulatedAiCallCount = failureCallCount;
+                  source = "live AI call (repair rejected)";
+                } else {
                 throw repairError;
+                }
               }
             }
           }
         }
-        validateSolutionQualityWithDebug(result, { problem, requestId, stage: "pre-annotation-final" });
+        validateFinalCandidateWithComparison(result, {
+          problem,
+          requestId,
+          stage: "pre-annotation-final",
+          candidateComparison,
+        });
         result = annotateMathExplanation(result);
         attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
         logSolutionStateDebug("server model response", {
@@ -2181,6 +2407,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       let usage;
       let accumulatedAiUsage = null;
       let accumulatedAiCallCount = 0;
+      let candidateComparison = null;
 
       try {
         if (result) {
@@ -2271,6 +2498,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
             });
             const repairPromptHash = hashDebugText(repairPrompt);
             try {
+              let repairCandidate = null;
               result = await createMathExplanation({
                 prompt: repairPrompt,
                 originalProblem: problemLatex,
@@ -2298,12 +2526,42 @@ export async function handleSolveExtractedProblemRequest(req, res) {
               attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
               traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM repair solve response");
               result = applyLocalRulesToExplanation(result);
+              repairCandidate = result;
               validateSolutionQualityWithDebug(result, { problem: problemLatex, requestId, stage: "live-ai-repair" });
-              source = "live AI repair call";
+              candidateComparison = compareRepairCandidateStrength({
+                problem: problemLatex,
+                initialCandidate: initialInvalidResult,
+                repairCandidate,
+                initialError: firstError,
+                repairIssues,
+              });
+              logSolveDebug("repair_candidate_comparison", {
+                requestId,
+                endpoint: "/api/solve-extracted-problem",
+                ...candidateComparison,
+              });
+              if (shouldPreserveInitialCandidate(candidateComparison)) {
+                result = initialInvalidResult;
+                attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
+                source = "live AI call (repair rejected)";
+              } else {
+                source = "live AI repair call";
+              }
             } catch (repairError) {
               const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(repairError));
               const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(repairError);
               attachAccumulatedAiUsage(repairError, failureUsage, failureCallCount);
+              const repairCandidate = result && result !== initialInvalidResult ? result : null;
+              candidateComparison = repairCandidate
+                ? compareRepairCandidateStrength({
+                    problem: problemLatex,
+                    initialCandidate: initialInvalidResult,
+                    repairCandidate,
+                    initialError: firstError,
+                    repairError,
+                    repairIssues,
+                  })
+                : null;
               await captureSolveQualityFailure({
                 error: repairError,
                 result,
@@ -2317,18 +2575,39 @@ export async function handleSolveExtractedProblemRequest(req, res) {
                 canonicalProblem,
                 extraction,
                 repairAttempted: true,
-                repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
-                  error: repairError,
-                  previousResult: initialInvalidResult,
-                  currentResult: result,
-                }),
+                repairFeedback: {
+                  ...buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
+                    error: repairError,
+                    previousResult: initialInvalidResult,
+                    currentResult: result,
+                  }),
+                  candidateComparison,
+                },
                 previousResult: initialInvalidResult,
               });
+              if (shouldPreserveInitialCandidate(candidateComparison)) {
+                logSolveDebug("repair_rejected_preserve_initial", {
+                  requestId,
+                  endpoint: "/api/solve-extracted-problem",
+                  ...candidateComparison,
+                });
+                result = initialInvalidResult;
+                attachAccumulatedAiUsage(result, failureUsage, failureCallCount);
+                accumulatedAiUsage = failureUsage;
+                accumulatedAiCallCount = failureCallCount;
+                source = "live AI call (repair rejected)";
+              } else {
               throw repairError;
+              }
             }
           }
         }
-        validateSolutionQualityWithDebug(result, { problem: problemLatex, requestId, stage: "pre-annotation-final" });
+        validateFinalCandidateWithComparison(result, {
+          problem: problemLatex,
+          requestId,
+          stage: "pre-annotation-final",
+          candidateComparison,
+        });
         const beforeAnnotation = result.expression || result.problem || problemLatex;
         result = annotateMathExplanation(result);
         attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
@@ -2537,6 +2816,7 @@ export async function handleExplainImageRequest(req, res) {
       let usage;
       let accumulatedAiUsage = null;
       let accumulatedAiCallCount = 0;
+      let candidateComparison = null;
 
       try {
         if (result) {
@@ -2624,6 +2904,7 @@ export async function handleExplainImageRequest(req, res) {
               });
               const repairPromptHash = hashDebugText(repairPrompt);
               try {
+                let repairCandidate = null;
                 result = await createMathExplanation({
                   prompt: repairPrompt,
                   originalProblem: problem,
@@ -2649,12 +2930,42 @@ export async function handleExplainImageRequest(req, res) {
                 attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
                 traceMathStage("Explanation generation", problem, result.extractedProblemLatex || result.expression || "", "LLM image repair solve response");
                 result = applyLocalRulesToExplanation(result);
+                repairCandidate = result;
                 validateSolutionQualityWithDebug(result, { problem, requestId, stage: "live-ai-repair" });
-                source = "live AI repair call";
+                candidateComparison = compareRepairCandidateStrength({
+                  problem,
+                  initialCandidate: initialInvalidResult,
+                  repairCandidate,
+                  initialError: firstError,
+                  repairIssues,
+                });
+                logSolveDebug("repair_candidate_comparison", {
+                  requestId,
+                  endpoint: "/api/explain-image",
+                  ...candidateComparison,
+                });
+                if (shouldPreserveInitialCandidate(candidateComparison)) {
+                  result = initialInvalidResult;
+                  attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
+                  source = "live AI call (repair rejected)";
+                } else {
+                  source = "live AI repair call";
+                }
               } catch (repairError) {
                 const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(repairError));
                 const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(repairError);
                 attachAccumulatedAiUsage(repairError, failureUsage, failureCallCount);
+                const repairCandidate = result && result !== initialInvalidResult ? result : null;
+                candidateComparison = repairCandidate
+                  ? compareRepairCandidateStrength({
+                      problem,
+                      initialCandidate: initialInvalidResult,
+                      repairCandidate,
+                      initialError: firstError,
+                      repairError,
+                      repairIssues,
+                    })
+                  : null;
                 await captureSolveQualityFailure({
                   error: repairError,
                   result,
@@ -2666,19 +2977,40 @@ export async function handleExplainImageRequest(req, res) {
                   problem: result?.extractedProblemLatex || result?.expression || problem,
                   problemText: result?.extractedProblemText || "",
                   repairAttempted: true,
-                  repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
-                    error: repairError,
-                    previousResult: initialInvalidResult,
-                    currentResult: result,
-                  }),
+                  repairFeedback: {
+                    ...buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
+                      error: repairError,
+                      previousResult: initialInvalidResult,
+                      currentResult: result,
+                    }),
+                    candidateComparison,
+                  },
                   previousResult: initialInvalidResult,
                 });
+                if (shouldPreserveInitialCandidate(candidateComparison)) {
+                  logSolveDebug("repair_rejected_preserve_initial", {
+                    requestId,
+                    endpoint: "/api/explain-image",
+                    ...candidateComparison,
+                  });
+                  result = initialInvalidResult;
+                  attachAccumulatedAiUsage(result, failureUsage, failureCallCount);
+                  accumulatedAiUsage = failureUsage;
+                  accumulatedAiCallCount = failureCallCount;
+                  source = "live AI call (repair rejected)";
+                } else {
                 throw repairError;
+                }
               }
             }
           }
         }
-        validateSolutionQualityWithDebug(result, { problem, requestId, stage: "pre-annotation-final" });
+        validateFinalCandidateWithComparison(result, {
+          problem,
+          requestId,
+          stage: "pre-annotation-final",
+          candidateComparison,
+        });
         const beforeAnnotation = result.extractedProblemLatex || result.expression || "";
         result = annotateMathExplanation(result);
         attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);

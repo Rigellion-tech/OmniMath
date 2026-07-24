@@ -320,6 +320,76 @@ function normalizeRepairIssueList(issues = []) {
     .filter(Boolean))];
 }
 
+const STRUCTURAL_REPAIR_ISSUES = new Set([
+  "strict_generated_latex",
+  "missing_final_answer",
+  "undefined_final_placeholder",
+  "unsupported_numeric_final_answer_syntax",
+  "malformed_set_valued_answer",
+  "detached_relation_leading_fragment",
+  "step_renderable_content",
+]);
+
+function isStructuralRepairIssue(issue = "") {
+  const normalized = String(issue || "").trim();
+  return STRUCTURAL_REPAIR_ISSUES.has(normalized)
+    || normalized.startsWith("unexplained_generated_symbol:")
+    || normalized.startsWith("invalid_latex:")
+    || normalized.startsWith("strict_generated_latex:");
+}
+
+export function categorizeRepairIssues(issues = []) {
+  const normalizedIssues = normalizeRepairIssueList(issues);
+  if (normalizedIssues.length === 0) {
+    return {
+      category: "mathematical",
+      structuralIssues: [],
+      mathematicalIssues: [],
+      unknownIssues: [],
+    };
+  }
+  const structuralIssues = normalizedIssues.filter(isStructuralRepairIssue);
+  const nonStructuralIssues = normalizedIssues.filter((issue) => !isStructuralRepairIssue(issue));
+  return {
+    category: nonStructuralIssues.length === 0 ? "structural" : "mathematical",
+    structuralIssues,
+    mathematicalIssues: nonStructuralIssues,
+    unknownIssues: nonStructuralIssues,
+  };
+}
+
+function extractUnexplainedGeneratedSymbols(issues = []) {
+  return normalizeRepairIssueList(issues)
+    .map((issue) => issue.match(/^unexplained_generated_symbol:(.+)$/u)?.[1]?.trim() || "")
+    .filter(Boolean)
+    .filter((symbol, index, symbols) => symbols.indexOf(symbol) === index);
+}
+
+function buildSymbolBindingRepairInstructions(issues = []) {
+  const symbols = extractUnexplainedGeneratedSymbols(issues);
+  if (symbols.length === 0) return "";
+
+  return [
+    "For unexplained_generated_symbol:",
+    "Undefined generated symbols detected:",
+    ...symbols.map((symbol) => `- ${symbol}`),
+    "For each listed symbol, do exactly one of the following before reusing it:",
+    "1. define it explicitly in rendered LaTeX before first use",
+    "2. bind it in valid mathematical notation",
+    "3. remove or replace it",
+    "- Every substitution variable must be explicitly defined in rendered LaTeX before first use.",
+    "- Every named quantity or constant must be explicitly defined in rendered LaTeX before first use.",
+    "- Every summation or product index must be bound in the summation/product notation.",
+    "- Every integration variable must be bound by a differential or explicitly defined.",
+    "- A symbol mentioned only in prose is not considered defined.",
+    "- If a symbol is unnecessary, remove it instead of inventing a definition.",
+    "- Do not rename the same quantity inconsistently across steps.",
+    "- Do not introduce additional symbols while repairing the listed ones.",
+    "Valid example shapes: v = g(u); K = Q; \\sum_{j\\in J} a_j; \\int_D f(u)\\,du.",
+    "Invalid example shapes: using v before defining it; writing \"let K be the constant\" only in prose; using \\sum_j without a clear bound when j is otherwise unexplained; switching between u and v for the same substitution without defining both.",
+  ].join("\n");
+}
+
 function sanitizeRepairPromptText(value = "", maxChars = MAX_REPAIR_EVIDENCE_ITEM_CHARS) {
   const sanitized = String(value || "")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
@@ -378,6 +448,94 @@ function buildRuleSpecificRepairInstructions(issues = []) {
     .join("\n") || "No rule-specific instructions.";
 }
 
+function buildStructuralRepairInstructions(issues = []) {
+  const normalizedIssues = normalizeRepairIssueList(issues);
+  const symbolInstructions = buildSymbolBindingRepairInstructions(normalizedIssues);
+  const formattingIssues = normalizedIssues.filter((issue) => (
+    issue === "strict_generated_latex"
+    || issue === "missing_final_answer"
+    || issue === "undefined_final_placeholder"
+    || issue === "unsupported_numeric_final_answer_syntax"
+    || issue === "malformed_set_valued_answer"
+    || issue === "detached_relation_leading_fragment"
+    || issue === "step_renderable_content"
+    || issue.startsWith("invalid_latex:")
+    || issue.startsWith("strict_generated_latex:")
+  ));
+  const formattingInstructions = formattingIssues.length > 0
+    ? [
+        "For formatting, LaTeX compatibility, final-answer shape, and placeholder issues:",
+        "- Repair only the rendered field structure, LaTeX syntax, missing final-answer field, or placeholder definition/removal needed to satisfy the listed validator.",
+        "- Keep all mathematical claims, transformations, constants, signs, bounds, and the final value unchanged.",
+        "- If finalAnswerLatex is malformed but the previous final value is recoverable from the previous solution, rewrite only that same value as one valid standalone LaTeX expression.",
+      ].join("\n")
+    : "";
+  return [symbolInstructions, formattingInstructions].filter(Boolean).join("\n") || "No structural instructions.";
+}
+
+function buildNarrowStructuralRepairPrompt({
+  failedRules,
+  problem = "",
+  previousResult = null,
+  error = null,
+} = {}) {
+  const rulesText = failedRules.join(", ") || "generic_structural_invalid_solution";
+  const evidenceText = collectRepairFailureEvidence(error || {}, failedRules);
+  const structuralInstructions = buildStructuralRepairInstructions(failedRules);
+  const originalProblem = sanitizeRepairPromptText(problem, 2000) || "Use the original problem supplied in this repair request.";
+  const previousSolution = compactPreviousInvalidSolution(previousResult || {});
+  const previousFinalAnswer = sanitizeRepairPromptText(previousResult?.finalAnswerLatex || previousResult?.finalAnswer || "", 1200);
+  const previousNumericCheck = sanitizeRepairPromptText(previousResult?.numericCheck || "", 200);
+
+  return `You are OmniMath, a careful AI math tutor repairing a structurally rejected solution.
+
+Structural repair task:
+- Preserve derivation.
+- Preserve mathematics.
+- Preserve final answer.
+- Preserve the previous finalAnswerLatex exactly when it is valid: ${previousFinalAnswer || "Unavailable"}.
+- Preserve numericCheck when present: ${previousNumericCheck || "Unavailable"}.
+- Only repair symbol introduction.
+- Only repair formatting, LaTeX compatibility, field shape, or placeholder resolution required by the listed validation failures.
+- Do not recompute.
+- Do not regenerate the proof from scratch.
+- Do not change the method, constants, identities, signs, bounds, or final value.
+- Do not replace the solution with a different derivation.
+
+Canonical problem:
+${originalProblem}
+
+Previous structurally invalid solution:
+${previousSolution}
+
+Structural validation failures:
+${rulesText}
+
+Exact failure evidence:
+${evidenceText}
+
+Structural corrective instructions:
+${structuralInstructions}
+
+Output contract:
+- Return JSON only. Do not include markdown, comments, code fences, or explanatory prose outside JSON.
+- Return only valid JSON matching the requested schema.
+- Required fields: title, problemLatex, steps, finalAnswerLatex, numericCheck.
+- steps must remain the same derivation with only minimal structural edits.
+- Each step must include id, heading, latex, reasoning, and anchors.
+- Every step must include an anchors array, even when empty.
+- Math-rendered fields must contain pure valid LaTeX only: problemLatex, steps[].latex, finalAnswerLatex, and anchor latex.
+- Do not wrap math-rendered fields in Markdown fences, latex code blocks, \\[...\\], $$...$$, or $...$.
+- Never put plain text inside math unless it is wrapped in \\text{}.
+- Use proper LaTeX function names such as \\ln, \\arctan, \\sin, and \\cos.
+- Preserve spacing commands for differentials, such as \\,dx.
+- finalAnswerLatex must be exactly one standalone mathematical expression or one equation assigning the original expression to the same final value.
+- finalAnswerLatex must contain no prose, intermediate derivation, \\Rightarrow, multiline content, display separators, or multiple unrelated equations.
+- numericCheck should remain the previous decimal approximation when applicable, or an empty string.
+- Keep each reasoning field to 1-2 concise sentences, maximum 35 words.
+- The final answer belongs in finalAnswerLatex and, if included in steps, only as one clearly titled "Final Answer" step at the end.`;
+}
+
 export function buildRepairFeedbackDetails(issues = [], {
   error = null,
   previousResult = null,
@@ -404,6 +562,7 @@ export function buildRepairFeedbackDetails(issues = [], {
   );
   return {
     issueCodes,
+    repairCategory: categorizeRepairIssues(issueCodes).category,
     evidenceExcerpts,
     earliestFailingStepId,
     requestedCorrectionStrategy,
@@ -419,6 +578,15 @@ export function buildRepairSolvePrompt(prompt, issues = [], {
   error = null,
 } = {}) {
   const failedRules = normalizeRepairIssueList(issues);
+  const repairCategorization = categorizeRepairIssues(failedRules);
+  if (repairCategorization.category === "structural") {
+    return buildNarrowStructuralRepairPrompt({
+      failedRules,
+      problem,
+      previousResult,
+      error,
+    });
+  }
   const rulesText = failedRules.join(", ") || "generic_invalid_solution";
   const evidenceText = collectRepairFailureEvidence(error || {}, failedRules);
   const ruleSpecificInstructions = buildRuleSpecificRepairInstructions(failedRules);

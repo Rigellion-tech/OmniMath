@@ -187,6 +187,56 @@ function concisePassingIntegralOutput() {
   });
 }
 
+function structurallyInvalidThetaIntegralOutput() {
+  return JSON.stringify({
+    title: "Integral with correct value and missing theta introduction",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Use the logarithm series",
+        latex: "-\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
+        reasoning: "The identity is used after a substitution variable should have been introduced.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: "The numerical cross-check agrees with this exact value.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+  });
+}
+
+function structurallyRepairedThetaIntegralOutput() {
+  return JSON.stringify({
+    title: "Integral with theta introduced",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Introduce the substitution variable",
+        latex: "x=\\tan\\theta,\\quad -\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
+        reasoning: "This preserves the existing derivation while defining theta before it is reused.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: "The same final value is preserved.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+  });
+}
+
 function negativeIntegralOutput() {
   return JSON.stringify({
     title: "Integral with negative value",
@@ -608,6 +658,55 @@ describe("failed solve diagnostics", () => {
       assert.match(repairPrompt, /dv=\\cot\\theta\\ln\(\\cos\\theta\)/);
       assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
       assert.equal(body.runtime.source, "live AI repair call");
+    });
+  });
+
+  it("uses narrow structural repair and preserves the correct improper-integral final answer", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        structurallyInvalidThetaIntegralOutput(),
+        structurallyRepairedThetaIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-integral-structural-repair-preserves-answer",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const repairPrompt = requests[1]?.input?.[0]?.content?.[0]?.text || "";
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 2);
+      assert.equal(requests[0].text.format.name, "math_fast_solve");
+      assert.equal(requests[1].text.format.name, "math_fast_solve");
+      assert.equal(body.runtime.source, "live AI repair call");
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(body.numericCheck, "0.7546938294602481");
+
+      assert.equal(artifacts.length, 1);
+      assert.ok(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
+      assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.issue, null);
+      assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.proposedValue, 0.7546938294602481);
+      assert.equal(artifacts[0].body.validation.repairFeedback.repairCategory, "structural");
+
+      assert.match(repairPrompt, /Structural repair task:/);
+      assert.match(repairPrompt, /Preserve derivation/);
+      assert.match(repairPrompt, /Preserve mathematics/);
+      assert.match(repairPrompt, /Preserve final answer/);
+      assert.match(repairPrompt, /Only repair symbol introduction/);
+      assert.match(repairPrompt, /Do not recompute/);
+      assert.match(repairPrompt, /\\frac\{\\pi\}\{2\}\\ln\^2 2/);
+      assert.doesNotMatch(repairPrompt, /Quality repair context/);
+      assert.doesNotMatch(repairPrompt, /Reconstruct the solution from scratch/);
+      assert.doesNotMatch(repairPrompt, /Assume the previous derivation is mathematically unreliable/);
     });
   });
 

@@ -1,3 +1,5 @@
+import { collectGeneratedMath } from "./generatedMathCollector.js";
+
 const GREEK_COMMANDS = new Set([
   "alpha",
   "beta",
@@ -159,7 +161,9 @@ export function extractBoundSymbols(latex = "") {
 
 export function extractExplicitDefinitions(latex = "") {
   const source = stripTextCommands(normalizeUnicodeSymbols(latex))
-    .replace(/\\(?:quad|qquad|,|;|!| )/g, " ");
+    .replace(/\\(?:begin|end)\s*\{[^{}]*\}/g, " ")
+    .replace(/\\(?:quad|qquad|,|;|!| )/g, " ")
+    .replace(/&/g, "");
   const definitions = new Set();
   for (const match of source.matchAll(/(?:^|[;\n])\s*(\\?(?:alpha|beta|gamma|delta|epsilon|theta|phi|rho|lambda|mu|sigma|omega)|\\(?:mathbf|vec|hat)\s*\{?[A-Za-z]\}?|[A-Za-z])\s*\(\s*([A-Za-z])\s*\)\s*=/giu)) {
     definitions.add(normalizeSymbolName(match[1]));
@@ -169,6 +173,33 @@ export function extractExplicitDefinitions(latex = "") {
     definitions.add(normalizeSymbolName(match[1]));
   }
   return definitions;
+}
+
+function extractSubstitutionIntroducedSymbols(latex = "") {
+  const source = stripTextCommands(normalizeUnicodeSymbols(latex))
+    .replace(/\\(?:begin|end)\s*\{[^{}]*\}/g, " ")
+    .replace(/\\left|\\right/g, "")
+    .replace(/\\(?:quad|qquad|,|;|!| )/g, " ")
+    .replace(/&/g, "");
+  const definitions = new Set();
+  const variablePattern = String.raw`(\\?(?:alpha|beta|gamma|delta|epsilon|theta|phi|rho|lambda|mu|sigma|omega)|[A-Za-z])`;
+  const relationPattern = new RegExp(
+    String.raw`(?:^|[;\n,])\s*${variablePattern}\s*=\s*\\?(?:tan|sin|cos|sec|cot|ln|log|exp)\s*(?:\{\s*${variablePattern}\s*\}|\(\s*${variablePattern}\s*\)|\s+${variablePattern}\b|${variablePattern}\b)`,
+    "giu"
+  );
+  for (const match of source.matchAll(relationPattern)) {
+    const introduced = match[2] || match[3] || match[4] || match[5];
+    if (introduced) definitions.add(normalizeSymbolName(introduced));
+  }
+  return definitions;
+}
+
+function unionSets(...sets) {
+  const result = new Set();
+  for (const set of sets) {
+    for (const item of set || []) result.add(item);
+  }
+  return result;
 }
 
 export function extractSymbolInventory(latex = "") {
@@ -194,52 +225,29 @@ function isContextualStandardSymbol(symbol = "", fieldValue = "") {
   return /(?:\\nabla\s*\\times|curl|\\langle[\s\S]*(?:P|Q|R)_[xyz][\s\S]*\\rangle)/u.test(fieldValue);
 }
 
-function generatedMathFields(result = {}) {
-  const fields = [];
-  if (result.finalAnswerLatex || result.finalAnswer) {
-    fields.push({ fieldPath: "finalAnswerLatex", value: result.finalAnswerLatex || result.finalAnswer, finalAnswer: true });
-  }
-  for (const [stepIndex, step] of (Array.isArray(result.steps) ? result.steps : []).entries()) {
-    const values = [
-      ["math", step?.math],
-      ["latex", step?.latex],
-      ["equationLatex", step?.equationLatex],
-    ];
-    for (const [field, value] of values) {
-      if (typeof value === "string" && value.trim()) {
-        fields.push({ fieldPath: `steps[${stepIndex}].${field}`, value });
-      }
-    }
-    for (const [lineIndex, line] of (Array.isArray(step?.lines) ? step.lines : []).entries()) {
-      if (typeof line?.latex === "string" && line.latex.trim()) {
-        fields.push({ fieldPath: `steps[${stepIndex}].lines[${lineIndex}].latex`, value: line.latex });
-      }
-    }
-  }
-  return fields;
-}
-
 export function analyzeSymbolOrigins(problem = "", result = {}) {
   const originalSymbols = extractSymbolInventory(problem);
-  const fields = generatedMathFields(result);
-  const explicitDefinitions = new Set();
+  const fields = collectGeneratedMath(result);
+  const explicitDefinitionsSeen = new Set();
+  const allExplicitDefinitions = new Set();
   const generatedSymbols = new Set();
   const fieldReports = [];
 
   for (const field of fields) {
-    for (const symbol of extractExplicitDefinitions(field.value)) explicitDefinitions.add(symbol);
-  }
-
-  for (const field of fields) {
     const fieldSymbols = extractSymbolInventory(field.value);
     const boundSymbols = extractBoundSymbols(field.value);
+    const fieldDefinitions = unionSets(
+      extractExplicitDefinitions(field.value),
+      extractSubstitutionIntroducedSymbols(field.value)
+    );
+    for (const symbol of fieldDefinitions) allExplicitDefinitions.add(symbol);
     const symbols = [];
     for (const symbol of fieldSymbols) {
       generatedSymbols.add(symbol);
       let classification = "unexplained";
       if (originalSymbols.has(symbol)) classification = "present_in_original_problem";
       else if (boundSymbols.has(symbol)) classification = "bound_locally";
-      else if (explicitDefinitions.has(symbol)) classification = "explicitly_introduced";
+      else if (fieldDefinitions.has(symbol) || explicitDefinitionsSeen.has(symbol)) classification = "explicitly_introduced";
       else if (
         STANDARD_SYMBOLS.has(symbol)
         || FUNCTION_OR_OPERATOR_COMMANDS.has(symbol.replace(/^\\/, ""))
@@ -256,6 +264,7 @@ export function analyzeSymbolOrigins(problem = "", result = {}) {
         .filter((item) => item.classification === "unexplained")
         .map((item) => item.symbol),
     });
+    for (const symbol of fieldDefinitions) explicitDefinitionsSeen.add(symbol);
   }
 
   const newlyIntroducedSymbols = [...generatedSymbols].filter((symbol) => !originalSymbols.has(symbol));
@@ -265,7 +274,7 @@ export function analyzeSymbolOrigins(problem = "", result = {}) {
     originalSymbols: [...originalSymbols].sort(),
     generatedSymbols: [...generatedSymbols].sort(),
     newlyIntroducedSymbols: newlyIntroducedSymbols.sort(),
-    explicitDefinitions: [...explicitDefinitions].sort(),
+    explicitDefinitions: [...allExplicitDefinitions].sort(),
     fieldReports,
     unexplainedSymbols: unexplainedSymbols.sort(),
   };

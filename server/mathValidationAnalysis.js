@@ -1,3 +1,5 @@
+import { collectGeneratedMath } from "./generatedMathCollector.js";
+
 const MAX_RECURSION_DEPTH = 24;
 const MAX_NUMERICAL_EVALUATIONS = 50000;
 const MAX_EXPRESSION_TOKENS = 500;
@@ -1715,48 +1717,72 @@ export function verifyCriticalIdentities(result = {}, problem = "") {
 }
 
 export function analyzeSubstitutionConsistency(result = {}, problem = "") {
+  const generatedFields = collectGeneratedMath(result);
+  const generatedMathFieldPaths = generatedFields.map((field) => field.fieldPath);
+  const stepGeneratedText = new Map();
+  for (const field of generatedFields) {
+    if (!Number.isInteger(field.stepIndex)) continue;
+    const previous = stepGeneratedText.get(field.stepIndex) || "";
+    stepGeneratedText.set(field.stepIndex, `${previous} ${field.normalized}`.trim());
+  }
+  const stepTextAt = (index) => stepGeneratedText.get(index) || "";
+  const stepMathAt = (index) => {
+    const field = generatedFields.find((item) => (
+      item.stepIndex === index
+      && ["math", "latex", "equationLatex", "lines[].latex", "lines[].math", "lines[].equationLatex"].includes(item.sourceType)
+    ));
+    return field?.normalized || "";
+  };
+  const firstStepMatching = (pattern, extraPattern = null) => {
+    for (const [stepIndex, textValue] of stepGeneratedText.entries()) {
+      pattern.lastIndex = 0;
+      if (!pattern.test(textValue)) continue;
+      if (extraPattern) {
+        extraPattern.lastIndex = 0;
+        if (!extraPattern.test(textValue)) continue;
+      }
+      return stepIndex;
+    }
+    return null;
+  };
   const text = [
     problem,
     result?.expression,
-    ...(Array.isArray(result?.steps) ? result.steps.map(stepText) : []),
+    ...generatedFields.map((field) => field.normalized),
   ].map(safeString).join(" ");
   const compact = compactText(text);
   if (!/(?:x=\\tan|x=tan|x\s*=\\tan|x\s*=\s*tan)/iu.test(text)) {
-    return { applicable: false, issue: null, inconclusiveReason: "no x=tan substitution found" };
+    return { applicable: false, issue: null, inconclusiveReason: "no x=tan substitution found", generatedMathFieldPaths };
   }
   if (!/(?:\\frac\{\\ln\(1\+x\^2\)\\arctanx\}\{x\(1\+x\^2\)\}|ln\(1\+x\^2\).*arctanx.*x\(1\+x\^2\))/iu.test(compact)) {
-    return { applicable: false, issue: null, inconclusiveReason: "not the guarded tan-substitution quotient pattern" };
+    return { applicable: false, issue: null, inconclusiveReason: "not the guarded tan-substitution quotient pattern", generatedMathFieldPaths };
   }
-  const tanStep = Array.isArray(result?.steps)
-    ? result.steps.find((step) => /x\s*=\s*\\?tan/iu.test(stepText(step)) && /\\int|∫/u.test(stepText(step)))
-    : null;
+  const tanStepIndex = firstStepMatching(/x\s*=\s*\\?tan/iu, /\\int|∫/u);
   if (/(?:dx|d\s*x)\s*=\s*(?:d\\theta|dtheta|d\s*t|dt)\b/iu.test(text)) {
-    const matchingStep = Array.isArray(result?.steps)
-      ? result.steps.find((step) => /(?:dx|d\s*x)\s*=\s*(?:d\\theta|dtheta|d\s*t|dt)\b/iu.test(stepText(step)))
-      : null;
+    const matchingStepIndex = firstStepMatching(/(?:dx|d\s*x)\s*=\s*(?:d\\theta|dtheta|d\s*t|dt)\b/iu);
     return {
       applicable: true,
       issue: "incorrect_substitution_jacobian",
       verificationStatus: "failed",
-      firstFailingStepId: matchingStep ? stepId(matchingStep, result.steps.indexOf(matchingStep)) : null,
-      relevantStepLatex: matchingStep ? stepMath(matchingStep) : "",
+      firstFailingStepId: Number.isInteger(matchingStepIndex) ? stepId(result.steps?.[matchingStepIndex], matchingStepIndex) : null,
+      relevantStepLatex: Number.isInteger(matchingStepIndex) ? stepMathAt(matchingStepIndex) : "",
       evidence: "x=tan substitution explicitly states dx=dtheta instead of dx=sec^2(theta)dtheta",
+      generatedMathFieldPaths,
     };
   }
   if (/\\infty|infinity/iu.test(text) && /(?:\\theta|theta|t)\s*=\s*\\?pi\b/iu.test(text)) {
-    const matchingStep = Array.isArray(result?.steps)
-      ? result.steps.find((step) => /\\infty|infinity/iu.test(stepText(step)) && /(?:\\theta|theta|t)\s*=\s*\\?pi\b/iu.test(stepText(step)))
-      : null;
+    const matchingStepIndex = firstStepMatching(/\\infty|infinity/iu, /(?:\\theta|theta|t)\s*=\s*\\?pi\b/iu);
     return {
       applicable: true,
       issue: "incorrect_substitution_jacobian",
       verificationStatus: "failed",
-      firstFailingStepId: matchingStep ? stepId(matchingStep, result.steps.indexOf(matchingStep)) : null,
-      relevantStepLatex: matchingStep ? stepMath(matchingStep) : "",
+      firstFailingStepId: Number.isInteger(matchingStepIndex) ? stepId(result.steps?.[matchingStepIndex], matchingStepIndex) : null,
+      relevantStepLatex: Number.isInteger(matchingStepIndex) ? stepMathAt(matchingStepIndex) : "",
       evidence: "x=infinity under x=tan(theta) maps to theta=pi/2, not theta=pi",
+      generatedMathFieldPaths,
     };
   }
-  if (!tanStep) {
+  if (!Number.isInteger(tanStepIndex)) {
     return {
       applicable: true,
       issue: null,
@@ -1765,14 +1791,15 @@ export function analyzeSubstitutionConsistency(result = {}, problem = "") {
       relevantStepLatex: "",
       inconclusiveReason: "x=tan substitution evidence is incomplete or split across steps",
       evidence: "",
+      generatedMathFieldPaths,
     };
   }
-  const step = stepText(tanStep);
+  const step = stepTextAt(tanStepIndex);
   const integralIndex = step.search(/\\int|∫/u);
   const transformedPart = integralIndex >= 0 ? step.slice(integralIndex) : step;
   const transformedCompact = compactText(transformedPart);
-  const failingStepId = tanStep ? stepId(tanStep, result.steps.indexOf(tanStep)) : null;
-  const failingStepLatex = tanStep ? stepMath(tanStep) : "";
+  const failingStepId = stepId(result.steps?.[tanStepIndex], tanStepIndex);
+  const failingStepLatex = stepMathAt(tanStepIndex);
   if (/(?:dx|d\s*x)\s*=\s*(?:d\\theta|dtheta|d\s*t|dt)\b/iu.test(step)) {
     return {
       applicable: true,
@@ -1781,6 +1808,7 @@ export function analyzeSubstitutionConsistency(result = {}, problem = "") {
       firstFailingStepId: failingStepId,
       relevantStepLatex: failingStepLatex,
       evidence: "x=tan substitution explicitly states dx=dtheta instead of dx=sec^2(theta)dtheta",
+      generatedMathFieldPaths,
     };
   }
   if (/\\infty|infinity/iu.test(step) && /(?:\\theta|theta|t)\s*=\s*\\?pi\b/iu.test(step)) {
@@ -1791,6 +1819,7 @@ export function analyzeSubstitutionConsistency(result = {}, problem = "") {
       firstFailingStepId: failingStepId,
       relevantStepLatex: failingStepLatex,
       evidence: "x=infinity under x=tan(theta) maps to theta=pi/2, not theta=pi",
+      generatedMathFieldPaths,
     };
   }
   const hasThetaFactor = /\\theta|\btheta\b|\bt\b/iu.test(transformedPart);
@@ -1808,6 +1837,7 @@ export function analyzeSubstitutionConsistency(result = {}, problem = "") {
       firstFailingStepId: failingStepId,
       relevantStepLatex: failingStepLatex,
       evidence: "x=tan substitution transformed integral lacks the reciprocal tan/cot factor and shows no sec^2 cancellation evidence",
+      generatedMathFieldPaths,
     };
   }
   const validEquivalentForm = hasThetaFactor
@@ -1822,6 +1852,7 @@ export function analyzeSubstitutionConsistency(result = {}, problem = "") {
       firstFailingStepId: null,
       relevantStepLatex: "",
       evidence: "",
+      generatedMathFieldPaths,
     };
   }
   return {
@@ -1832,6 +1863,7 @@ export function analyzeSubstitutionConsistency(result = {}, problem = "") {
     relevantStepLatex: "",
     inconclusiveReason: "x=tan substitution evidence is incomplete or split across steps",
     evidence: "",
+    generatedMathFieldPaths,
   };
 }
 

@@ -158,6 +158,22 @@
     border: 1px solid rgba(45, 212, 191, 0.24);
     box-shadow: 0 14px 40px rgba(0, 0, 0, 0.34), 0 0 24px rgba(45, 212, 191, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.04);
     backdrop-filter: blur(18px);
+    pointer-events: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    overflow-wrap: anywhere;
+    scrollbar-color: rgba(45, 212, 191, 0.26) transparent;
+    scrollbar-width: thin;
+  }
+
+  .omni-quick-tooltip .omni-math-text,
+  .omni-quick-tooltip .omni-inline-math,
+  .omni-quick-tooltip .katex,
+  .omni-quick-tooltip .katex-html {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   @media (max-width: 640px) {
@@ -175,9 +191,6 @@
       transform: none !important;
     }
 
-    .omni-quick-tooltip {
-      display: none;
-    }
   }
 
   .omni-control {
@@ -264,7 +277,30 @@
   .omni-equation-line {
     font-feature-settings: "kern" 1;
     word-spacing: 0.04em;
-    flex-wrap: nowrap !important;
+    flex-wrap: wrap !important;
+  }
+
+  .omni-equation-chain {
+    font-feature-settings: "kern" 1;
+    word-spacing: 0.04em;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: visible;
+    overscroll-behavior-inline: contain;
+  }
+
+  .omni-equation-chain-segment {
+    display: inline-flex;
+    min-width: max-content;
+    max-width: 100%;
+    align-items: baseline;
+  }
+
+  .omni-equation-chain-separator {
+    display: inline-flex;
+    min-width: 1.75rem;
+    justify-content: center;
+    font-style: normal;
   }
 
   .omni-solution-flow {
@@ -285,7 +321,7 @@
     display: block;
     width: 100%;
     overflow-x: auto;
-    overflow-y: clip;
+    overflow-y: visible;
     overscroll-behavior-inline: contain;
     contain: inline-size;
     padding-block: 0.12rem 0.24rem;
@@ -319,7 +355,7 @@
     max-width: 100%;
     min-width: 0;
     overflow-x: auto;
-    overflow-y: clip;
+    overflow-y: visible;
     overscroll-behavior-inline: contain;
   }
 
@@ -489,7 +525,7 @@
 
   .math-token {
     box-sizing: border-box;
-    flex: 0 0 auto;
+    flex: 0 1 auto;
     max-width: 100%;
     min-width: 0;
     overflow: visible;
@@ -777,18 +813,103 @@
     border: 0;
     background: transparent;
     opacity: 0;
-    pointer-events: auto;
+    pointer-events: none;
+  }
+
+  .math-semantic-hitbox[data-target-kind="rejected"],
+  .math-semantic-hitbox[data-target-kind="uncovered"] {
+    pointer-events: none;
+  }
+
+  .math-semantic-hitbox:hover,
+  .math-semantic-hitbox[data-active-target="true"],
+  .math-semantic-hitbox.omni-token-selected {
+    border-radius: 0.18rem;
+    background: rgba(45, 212, 191, 0.12);
+    box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.22), 0 0 14px rgba(45, 212, 191, 0.14);
+    opacity: 1;
   }
 
   .math-semantic-overlay-debug .math-semantic-hitbox {
     border: 1px solid rgba(45, 212, 191, 0.48);
-    background: rgba(45, 212, 191, 0.12);
+    background: rgba(45, 212, 191, 0.08);
     opacity: 1;
   }
 
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-target-kind="group"] {
+    border-color: rgba(167, 139, 250, 0.42);
+    background: rgba(167, 139, 250, 0.08);
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-target-kind="leaf"] {
+    border-color: rgba(74, 222, 128, 0.82);
+    background: rgba(74, 222, 128, 0.16);
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-target-kind="uncovered"] {
+    border-color: rgba(248, 113, 113, 0.88);
+    background: rgba(248, 113, 113, 0.18);
+    pointer-events: none;
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-target-kind="rejected"] {
+    border-color: rgba(248, 113, 113, 0.96);
+    background: rgba(127, 29, 29, 0.22);
+    border-style: double;
+    pointer-events: none;
+  }
+
   .math-semantic-overlay-debug .math-semantic-hitbox[data-active-target="true"] {
-    border-color: rgba(251, 191, 36, 0.9);
-    background: rgba(251, 191, 36, 0.18);
+    border-color: rgba(251, 146, 60, 0.96);
+    background: rgba(251, 146, 60, 0.22);
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-rect-source="child-union"] {
+    border-style: dashed;
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-rect-source="fallback"] {
+    border-color: rgba(251, 146, 60, 0.72);
+    background: rgba(251, 146, 60, 0.12);
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-geometry-quality="zero_size"],
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-geometry-quality="collapsed"],
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-geometry-quality="structural_only"],
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-geometry-quality="stale_or_unmapped"] {
+    border-color: rgba(248, 113, 113, 0.92);
+    background: rgba(248, 113, 113, 0.18);
+    outline: 1px solid rgba(254, 202, 202, 0.7);
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-geometry-quality="broad_aggregate"] {
+    border-color: rgba(251, 146, 60, 0.88);
+    background: rgba(251, 146, 60, 0.14);
+    border-style: dashed;
+  }
+
+  .math-semantic-overlay-debug .math-semantic-hitbox[data-geometry-quality="fragmented_group"] {
+    border-color: rgba(167, 139, 250, 0.86);
+    background: rgba(167, 139, 250, 0.12);
+    border-style: dotted;
+  }
+
+  .math-semantic-hitbox-label {
+    position: absolute;
+    left: 0;
+    bottom: 100%;
+    max-width: 12rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border-radius: 0.25rem;
+    background: rgba(8, 19, 25, 0.92);
+    color: rgba(204, 251, 241, 0.95);
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    line-height: 0.9rem;
+    padding: 0 0.2rem;
+    pointer-events: none;
   }
 
   .math-semantic-active-label {

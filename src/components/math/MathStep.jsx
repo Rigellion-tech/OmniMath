@@ -1,6 +1,6 @@
 import React from "react";
 import { ChevronDown } from "lucide-react";
-import MathRenderer, { MathRenderShell, looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
+import { MathRenderShell, looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
 import MathChunk from "./MathChunk";
 import MathText from "./MathText";
 import { useHover } from "@/lib/HoverContext";
@@ -80,6 +80,53 @@ function MathLineShell({ children }) {
   );
 }
 
+function MathInlineSegmentShell({ children }) {
+  return (
+    <MathRenderShell
+      displayMode={false}
+      className="omni-equation-chain-segment font-serif text-[22px] italic leading-[2.35rem] text-cyan-50/92 md:text-[25px] md:leading-[2.75rem]"
+    >
+      {children}
+    </MathRenderShell>
+  );
+}
+
+function cleanMathBlockId(value = "math") {
+  return String(value || "math")
+    .replace(/\\/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    || "math";
+}
+
+function mathBlockChunk(latex, idHint, role = "equation") {
+  const display = String(latex || "").trim();
+  return {
+    id: `rendered-${cleanMathBlockId(idHint)}-${cleanMathBlockId(display)}`,
+    display,
+    latex: display,
+    text: display,
+    role,
+    short: "Math expression",
+    medium: `${display} is the selected expression in this step.`,
+    deep: `${display} is part of the rendered mathematical work for this step.`,
+  };
+}
+
+function SemanticMathBlock({ latex, idHint, stepId, role = "equation" }) {
+  return (
+    <MathChunk
+      chunk={mathBlockChunk(latex, `${idHint || "math"}-${stepId || "step"}`, role)}
+      stepId={stepId}
+    />
+  );
+}
+
+function renderableTokenLatex(token) {
+  return String(token?.display || token?.latex || token?.text || "").trim();
+}
+
 function MathProseLine({ children }) {
   return (
     <p className="omni-solution-line omni-text-wrap-safe max-w-6xl text-base leading-8 text-slate-300/78">
@@ -88,16 +135,49 @@ function MathProseLine({ children }) {
   );
 }
 
-function SplitMathBlocks({ blocks, componentName, displayMode }) {
+function SplitMathBlocks({ blocks, idBase, stepId, displayMode }) {
   if (blocks.length === 1 && blocks[0].type === "math") {
     return (
       <MathLineShell>
-        <MathRenderer
-          math={blocks[0].latex}
-          displayMode={displayMode}
-          componentName={componentName}
+        <SemanticMathBlock
+          latex={blocks[0].latex}
+          idHint={`${blocks[0].idHint || 0}-${idBase || "line"}`}
+          stepId={stepId}
+          role={displayMode ? "equation" : "expression"}
         />
       </MathLineShell>
+    );
+  }
+
+  if (blocks.some((block) => block.type === "separator")) {
+    return (
+      <div className="omni-solution-line omni-equation-chain flex max-w-full flex-wrap items-center gap-x-3 gap-y-2">
+        {blocks.map((block, blockIndex) => {
+          const separatorText = String(block.text || "").trim();
+          const isTextSeparator = /^(?:or|and)$/i.test(separatorText);
+          return block.type === "math" ? (
+            <MathInlineSegmentShell key={`${block.idHint || "math"}-${blockIndex}`}>
+              <SemanticMathBlock
+                latex={block.latex}
+                idHint={`${block.idHint || blockIndex}-${idBase || "chain"}`}
+                stepId={stepId}
+                role="expression"
+              />
+            </MathInlineSegmentShell>
+          ) : (
+            <span
+              key={`${block.idHint || "separator"}-${blockIndex}`}
+              className={cn(
+                "omni-equation-chain-separator font-serif text-lg leading-none md:text-xl",
+                isTextSeparator ? "text-cyan-50/72" : "text-teal-200/65"
+              )}
+              aria-hidden={isTextSeparator ? undefined : "true"}
+            >
+              {isTextSeparator ? separatorText : "=>"}
+            </span>
+          )
+        })}
+      </div>
     );
   }
 
@@ -106,10 +186,11 @@ function SplitMathBlocks({ blocks, componentName, displayMode }) {
       {blocks.map((block, blockIndex) => (
         block.type === "math" ? (
           <MathLineShell key={`${block.idHint || "math"}-${blockIndex}`}>
-            <MathRenderer
-              math={block.latex}
-              displayMode
-              componentName={`${componentName}.split`}
+            <SemanticMathBlock
+              latex={block.latex}
+              idHint={`${block.idHint || blockIndex}-${idBase || "split"}`}
+              stepId={stepId}
+              role={displayMode ? "equation" : "expression"}
             />
           </MathLineShell>
         ) : (
@@ -127,8 +208,25 @@ export function InteractiveMathLine({ line, stepId }) {
   const hasTokens = lineHasRenderableToken(line);
   const showLineText = shouldRenderLineText(line, tokens);
   const textAsMath = !hasTokens && !line?.latex && line?.text && looksLikeMathExpression(line.text);
+  const singleTokenLatex = tokens.length === 1 ? renderableTokenLatex(tokens[0]) : "";
+  const singleTokenBlocks = singleTokenLatex ? splitLatexRenderBlocks(singleTokenLatex) : [];
+  const shouldSplitSingleToken = hasTokens
+    && tokens.length === 1
+    && !showLineText
+    && singleTokenBlocks.some((block) => block.type === "separator");
 
   if (hasTokens) {
+    if (shouldSplitSingleToken) {
+      return (
+        <SplitMathBlocks
+          blocks={singleTokenBlocks}
+          idBase={line.id || tokens[0]?.id || `${stepId}-token`}
+          stepId={stepId}
+          displayMode={line.kind === "block" || line.displayMode === true}
+        />
+      );
+    }
+
     return (
       <div
         className="math-render-shell math-render-shell-block omni-solution-line omni-equation-line flex max-w-full flex-wrap items-baseline gap-x-2.5 gap-y-2 text-[22px] leading-[2.35rem] md:text-[25px] md:leading-[2.75rem]"
@@ -155,8 +253,9 @@ export function InteractiveMathLine({ line, stepId }) {
     return (
       <SplitMathBlocks
         blocks={blocks}
+        idBase={line.id || `${stepId}-latex`}
+        stepId={stepId}
         displayMode={line.kind === "block" || line.displayMode === true}
-        componentName="InteractiveMathLine.latex"
       />
     );
   }
@@ -166,8 +265,9 @@ export function InteractiveMathLine({ line, stepId }) {
     return (
       <SplitMathBlocks
         blocks={blocks}
+        idBase={line.id || `${stepId}-text`}
+        stepId={stepId}
         displayMode
-        componentName="InteractiveMathLine.textAsMath"
       />
     );
   }
@@ -183,6 +283,7 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
   const {
     activeStepId,
     clearSelectedConcept,
+    handleStepLeave,
     openReferenceIds = [],
   } = useHover();
   const lines = solutionLinesForStep(step);
@@ -204,11 +305,11 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
       else handleSelect();
     }
   };
-
   return (
     <article
       data-state={state}
       data-final-answer={isFinalAnswer ? "true" : undefined}
+      onMouseLeave={handleStepLeave}
       className={cn(
         "step-card notebook-step group relative px-4 py-5 transition-colors duration-200 md:px-6 md:py-5",
         isFinalAnswer && "final-answer-step"

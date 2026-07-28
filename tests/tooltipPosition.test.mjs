@@ -76,4 +76,31 @@ describe("tooltipPosition", () => {
     assert.equal(intersects(toTooltipRect(position), rect), false);
     assertContained(position);
   });
+
+  it("clamps using actual measured tooltip dimensions near the right edge", () => {
+    const actualSize = { width: 360, height: 220 };
+    const edgeRect = { left: 970, right: 995, top: 24, bottom: 48, width: 25, height: 24 };
+    const position = getTooltipPositionFromRect(edgeRect, { size: actualSize, viewport });
+    const tooltip = {
+      left: position.x,
+      right: position.x + actualSize.width,
+      top: position.y,
+      bottom: position.y + actualSize.height,
+    };
+
+    assert.ok(tooltip.left >= 12);
+    assert.ok(tooltip.right <= viewport.width - 12);
+    assert.ok(tooltip.top >= 12);
+    assert.ok(tooltip.bottom <= viewport.height - 12);
+  });
+
+  it("clamps tall measured tooltip frames inside the viewport", () => {
+    const actualSize = { width: 340, height: 660 };
+    const edgeRect = { left: 420, right: 460, top: 660, bottom: 690, width: 40, height: 30 };
+    const position = getTooltipPositionFromRect(edgeRect, { size: actualSize, viewport });
+
+    assert.equal(position.y, 28);
+    assert.ok(position.x >= 12);
+    assert.ok(position.x + actualSize.width <= viewport.width - 12);
+  });
 });

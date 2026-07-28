@@ -17,18 +17,68 @@ function expectValidationIssue(result, problem, issue) {
 }
 
 const regressionIntegralProblem = "Evaluate the integral from 0 to infinity of (ln(1 + x^2) times arctan x) divided by (x times (1 + x^2)) with respect to x.";
+const regressionIntegralPlainEnglishProblem = "Evaluate the integral from 0 to infinity of the quantity ln(1 + x^2) times arctan x divided by x times (1 + x^2) dx.";
 const regressionIntegralLatex = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+const regressionIntegralTarget = 0.7546938294601476;
+const regressionIntegralWrongJulyValue = "2.0466220244727404";
+
+function julyIntegralInvalidReplay({
+  expression = regressionIntegralLatex,
+  finalAnswerLatex = regressionIntegralWrongJulyValue,
+  includeSpecialFunction = true,
+  includeUnsupportedIntegrationByParts = true,
+} = {}) {
+  const steps = [
+    {
+      id: "s1",
+      label: "Tangent substitution",
+      math: "x=\\tan t,\\quad I=-2\\int_0^{\\pi/2}t\\cot t\\ln(\\cos t)\\,dt",
+      summary: "Use the tangent substitution to move the improper integral to a finite interval.",
+    },
+  ];
+  if (includeSpecialFunction) {
+    steps.push({
+      id: "s2",
+      label: "Special-function shortcut",
+      math: "I=\\operatorname{Li}_3(1)-\\operatorname{Li}_3(-1)",
+      summary: "Abruptly introduce a polylogarithm relation without deriving or proving the identity.",
+    });
+  }
+  if (includeUnsupportedIntegrationByParts) {
+    steps.push({
+      id: "s3",
+      label: "Integration by parts",
+      math: "u=t,\\quad dv=\\cot t\\ln(\\cos t)\\,dt",
+      summary: "Declare integration by parts without an explicit usable antiderivative v.",
+    });
+  }
+  steps.push({
+    id: "s4",
+    label: "Final answer",
+    math: `I=${finalAnswerLatex}`,
+    summary: "State the proposed final value.",
+  });
+  return {
+    title: "Improper integral replay fixture",
+    expression,
+    finalAnswerLatex,
+    numericCheck: finalAnswerLatex,
+    steps,
+  };
+}
 
 test("detached relation-leading display fragments are rejected outside aligned derivations", () => {
-  expectValidationIssue({
-    title: "Detached fragment",
-    expression: "\\int_0^1 x\\,dx",
-    finalAnswerLatex: "2",
-    steps: [
-      { id: "s1", label: "Setup", math: "\\int_0^1 x\\,dx", summary: "Set up the integral." },
-      { id: "s2", label: "Detached result", math: "=2", summary: "A detached equality fragment." },
-    ],
-  }, "\\int_0^1 x\\,dx", "detached_relation_leading_fragment");
+  for (const math of ["= x+1", "< 3", "\\le 4", "\\geq 2", "\\approx 1", "& = y"]) {
+    expectValidationIssue({
+      title: "Detached fragment",
+      expression: "\\int_0^1 x\\,dx",
+      finalAnswerLatex: "2",
+      steps: [
+        { id: "s1", label: "Setup", math: "\\int_0^1 x\\,dx", summary: "Set up the integral." },
+        { id: "s2", label: "Detached result", math, summary: "A detached equality fragment." },
+      ],
+    }, "\\int_0^1 x\\,dx", "detached_relation_leading_fragment");
+  }
 
   assert.equal(validateSolutionQuality({
     title: "Aligned derivation",
@@ -45,44 +95,27 @@ test("detached relation-leading display fragments are rejected outside aligned d
   }, { problem: "1+1" }), true);
 });
 
-test("validation context records final-answer numeric parse and symbol source diagnostics", () => {
-  const result = {
-    title: "Integral answer left unevaluated",
-    problemLatex: "\\int_0^1 x\\,dx",
-    steps: [
-      {
-        id: "s1",
-        heading: "Final expression",
-        latex: "I=t+1",
-        reasoning: "This leaves an unrelated symbol in the displayed math.",
-        anchors: [],
-      },
-    ],
-    finalAnswerLatex: "\\int_0^1 x\\,dx",
-    numericCheck: "",
-  };
+test("evaluated-at derivative notation is not treated as a detached relation", () => {
+  const cases = [
+    "\\left. \\frac{d}{da} I(a) \\right|_{a=0} = \\frac{\\pi^3}{8}",
+    "\\left. f'(a) \\right|_{a=0} = 1",
+    "\\left[\\frac{d}{da}I(a)\\right]_{a=0}=1",
+    "\\frac{d}{da}I(a)\\bigg|_{a=0}=1",
+    "f'(0)=1",
+    "\\length=1",
+    "\\lessdot 1",
+  ];
 
-  assert.throws(() => validateSolutionQuality(result, {
-    problem: "Evaluate the integral from 0 to 1 of x with respect to x.",
-  }), (error) => {
-    const context = error.solutionValidationContext;
-    const symbolField = context.symbolOriginDiagnostics.fieldReports
-      .find((field) => field.fieldPath === "steps[0].latex");
+  for (const math of cases) {
+    const report = evaluateSolutionQualityRules({
+      title: "Evaluated derivative",
+      expression: regressionIntegralLatex,
+      finalAnswerLatex: "1",
+      steps: [{ id: "s1", label: "Differentiate", math, summary: "Use evaluated-at notation." }],
+    }, { problem: regressionIntegralLatex });
 
-    assert.ok(error.solutionIssues.includes("unexplained_generated_symbol:t"));
-    assert.equal(context.finalAnswerNumericDiagnostic.finalAnswerLatex, "\\int_0^1 x\\,dx");
-    assert.equal(context.finalAnswerNumericDiagnostic.parsedNumerically, false);
-    assert.equal(context.finalAnswerNumericDiagnostic.status, "symbolic");
-    assert.match(context.finalAnswerNumericDiagnostic.reason, /Unsupported token/);
-    assert.equal(context.numericalCrossCheckResult.applicable, false);
-    assert.match(context.numericalCrossCheckResult.inconclusiveReason, /not numerically evaluable/);
-    assert.equal(symbolField.sourceKind, "math");
-    assert.equal(symbolField.sourceType, "latex");
-    assert.equal(symbolField.rawText, "I=t+1");
-    assert.deepEqual(symbolField.mathFragments, ["I=t+1"]);
-    assert.deepEqual(symbolField.unexplainedSymbols, ["t"]);
-    return true;
-  });
+    assert.equal(report.issues.includes("detached_relation_leading_fragment"), false, math);
+  }
 });
 
 test("named sign inconsistency is rejected when a final answer drops the sign", () => {
@@ -559,6 +592,180 @@ test("regression integral rejects wrong constants and invalid generated derivati
       },
     ],
   }, regressionIntegralProblem, "unsupported_integration_by_parts_setup");
+});
+
+test("improper-integral July replay rejects wrong numeric value and unsupported derivations", () => {
+  const report = evaluateSolutionQualityRules(julyIntegralInvalidReplay(), {
+    problem: regressionIntegralLatex,
+  });
+
+  assert.ok(report.issues.includes("numerical_final_answer_mismatch"));
+  assert.ok(report.issues.includes("unsupported_integration_by_parts_setup"));
+  assert.ok(report.issues.includes("abrupt_special_function_introduction:polylogarithm"));
+  assert.equal(report.context.numericalCrossCheckResult.applicable, true);
+  assert.equal(report.context.numericalCrossCheckResult.issue, "numerical_final_answer_mismatch");
+  assert.equal(report.context.numericalCrossCheckResult.proposedValue, Number(regressionIntegralWrongJulyValue));
+  assert.ok(Math.abs(report.context.numericalCrossCheckResult.numericalEstimate - regressionIntegralTarget) < 0.00031);
+});
+
+test("improper-integral exact-looking value numerically agrees with independent target", () => {
+  const exactCandidate = analyzeNumericExpression("\\frac{\\pi}{2}\\ln^2 2");
+
+  assert.equal(exactCandidate.status, "evaluable");
+  assert.ok(Math.abs(exactCandidate.value - regressionIntegralTarget) < 1e-12);
+});
+
+test("powered-function numeric finals normalize from LaTeX function scripts", () => {
+  const bareLogSquare = analyzeNumericExpression("\\frac{\\pi}{2}\\ln^{2}(2)");
+  assert.equal(bareLogSquare.status, "evaluable");
+  assert.equal(bareLogSquare.normalized, "((pi)/((2)))(ln(2))^2");
+  assert.ok(Math.abs(bareLogSquare.value - 0.7546938294602481) < 1e-15);
+
+  const equalityLogSquare = analyzeNumericExpression(`${regressionIntegralLatex}=\\frac{\\pi}{2}\\ln^{2}(2)`);
+  assert.equal(equalityLogSquare.status, "evaluable");
+  assert.equal(equalityLogSquare.normalized, "((pi)/((2)))(ln(2))^2");
+  assert.ok(Math.abs(equalityLogSquare.value - 0.7546938294602481) < 1e-15);
+
+  const trigSquare = analyzeNumericExpression("\\pi\\sin^{2}(\\pi/4)");
+  assert.equal(trigSquare.status, "evaluable");
+  assert.equal(trigSquare.normalized, "pi*(sin(pi/4))^2");
+  assert.ok(Math.abs(trigSquare.value - Math.PI / 2) < 1e-12);
+
+  const logCube = analyzeNumericExpression("\\log^{3}(2)");
+  assert.equal(logCube.status, "evaluable");
+  assert.equal(logCube.normalized, "(log(2))^3");
+  assert.ok(Math.abs(logCube.value - Math.log(2) ** 3) < 1e-15);
+});
+
+test("malformed powered functions and absent finals remain rejected", () => {
+  const malformedPower = analyzeNumericExpression("\\sin^{}(2)");
+  assert.equal(malformedPower.status, "malformed");
+  assert.equal(malformedPower.numericIntent, true);
+
+  const malformedReport = evaluateSolutionQualityRules({
+    title: "Malformed powered function",
+    expression: "2",
+    finalAnswerLatex: "\\sin^{}(2)",
+    steps: [{ id: "s1", label: "Final answer", math: "\\sin^{}(2)", summary: "Malformed powered function syntax." }],
+  }, { problem: "Evaluate a numeric expression." });
+  assert.equal(malformedReport.issues.includes("missing_final_answer"), true);
+  assert.equal(malformedReport.issues.includes("unsupported_numeric_final_answer_syntax"), true);
+
+  const absentReport = evaluateSolutionQualityRules({
+    title: "Absent final answer",
+    expression: "2",
+    finalAnswerLatex: "",
+    steps: [{ id: "s1", label: "Work", math: "1+1=2", summary: "Compute the value." }],
+  }, { problem: "Evaluate 1+1." });
+  assert.equal(absentReport.issues.includes("missing_final_answer"), true);
+});
+
+test("symbolic valid final answers are present even when not numerically evaluable", () => {
+  const symbolicReport = evaluateSolutionQualityRules({
+    title: "Symbolic final answer",
+    expression: "F(a)",
+    finalAnswerLatex: "F(a)",
+    steps: [{ id: "s1", label: "Final answer", math: "F(a)", summary: "State the symbolic result." }],
+  }, { problem: "Find F(a) symbolically." });
+
+  assert.equal(symbolicReport.context.finalAnswerPresenceResult.present, true);
+  assert.equal(symbolicReport.context.numericFinalAnswerAnalysis.status, "symbolic");
+  assert.equal(symbolicReport.issues.includes("missing_final_answer"), false);
+  assert.equal(symbolicReport.issues.includes("unsupported_numeric_final_answer_syntax"), false);
+});
+
+test("regression integral equality final answer is present and numerically cross-checked", () => {
+  const finalAnswerLatex = "\\int_{0}^{\\infty}\\frac{\\ln(1+x^{2})\\arctan x}{x(1+x^{2})}\\,dx=\\frac{\\pi}{2}\\ln^{2}(2)";
+  const report = evaluateSolutionQualityRules({
+    title: "Integral value",
+    expression: regressionIntegralLatex,
+    finalAnswerLatex,
+    steps: [{ id: "s1", label: "Final answer", math: finalAnswerLatex, summary: "State the evaluated integral." }],
+  }, { problem: regressionIntegralLatex });
+
+  assert.equal(report.context.finalAnswerPresenceResult.present, true);
+  assert.equal(report.context.finalAnswerPresenceResult.evaluableFinalAnswerExpression, "\\frac{\\pi}{2}\\ln^{2}(2)");
+  assert.equal(report.context.numericFinalAnswerAnalysis.status, "evaluable");
+  assert.ok(Math.abs(report.context.numericFinalAnswerAnalysis.value - 0.7546938294602481) < 1e-15);
+  assert.equal(report.issues.includes("unsupported_numeric_final_answer_syntax"), false);
+  assert.equal(report.issues.includes("missing_final_answer"), false);
+  assert.equal(report.context.numericalCrossCheckResult.applicable, true);
+  assert.ok(Math.abs(report.context.numericalCrossCheckResult.proposedValue - 0.7546938294602481) < 1e-15);
+  assert.notEqual(report.context.numericalCrossCheckResult.proposedValue, 0);
+  assert.equal(report.context.numericalCrossCheckResult.issue, null);
+  assert.equal(report.issues.includes("numerical_final_answer_mismatch"), false);
+});
+
+test("trailing numeric approximation is cross-checked when symbolic prefix is unsupported", () => {
+  const finalAnswerLatex = "\\pi\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\approx 1.2913";
+  const report = evaluateSolutionQualityRules({
+    title: "Integral series approximation",
+    expression: regressionIntegralLatex,
+    finalAnswerLatex,
+    steps: [
+      {
+        id: "s1",
+        label: "Series \\(\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\)",
+        title: "Series \\(\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\)",
+        math: "I=\\pi\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\approx 1.2913",
+        summary: "Use \\(\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\) and state the decimal approximation.",
+        plainExplanation: "The proposed value is \\(\\pi\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\approx 1.2913\\).",
+      },
+    ],
+  }, { problem: regressionIntegralLatex });
+
+  assert.equal(report.issues.includes("unexplained_generated_symbol:n"), false);
+  assert.equal(report.context.numericFinalAnswerAnalysis.status, "evaluable");
+  assert.equal(report.context.numericFinalAnswerAnalysis.extractedNumericApproximation, "1.2913");
+  assert.equal(report.context.numericFinalAnswerAnalysis.symbolicPrefixNumericAnalysis.status, "symbolic");
+  assert.equal(report.context.numericalCrossCheckResult.applicable, true);
+  assert.equal(report.context.numericalCrossCheckResult.proposedValue, 1.2913);
+  assert.equal(report.context.numericalCrossCheckResult.finalAnswerNumericAnalysis.extractedNumericApproximation, "1.2913");
+  assert.equal(report.context.numericalCrossCheckResult.issue, "numerical_final_answer_mismatch");
+  assert.ok(Math.abs(report.context.numericalCrossCheckResult.numericalEstimate - regressionIntegralTarget) < 0.00031);
+});
+
+test("bound summation symbols do not mask free later equations", () => {
+  const report = evaluateSolutionQualityRules({
+    title: "Free index after sum",
+    expression: "\\sum_{n=1}^{\\infty}\\frac{1}{n^2}",
+    finalAnswerLatex: "0",
+    steps: [
+      { id: "s1", label: "Series", math: "\\sum_{n=1}^{\\infty}\\frac{1}{n^2}", summary: "Use a bound index." },
+      { id: "s2", label: "Invalid free index", math: "2n+1=3", summary: "Reuse the index as a free variable." },
+    ],
+  }, { problem: "Evaluate the series." });
+
+  assert.ok(report.issues.includes("unexplained_generated_symbol:n"));
+  assert.ok(report.context.symbolOriginDiagnostics.fieldReports.some((field) => (
+    field.fieldPath === "steps[1].math" && field.unexplainedSymbols.includes("n")
+  )));
+});
+
+test("canonical input characterization documents plain-text gap versus LaTeX coverage", () => {
+  const plainReplay = julyIntegralInvalidReplay({
+    expression: regressionIntegralPlainEnglishProblem,
+    includeSpecialFunction: false,
+    includeUnsupportedIntegrationByParts: false,
+  });
+  const latexReplay = julyIntegralInvalidReplay({
+    expression: regressionIntegralLatex,
+    includeSpecialFunction: false,
+    includeUnsupportedIntegrationByParts: false,
+  });
+
+  // Known gap: the plain-English OCR-reviewed wording is not currently a supported
+  // one-dimensional definite-integral parse target for numerical validation.
+  const plainCheck = numericalFinalAnswerCheck(regressionIntegralPlainEnglishProblem, plainReplay);
+  assert.equal(plainCheck.applicable, false);
+  assert.equal(plainCheck.issue, null);
+  assert.match(plainCheck.inconclusiveReason, /no supported one-dimensional definite integral found|Unexpected trailing tokens/);
+
+  const latexCheck = numericalFinalAnswerCheck(regressionIntegralLatex, latexReplay);
+  assert.equal(latexCheck.applicable, true);
+  assert.equal(latexCheck.issue, "numerical_final_answer_mismatch");
+  assert.equal(latexCheck.proposedValue, Number(regressionIntegralWrongJulyValue));
+  assert.ok(Math.abs(latexCheck.numericalEstimate - regressionIntegralTarget) < 0.00031);
 });
 
 test("numeric expression analysis normalizes fraction wrappers and scientific notation safely", () => {

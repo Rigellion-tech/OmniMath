@@ -47,6 +47,49 @@ async function seedUsageStore(path, identityKey, requestCount, limit) {
 }
 
 describe("local usage fallback", () => {
+  it("returns empty local sessions instead of failing when dev DB user schema is unavailable", async () => {
+    const originalEnv = {
+      NODE_ENV: process.env.NODE_ENV,
+      VERCEL: process.env.VERCEL,
+      DATABASE_URL: process.env.DATABASE_URL,
+      POSTGRES_URL: process.env.POSTGRES_URL,
+      CLERK_SECRET_KEY: process.env.CLERK_SECRET_KEY,
+      CLERK_JWT_KEY: process.env.CLERK_JWT_KEY,
+    };
+
+    process.env.NODE_ENV = "test";
+    delete process.env.VERCEL;
+    process.env.DATABASE_URL = "postgres://omnimath:omnimath@127.0.0.1:1/omnimath";
+    delete process.env.POSTGRES_URL;
+    delete process.env.CLERK_SECRET_KEY;
+    delete process.env.CLERK_JWT_KEY;
+
+    try {
+      const { handleSessionsRequest } = await import(`../server/app.js?sessions-fallback-${Date.now()}`);
+      const req = {
+        method: "GET",
+        url: "/api/sessions",
+        headers: {
+          host: "localhost:8787",
+        },
+      };
+      const res = createJsonResponseRecorder();
+
+      await handleSessionsRequest(req, res);
+
+      assert.equal(res.statusCode, 200);
+      const body = res.json();
+      assert.deepEqual(body.sessions, []);
+      assert.equal(body.databaseConfigured, false);
+      assert.equal(body.fallback, "missing_local_schema");
+    } finally {
+      Object.entries(originalEnv).forEach(([key, value]) => {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      });
+    }
+  });
+
   it("does not block local-rule /api/explain when local dev AI request quota is exhausted", async () => {
     const originalEnv = {
       NODE_ENV: process.env.NODE_ENV,

@@ -101,17 +101,64 @@ function hasBalancedBraces(value = "") {
 
 function hasBalancedPlainDelimiters(value = "") {
   const text = stripTextCommands(value)
+    .replace(/\\(?:in|subset|subseteq|supset|supseteq)\b/g, " ∈ ")
+    .replace(/\\(?:infty|pi|theta|phi)\b/g, " c ")
     .replace(/\\[A-Za-z]+(?:\s*\{[^{}]*\})?/g, " ")
     .replace(/\\[,;! ]/g, " ");
   const stack = [];
   const pairs = new Map([[")", "("], ["]", "["]]);
-  for (const char of text) {
-    if (char === "(" || char === "[") stack.push(char);
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "(" || char === "[") stack.push({ char, index });
     if (char === ")" || char === "]") {
-      if (stack.pop() !== pairs.get(char)) return false;
+      const open = stack.pop();
+      if (!open) return false;
+      if (open.char !== pairs.get(char)) {
+        if (!isPlausibleIntervalDelimiterPair(text, open, { char, index })) return false;
+      }
     }
   }
   return stack.length === 0;
+}
+
+function splitTopLevelIntervalEndpoints(inner = "") {
+  const endpoints = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < inner.length; index += 1) {
+    const char = inner[index];
+    if (char === "(" || char === "[") depth += 1;
+    else if (char === ")" || char === "]") {
+      depth -= 1;
+      if (depth < 0) return null;
+    } else if (char === "," && depth === 0) {
+      endpoints.push(inner.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  endpoints.push(inner.slice(start).trim());
+  return depth === 0 && endpoints.length === 2 ? endpoints : null;
+}
+
+function isPlausibleIntervalEndpoint(endpoint = "") {
+  const text = String(endpoint || "").trim();
+  if (!text) return false;
+  if (/[,=<>]/u.test(text)) return false;
+  return /(?:[A-Za-z0-9]|\\infty|\\pi|\\theta|\\phi)/u.test(text);
+}
+
+function hasPlausibleIntervalPrefix(text = "", openIndex = 0) {
+  const prefix = text.slice(0, openIndex).trim();
+  if (!prefix) return true;
+  return /(?:^|[\s=,;:]|∈)$/u.test(prefix);
+}
+
+function isPlausibleIntervalDelimiterPair(text = "", open = {}, close = {}) {
+  if (!["(", "["].includes(open.char) || ![")", "]"].includes(close.char)) return false;
+  const inner = text.slice(open.index + 1, close.index);
+  const endpoints = splitTopLevelIntervalEndpoints(inner);
+  if (!endpoints || !endpoints.every(isPlausibleIntervalEndpoint)) return false;
+  return hasPlausibleIntervalPrefix(text, open.index);
 }
 
 function isEscapedAt(text, index) {

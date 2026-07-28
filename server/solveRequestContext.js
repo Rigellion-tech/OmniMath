@@ -1,10 +1,21 @@
 import {
   createCanonicalProblemPayload,
+  getCanonicalDisplayText,
+  getCanonicalDisplayTextSource,
+  getCanonicalMathInput,
+  getCanonicalMathInputSource,
   getCanonicalSolverInput,
   logCanonicalProblem,
 } from "../src/lib/canonicalProblem.js";
 
-export { getCanonicalSolverInput, logCanonicalProblem };
+export {
+  getCanonicalDisplayText,
+  getCanonicalDisplayTextSource,
+  getCanonicalMathInput,
+  getCanonicalMathInputSource,
+  getCanonicalSolverInput,
+  logCanonicalProblem,
+};
 
 export function normalizeCanonicalProblem(body = {}, fallback = {}) {
   const raw = body.canonicalProblem && typeof body.canonicalProblem === "object" ? body.canonicalProblem : {};

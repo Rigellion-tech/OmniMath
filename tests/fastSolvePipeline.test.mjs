@@ -42,6 +42,186 @@ describe("fast solve pipeline", () => {
     assert.equal(explanation.finalAnswerLatex, "0");
   });
 
+  it("preserves grouped perfect-square bases before exponent rendering", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Solve perfect square trinomial",
+      problemLatex: "x^2+70x+1225=0",
+      steps: [
+        {
+          id: "step-1",
+          heading: "Recognize the perfect square",
+          latex: "(x+35)^2=0",
+          reasoning: "The trinomial factors as a grouped binomial square.",
+          anchors: [],
+        },
+        {
+          id: "step-2",
+          heading: "Solve the linear equation",
+          latex: "x+35=0",
+          reasoning: "Take the repeated root equation.",
+          anchors: [],
+        },
+        {
+          id: "step-3",
+          heading: "Final answer",
+          latex: "x=-35",
+          reasoning: "Subtract 35.",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "x=-35",
+      numericCheck: "",
+    }, { originalProblem: "x^2+70x+1225=0" });
+
+    const renderedSteps = explanation.steps.map((step) => step.math).join(" ");
+    assert.ok(explanation.steps.some((step) => step.math === "\\left(x+35\\right)^{2}=0"));
+    assert.doesNotMatch(renderedSteps, /x\+35\^\{?2\}?=0/);
+    assert.equal(explanation.finalAnswerLatex, "x=-35");
+  });
+
+  it("keeps adjacent equations in one step as separate rendered lines", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Solve perfect square trinomial",
+      problemLatex: "x^2+70x+1225=0",
+      steps: [
+        {
+          id: "step-1",
+          heading: "Recognize the perfect square",
+          latex: "(x+35)^2=0",
+          reasoning: "The trinomial factors as a grouped binomial square.",
+          anchors: [],
+        },
+        {
+          id: "step-3",
+          heading: "Solve the repeated root",
+          latex: "x + 35 = 0\nx = -35",
+          reasoning: "Solve the resulting linear equation.",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "x=-35",
+      numericCheck: "",
+    }, { originalProblem: "x^2+70x+1225=0" });
+
+    const solveStep = explanation.steps.find((step) => step.id === "step-3");
+    assert.deepEqual(solveStep.lines.map((line) => line.latex), ["x+35=0", "x=-35"]);
+    assert.equal(solveStep.math, "x+35=0\nx=-35");
+    assert.doesNotMatch(solveStep.math, /0x=/);
+    assert.equal(explanation.finalAnswerLatex, "x=-35");
+  });
+
+  it("fills blank set-and-solve step for perfect-square 70 quadratic", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Solve perfect square quadratic",
+      problemLatex: "x^2+70x+1225=0",
+      steps: [
+        {
+          id: "recognize",
+          heading: "Recognize the perfect square",
+          latex: "x^2 + 2\\cdot35\\cdot x + 35^2 = (x + 35)^2",
+          reasoning: "Recognize the trinomial as a perfect square.",
+          anchors: [],
+        },
+        {
+          id: "solve",
+          heading: "Set the equation and solve",
+          latex: "",
+          reasoning: "",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "x=-35",
+      numericCheck: "",
+    }, { originalProblem: "x^2+70x+1225=0" });
+
+    const solveStep = explanation.steps.find((step) => step.id === "solve");
+    const renderedText = explanation.steps.map((step) => step.math).join("\n");
+
+    assert.deepEqual(solveStep.lines.map((line) => line.latex), [
+      "\\left(x+35\\right)^{2}=0",
+      "x+35=0",
+      "x=-35",
+    ]);
+    assert.doesNotMatch(renderedText, /x\+35\^\{?2\}?=0/);
+    assert.doesNotMatch(renderedText, /0x=/);
+    assert.doesNotMatch(renderedText, /\\pm|±/);
+  });
+
+  it("repairs perfect-square quadratic chains and empty solve steps", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Solve perfect square quadratic",
+      problemLatex: "x^2+88x+1936=0",
+      steps: [
+        {
+          id: "recognize",
+          heading: "Recognize the perfect square",
+          latex: "x^2 + 88x + 1936 = (x + 44)^2 = 0",
+          reasoning: "Recognize the trinomial as a perfect square.",
+          anchors: [],
+        },
+        {
+          id: "solve",
+          heading: "Set the equation and solve",
+          latex: "",
+          reasoning: "",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "x=-44",
+      numericCheck: "",
+    }, { originalProblem: "x^2+88x+1936=0" });
+
+    const renderedText = explanation.steps.map((step) => step.math).join("\n");
+    const recognizeStep = explanation.steps.find((step) => step.id === "recognize");
+    const solveStep = explanation.steps.find((step) => step.id === "solve");
+
+    assert.deepEqual(recognizeStep.lines.map((line) => line.latex), [
+      "x^{2}+88x+1936=0",
+      "\\left(x+44\\right)^{2}=0",
+    ]);
+    assert.deepEqual(solveStep.lines.map((line) => line.latex), [
+      "\\left(x+44\\right)^{2}=0",
+      "x+44=0",
+      "x=-44",
+    ]);
+    assert.doesNotMatch(renderedText, /x\^\{2\}\+88x\+1936=\\left\(x\+44\\right\)\^\{2\}=0/);
+    assert.doesNotMatch(renderedText, /\\pm|±/);
+    assert.equal(explanation.finalAnswerLatex, "x=-44");
+  });
+
+  it("repairs negative perfect-square quadratic solve steps", () => {
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Solve perfect square quadratic",
+      problemLatex: "x^2-10x+25=0",
+      steps: [
+        {
+          id: "recognize",
+          heading: "Recognize the perfect square",
+          latex: "x^2 - 10x + 25 = (x - 5)^2 = 0",
+          reasoning: "Recognize the trinomial as a perfect square.",
+          anchors: [],
+        },
+        {
+          id: "solve",
+          heading: "Solve for x",
+          latex: "",
+          reasoning: "",
+          anchors: [],
+        },
+      ],
+      finalAnswerLatex: "x=5",
+      numericCheck: "",
+    }, { originalProblem: "x^2-10x+25=0" });
+
+    const renderedText = explanation.steps.map((step) => step.math).join("\n");
+    assert.ok(renderedText.includes("\\left(x-5\\right)^{2}=0"));
+    assert.ok(renderedText.includes("\\left(x-5\\right)^{2}=0"));
+    assert.ok(renderedText.includes("x-5=0"));
+    assert.ok(renderedText.includes("x=5"));
+    assert.doesNotMatch(renderedText, /\\pm|±/);
+    assert.equal(explanation.steps.some((step) => /Solve for x/i.test(step.label) && !step.math), false);
+  });
+
   it("preserves the source expression while removing filler problem-restatement steps", () => {
     const explanation = convertFastSolveToMathExplanation({
       title: "Evaluate Integral",

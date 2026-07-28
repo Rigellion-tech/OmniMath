@@ -106,15 +106,26 @@ function summarizeUsageSettlement({ result = null, error = null, diagnostics = {
         : 0;
   const inputTokens = Number(usage?.input_tokens || usage?.prompt_tokens || 0);
   const outputTokens = Number(usage?.output_tokens || usage?.completion_tokens || 0);
+  const reasoningTokens = Number(
+    usage?.output_tokens_details?.reasoning_tokens
+    || usage?.completion_tokens_details?.reasoning_tokens
+    || usage?.reasoning_tokens
+    || 0
+  );
   const totalTokens = Number(usage?.total_tokens || 0) || inputTokens + outputTokens;
   if (!usage && providerCalls === 0) return null;
   return {
     providerCalls,
     actualInputTokens: Math.max(0, Math.ceil(inputTokens || 0)),
     actualOutputTokens: Math.max(0, Math.ceil(outputTokens || 0)),
+    actualReasoningTokens: Math.max(0, Math.ceil(reasoningTokens || 0)),
     actualTotalTokens: Math.max(0, Math.ceil(totalTokens || 0)),
     settlementReason: error ? "failure" : "unknown",
   };
+}
+
+function firstMathematicalIssue(issues = []) {
+  return issues.find((issue) => !/^(?:unexplained_generated_symbol|strict_generated_latex|missing_final_answer|malformed_set_valued_answer|unsupported_numeric_final_answer_syntax|detached_relation_leading_fragment)/u.test(issue)) || null;
 }
 
 function buildArtifact({
@@ -153,15 +164,17 @@ function buildArtifact({
   ].filter(Boolean);
   const issueCodes = [...new Set(validationIssueCodes)];
   const promotedDiagnostics = {
-    finalAnswerNumericDiagnostic: safeJsonClone(validation.finalAnswerNumericDiagnostic || validationContext.finalAnswerNumericDiagnostic || null),
     numericFinalAnswerAnalysis: safeJsonClone(validation.numericFinalAnswerAnalysis || validationContext.numericFinalAnswerAnalysis || null),
-    symbolOriginDiagnostics: safeJsonClone(validation.symbolOriginDiagnostics || validationContext.symbolOriginDiagnostics || null),
     signAnalysisResult: safeJsonClone(validation.signAnalysisResult || validationContext.signAnalysisResult || null),
     finalAnswerConsistencyResult: safeJsonClone(validation.finalAnswerConsistencyResult || validationContext.finalAnswerConsistencyResult || null),
     identityVerificationResult: safeJsonClone(validation.identityVerificationResult || validationContext.identityVerificationResult || null),
     substitutionConsistencyResult: safeJsonClone(validation.substitutionConsistencyResult || validationContext.substitutionConsistencyResult || null),
     numericalCrossCheckResult: safeJsonClone(validation.numericalCrossCheckResult || validationContext.numericalCrossCheckResult || null),
+    symbolOriginDiagnostics: safeJsonClone(validation.symbolOriginDiagnostics || validationContext.symbolOriginDiagnostics || null),
   };
+  const finalAnswerNumericAnalysis = promotedDiagnostics.numericFinalAnswerAnalysis
+    || promotedDiagnostics.numericalCrossCheckResult?.finalAnswerNumericAnalysis
+    || null;
 
   return safeJsonClone({
     metadata: {
@@ -171,9 +184,13 @@ function buildArtifact({
       failureStage: stage,
       purpose: diagnostics.purpose || validation.purpose || null,
       model: diagnostics.model || validation.model || null,
+      modelRole: diagnostics.modelRole || validation.modelRole || null,
       responseModel: diagnostics.responseModel || null,
       temperature: diagnostics.temperature ?? validation.temperature ?? null,
       top_p: diagnostics.topP ?? diagnostics.top_p ?? validation.top_p ?? null,
+      reasoningEffort: diagnostics.reasoningEffort ?? validation.reasoningEffort ?? null,
+      samplingOmitted: diagnostics.samplingOmitted ?? validation.samplingOmitted ?? null,
+      reasoningOmittedReason: diagnostics.reasoningOmittedReason || validation.reasoningOmittedReason || null,
       promptHash: promptHash || diagnostics.promptHash || null,
       attemptType: diagnostics.attemptType || validation.attemptType || stage || null,
       attempt: diagnostics.attempt ?? null,
@@ -190,6 +207,12 @@ function buildArtifact({
     input: {
       originalReviewedOcrText: input.originalReviewedOcrText || "",
       canonicalNormalizedSolverInput: input.canonicalNormalizedSolverInput || "",
+      canonicalText: input.canonicalText || input.canonicalProblem?.canonicalText || "",
+      canonicalLatex: input.canonicalLatex || input.canonicalProblem?.canonicalLatex || "",
+      canonicalDisplayText: input.canonicalDisplayText || "",
+      canonicalDisplaySource: input.canonicalDisplaySource || "",
+      canonicalMathInput: input.canonicalMathInput || "",
+      canonicalMathInputSource: input.canonicalMathInputSource || "",
       extractionConfidence: input.extractionConfidence ?? null,
       extractionConfidenceTier: input.extractionConfidenceTier || "",
       extractionOcrConfidence: input.extractionOcrConfidence ?? null,
@@ -221,15 +244,19 @@ function buildArtifact({
       firstFailingStepId: validation.firstFailingStepId || validation.earliestFailingStepId || validationContext.firstFailingStepId || null,
       earliestFailingStepId: validation.earliestFailingStepId || validation.firstFailingStepId || validationContext.firstFailingStepId || null,
       relevantStepLatex: validation.relevantStepLatex || validationContext.relevantStepLatex || "",
-      finalAnswerLatex: result?.finalAnswerLatex || result?.finalAnswer || validationContext.finalAnswerNumericDiagnostic?.finalAnswerLatex || "",
-      finalAnswerNumericDiagnostic: promotedDiagnostics.finalAnswerNumericDiagnostic,
+      finalAnswerLatex: result?.finalAnswerLatex || result?.finalAnswer || "",
+      numericParserStatus: finalAnswerNumericAnalysis?.status || null,
+      extractedNumericApproximation: finalAnswerNumericAnalysis?.extractedNumericApproximation ?? null,
+      summationBindingProvenance: (promotedDiagnostics.symbolOriginDiagnostics?.boundSymbolProvenance || [])
+        .filter((binding) => binding.command === "sum"),
+      firstFailedMathematicalRule: firstMathematicalIssue(solutionIssues),
       numericFinalAnswerAnalysis: promotedDiagnostics.numericFinalAnswerAnalysis,
-      symbolOriginDiagnostics: promotedDiagnostics.symbolOriginDiagnostics,
       signAnalysisResult: promotedDiagnostics.signAnalysisResult,
       finalAnswerConsistencyResult: promotedDiagnostics.finalAnswerConsistencyResult,
       identityVerificationResult: promotedDiagnostics.identityVerificationResult,
       substitutionConsistencyResult: promotedDiagnostics.substitutionConsistencyResult,
       numericalCrossCheckResult: promotedDiagnostics.numericalCrossCheckResult,
+      symbolOriginDiagnostics: promotedDiagnostics.symbolOriginDiagnostics,
       repairFeedback: validation.repairFeedback || null,
       issueCodes,
       evidenceExcerpts: validation.repairFeedback?.evidenceExcerpts || [],

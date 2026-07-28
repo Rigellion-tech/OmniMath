@@ -5,6 +5,7 @@ import {
   analyzePositiveIntegralSign,
   analyzeSetValuedAnswer,
   analyzeSubstitutionConsistency,
+  finalValueExpression,
   looksLikeSetValuedAnswer,
   numericalFinalAnswerCheck,
   verifyCriticalIdentities,
@@ -102,11 +103,47 @@ function normalizeFinalAnswerForPresence(value = "") {
     .trim();
 }
 
+function hasBalancedDelimiters(value = "") {
+  const stack = [];
+  const pairs = new Map([["}", "{"], [")", "("], ["]", "["]]);
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\") {
+      const command = value.slice(index).match(/^\\[A-Za-z]+/u);
+      if (command) {
+        index += command[0].length - 1;
+      }
+      continue;
+    }
+    if (char === "{" || char === "(" || char === "[") stack.push(char);
+    else if (char === "}" || char === ")" || char === "]") {
+      if (stack.pop() !== pairs.get(char)) return false;
+    }
+  }
+  return stack.length === 0;
+}
+
+function isClearlyMalformedFinalAnswer(value = "") {
+  const text = safeString(value);
+  if (!hasBalancedDelimiters(text)) return true;
+  if (/\\(?:frac|dfrac|tfrac)\s*\{[^{}]*\}\s*\{\s*\}/u.test(text)) return true;
+  if (/\\?(?:ln|log|sin|cos|tan|cot|sec|arctan|atan)\s*\^\s*(?:\{\s*\}|\(\s*\))/iu.test(text)) return true;
+  if (/\\?(?:ln|log|sin|cos|tan|cot|sec|arctan|atan)\s*\^\s*(?:\{[^{}]*$|\([^()]*$)/iu.test(text)) return true;
+  return false;
+}
+
 function analyzeFinalAnswerPresence(finalAnswer = "") {
   const rawFinalAnswer = typeof finalAnswer === "string" ? finalAnswer : "";
   const normalizedFinalAnswer = normalizeFinalAnswerForPresence(rawFinalAnswer);
+  const evaluableFinalAnswerExpression = finalValueExpression(normalizedFinalAnswer);
   function result(present, detectionReason) {
-    return { present, rawFinalAnswer, normalizedFinalAnswer, detectionReason };
+    return {
+      present,
+      rawFinalAnswer,
+      normalizedFinalAnswer,
+      evaluableFinalAnswerExpression,
+      detectionReason,
+    };
   }
   if (!rawFinalAnswer || !rawFinalAnswer.trim()) return result(false, "empty_or_whitespace");
   if (!normalizedFinalAnswer) return result(false, "only_delimiters_or_spacing");
@@ -120,9 +157,9 @@ function analyzeFinalAnswerPresence(finalAnswer = "") {
     return result(false, "prose_or_placeholder");
   }
   if (looksLikeSetValuedAnswer(normalizedFinalAnswer)) return result(true, "set_valued_answer");
-  const numeric = analyzeNumericExpression(normalizedFinalAnswer);
+  if (isClearlyMalformedFinalAnswer(evaluableFinalAnswerExpression)) return result(false, "malformed_math_syntax");
+  const numeric = analyzeNumericExpression(evaluableFinalAnswerExpression);
   if (numeric.status === "evaluable") return result(true, "evaluable_numeric_expression");
-  if (numeric.status === "malformed" && numeric.numericIntent) return result(false, "malformed_numeric_expression");
   if (/[=<>]|\\(?:frac|dfrac|tfrac)(?![A-Za-z])|\\(?:in|pm|mp|det|lim|to|partial|sqrt|pi|ln|log|sin|cos|tan|cot|sec|exp|int|sum|prod)\b|[A-Za-z]\s*(?:\(|'|\^|_)/u.test(normalizedFinalAnswer)) {
     return result(true, "mathematical_expression_or_equation");
   }
@@ -547,7 +584,7 @@ function findDetachedRelationLeadingFragment(result = {}) {
   for (const fragment of resultMathFragments(result)) {
     if (isAlignedDerivationFragment(fragment.text)) continue;
     const trimmed = fragment.text.trim();
-    if (/^&?\s*(?:=|<|>|≤|≥|≈|\\le|\\ge|\\lt|\\gt|\\approx|\\sim)/u.test(trimmed)) {
+    if (/^&?\s*(?:=|<|>|≤|≥|≈|\\(?:leq?|geq?|lt|gt|approx|sim)(?![A-Za-z]))/u.test(trimmed)) {
       return {
         stepIndex: fragment.stepIndex,
         text: trimmed.slice(0, 80),
@@ -798,9 +835,7 @@ function createValidationContext({
         }
       : null,
     symmetryClaimed,
-    finalAnswerNumericDiagnostic: phase2Diagnostics.finalAnswerNumericDiagnostic || null,
     numericFinalAnswerAnalysis: phase2Diagnostics.numericFinalAnswerAnalysis || null,
-    symbolOriginDiagnostics: phase2Diagnostics.symbolOriginDiagnostics || null,
     finalAnswerPresenceResult: phase2Diagnostics.finalAnswerPresenceResult || null,
     setValuedAnswerAnalysis: phase2Diagnostics.setValuedAnswerAnalysis || null,
     answerTargetConsistencyResult: phase2Diagnostics.answerTargetConsistencyResult || null,
@@ -809,6 +844,7 @@ function createValidationContext({
     identityVerificationResult: phase2Diagnostics.identityVerificationResult || null,
     substitutionConsistencyResult: phase2Diagnostics.substitutionConsistencyResult || null,
     numericalCrossCheckResult: phase2Diagnostics.numericalCrossCheckResult || null,
+    symbolOriginDiagnostics: phase2Diagnostics.symbolOriginDiagnostics || null,
     firstFailingStepId: phase2Diagnostics.firstFailingStepId || null,
     relevantStepLatex: phase2Diagnostics.relevantStepLatex || "",
     resourceLimitResults: phase2Diagnostics.resourceLimitResults || [],
@@ -999,15 +1035,18 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
     newlyIntroducedSymbols: symbolDiagnostics.newlyIntroducedSymbols,
     explicitDefinitions: symbolDiagnostics.explicitDefinitions,
     unexplainedSymbols: symbolDiagnostics.unexplainedSymbols,
+    boundSymbolProvenance: symbolDiagnostics.boundSymbolProvenance,
     fieldReports: symbolDiagnostics.fieldReports.map((field) => ({
       fieldPath: field.fieldPath,
-      sourceKind: field.sourceKind || field.symbolSourceKind || "math",
-      sourceType: field.sourceType || field.symbolSourceType || "",
-      rawText: field.rawText || field.symbolRawText || field.rawValue || "",
-      normalized: field.normalized || field.value || "",
-      mathFragments: field.mathFragments || field.symbolMathFragments || [],
+      sourceType: field.sourceType,
+      value: field.value,
+      fragmentIndex: field.fragmentIndex,
+      fragmentStart: field.fragmentStart,
+      fragmentEnd: field.fragmentEnd,
+      extractionReason: field.extractionReason,
       symbols: field.symbols,
       unexplainedSymbols: field.unexplainedSymbols,
+      boundSymbolProvenance: field.boundSymbolProvenance,
     })),
   };
   for (const fieldReport of symbolDiagnostics.fieldReports) {
@@ -1021,7 +1060,18 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
         inputFields: [fieldReport.fieldPath],
         global: false,
         passed: false,
-        failureEvidence: `${symbol} in ${fieldReport.fieldPath}; sourceKind=${fieldReport.sourceKind || fieldReport.symbolSourceKind || "math"}; sourceType=${fieldReport.sourceType || fieldReport.symbolSourceType || ""}`,
+        failureEvidence: JSON.stringify({
+          symbol,
+          fieldPath: fieldReport.fieldPath,
+          sourceType: fieldReport.sourceType,
+          classification: "undefined_free_symbol",
+          value: fieldReport.value,
+          fragmentIndex: fieldReport.fragmentIndex,
+          fragmentStart: fieldReport.fragmentStart,
+          fragmentEnd: fieldReport.fragmentEnd,
+          extractionReason: fieldReport.extractionReason,
+          localBoundSymbols: (fieldReport.boundSymbolProvenance || []).map((binding) => binding.symbol),
+        }),
       });
     }
   }
@@ -1092,15 +1142,6 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
 
   const numericFinalAnswerAnalysis = analyzeNumericExpression(finalAnswer);
   phase2Diagnostics.numericFinalAnswerAnalysis = numericFinalAnswerAnalysis;
-  phase2Diagnostics.finalAnswerNumericDiagnostic = {
-    finalAnswerLatex: finalAnswer,
-    parsedNumerically: numericFinalAnswerAnalysis.status === "evaluable",
-    status: numericFinalAnswerAnalysis.status,
-    normalized: numericFinalAnswerAnalysis.normalized || "",
-    reason: numericFinalAnswerAnalysis.reason || "",
-    numericIntent: Boolean(numericFinalAnswerAnalysis.numericIntent),
-    value: Number.isFinite(numericFinalAnswerAnalysis.value) ? numericFinalAnswerAnalysis.value : null,
-  };
   if (numericFinalAnswerAnalysis.resourceLimit) {
     addResourceLimitRule(createResourceLimitDiagnostic({
       ...numericFinalAnswerAnalysis.resourceLimit,

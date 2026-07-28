@@ -10,7 +10,19 @@ import { useHover } from "@/lib/HoverContext";
 import { annotateMathExplanation } from "@/lib/mathAnnotator";
 import { classifyProblem, cleanLatexSnippet, getProblemLabel, hasLatexSyntax } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
+import { getSolutionSteps, withNormalizedSolutionSteps } from "@/lib/solutionSteps";
 import { cn } from "@/lib/utils";
+
+const DEBUG_SOLUTION_STATE = import.meta.env.DEV
+  && import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true";
+
+function logSolutionState(event, details = {}) {
+  if (!DEBUG_SOLUTION_STATE) return;
+  console.info("[omnimath:solution-state]", {
+    event,
+    ...details,
+  });
+}
 
 function StepSkeleton() {
   return (
@@ -44,7 +56,21 @@ function statementLineLatex(line) {
 
 function problemStatementLines(problem) {
   const lines = [];
-  const expression = statementLineLatex(problem.originalProblem || problem.problem || problem.problemLatex || problem.expression);
+  const canonicalText = problem.canonicalProblem?.canonicalText || "";
+  const canonicalLatex = problem.canonicalProblem?.canonicalLatex || problem.imageSource?.canonicalProblem?.canonicalLatex || "";
+  const shouldPreviewCanonicalText = canonicalText
+    && !canonicalLatex
+    && !problem.imageSource
+    && !problem.extractedProblemText;
+  const expression = statementLineLatex(
+    canonicalLatex
+    || problem.extractedProblemLatex
+    || problem.problemLatex
+    || (shouldPreviewCanonicalText ? canonicalText : "")
+    || (!problem.imageSource && !problem.extractedProblemText ? problem.originalProblem : "")
+    || (!problem.imageSource && !problem.extractedProblemText ? problem.problem : "")
+    || problem.expression
+  );
   if (expression) {
     lines.push({
       id: "problem-expression",
@@ -74,7 +100,9 @@ function problemStatementLines(problem) {
 
 function getProblemSourceText(problem) {
   return String(
-    problem?.imageSource?.finalProblemText
+    problem?.canonicalProblem?.canonicalText
+    || problem?.imageSource?.canonicalProblem?.canonicalText
+    || problem?.imageSource?.finalProblemText
     || problem?.extractedProblemText
     || problem?.imageSource?.cleanedExtractedText
     || problem?.imageSource?.rawExtractedText
@@ -328,10 +356,10 @@ function ExtractionReview({ problem }) {
 export default function ProblemBlock({ problem: rawProblem, loading = false }) {
   const problem = useMemo(() => {
     try {
-      return annotateMathExplanation(rawProblem || {});
+      return annotateMathExplanation(withNormalizedSolutionSteps(rawProblem || {}));
     } catch (error) {
       console.error("Failed to annotate math explanation:", error, rawProblem);
-      return rawProblem || {};
+      return withNormalizedSolutionSteps(rawProblem || {});
     }
   }, [rawProblem]);
   const [selectedStepId, setSelectedStepId] = useState(problem.steps?.[0]?.id ?? null);
@@ -344,7 +372,16 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
   const {
     clearHoverLens,
   } = useHover();
-  const steps = problem.steps ?? [];
+  const steps = useMemo(() => getSolutionSteps(problem), [problem]);
+  useEffect(() => {
+    logSolutionState("ProblemBlock props", {
+      problemId: problem.id,
+      sessionId: problem.sessionId,
+      propStepCount: getSolutionSteps(rawProblem || {}).length,
+      renderedStepCount: steps.length,
+      loading,
+    });
+  }, [loading, problem.id, problem.sessionId, rawProblem, steps.length]);
   const selectedIndex = Math.max(0, steps.findIndex((step) => step.id === selectedStepId));
   const selectedStep = steps[selectedIndex] || steps[0] || null;
   const problemLines = useMemo(() => problemStatementLines(problem), [problem]);
@@ -355,11 +392,11 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
     : problem.description;
 
   useEffect(() => {
-    const firstStepId = problem.steps?.[0]?.id ?? null;
+    const firstStepId = steps[0]?.id ?? null;
     setSelectedStepId(firstStepId);
     setExpandedStepIds(firstStepId ? { [firstStepId]: true } : {});
     setWorkspaceMode("board");
-  }, [problem]);
+  }, [steps]);
 
   const selectStep = (stepId) => {
     setSelectedStepId(stepId);

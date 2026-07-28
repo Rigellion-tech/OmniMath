@@ -97,7 +97,14 @@ describe("mathAnnotator", () => {
 
     assert.equal(normalizeMathText("\\text{and } V"), "\\text{and } V");
     assert.equal(normalizeMathText("\\text{ is the solid region inside }"), "\\text{ is the solid region inside }");
-    assert.equal(normalizeMathText(malformed), "\\text{and } V\\text{ is the solid region inside } z=9");
+    assert.equal(normalizeMathText("\\text{Let } C \\text{ be}"), "\\text{Let } C \\text{ be}");
+    assert.equal(normalizeMathText("\\text{where } S"), "\\text{where } S");
+    assert.equal(normalizeMathText("\\text{ expressed as }"), "\\text{ expressed as }");
+    assert.equal(
+      normalizeMathText("\\quad \\text{Non-symmetric terms vanish by symmetry.}"),
+      "\\quad \\text{Non-symmetric terms vanish by symmetry.}"
+    );
+    assert.equal(normalizeMathText(malformed), "\\text{and } V \\text{ is the solid region inside } z=9");
     assert.equal(renderMathLatex("z = 9 - x^2 - y^2"), "z=9-x^{2}-y^{2}");
     assert.equal(renderMathLatex("x^2 \\cosz"), "x^{2}\\cos z");
     assert.equal(renderMathLatex(malformed).includes("\\z"), false);

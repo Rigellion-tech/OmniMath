@@ -26,6 +26,8 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       VITE_DISABLE_AUTH: "true",
+      VITE_SEMANTIC_MATH_AST: "true",
+      VITE_DEBUG_MATH_HOVER: process.env.VITE_DEBUG_MATH_HOVER || "0",
       DEV_API_TARGET: "http://127.0.0.1:65535",
     },
   },

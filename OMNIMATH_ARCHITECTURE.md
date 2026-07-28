@@ -476,19 +476,13 @@ Local ports:
 
 ## 12. Environment Variables
 
-See `.env.example` for the current list.
+See `.env.example` for the maintained configuration template. The app supports role-specific model overrides, local-only debug flags, Clerk auth configuration, optional Postgres persistence, and a production usage-counter store.
 
-Most important variables:
+Most important production variables:
 
 ```text
 OPENAI_API_KEY
   Server-only OpenAI key. If missing, live AI solve requests are unavailable.
-
-OPENAI_MODEL
-  Optional model override.
-
-OPENAI_MAX_OUTPUT_TOKENS
-  Hard cap for AI response size.
 
 VITE_CLERK_PUBLISHABLE_KEY
   Browser-safe Clerk publishable key.
@@ -524,6 +518,8 @@ USAGE_KV_REST_API_TOKEN
 USAGE_IDENTITY_HMAC_SECRET
   Secret used for usage identity hashing/signing.
 ```
+
+Optional model, token, timeout, debug, and local development variables are documented in `.env.example`. Keep `OMNIMATH_CAPTURE_FAILED_SOLVES` unset or `0` outside explicit secure diagnostics work; when enabled locally it writes ignored JSON artifacts under `logs/failed-solves/`.
 
 Never expose server secrets to frontend code. In Vite, only variables prefixed with `VITE_` are available in the browser.
 

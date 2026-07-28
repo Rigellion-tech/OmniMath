@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
-import { createLatexValidationResult, createMathNode, mathNodeToLatex, normalizeLatexTransport, safeMathString, traceMathStage } from "@/lib/mathNode";
+import { splitEquationChainLatex } from "@/lib/equationChains";
+import { createMathNode, mathNodeToLatex, normalizeLatexTransport, safeMathString, traceMathStage } from "@/lib/mathNode";
+import { createSemanticKatexTrust, serializeSemanticTreeToLatex } from "@/lib/semanticMathRenderer";
 
 const LATEX_COMMAND_PATTERN = /\\(?:iiint|iint|int|nabla|cdot|times|mathbf|frac|left|right|sqrt|sum|lim|sin|cos|tan|ln|log|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/;
 const MATH_SYMBOL_PATTERN = /[=<>^_+\-*/]|\d\s*[a-zA-Z]|[a-zA-Z]\s*\(|\b(?:dV|dx|dy|dz)\b/;
+const MALFORMED_COMMAND_REMNANT_PATTERN = /(?:^|[^\\A-Za-z])\{?\s*(?:frac|sqrt|int|iint|iiint|oint|sin|cos|tan|ln|log|pi|delta)\s*\}?(?=$|[^A-Za-z])/iu;
 const PROBLEM_PREAMBLE_PATTERN = /^(?:start\s+with\s+(?:the\s+)?problem|write\s+down\s+the\s+(?:integral|problem)(?:\s+and\s+vector\s+field)?|evaluate|compute|calculate|find|solve|determine)\s*:?\s*/i;
 const PROSE_BOUNDARY_PATTERNS = [
   /\\text\{\s*where\s*\}/i,
@@ -20,14 +23,13 @@ export function normalizeMathRendererInput(value = "") {
 
 export function sanitizeLatex(input = "") {
   const node = createMathNode(input, { stage: "frontend-renderer-sanitize" });
-  const validation = createLatexValidationResult(node.latex);
   traceMathStage(
     "KaTeX rendering",
     input,
-    validation.output,
-    validation.repaired ? `pre-KaTeX repair: ${validation.issues.join(",") || "clean"}` : node.normalization
+    node.latex,
+    node.normalization
   );
-  return validation.output;
+  return node.latex;
 }
 
 export function sanitizeKatexInput(input = "") {
@@ -125,19 +127,124 @@ function pushProseBlock(blocks, text, idHint) {
   });
 }
 
+function pushEquationChainBlocks(blocks, source, idHint) {
+  const segments = splitEquationChainLatex(source);
+  if (segments.length <= 1) return false;
+  segments.forEach((segment, index) => {
+    if (index > 0) {
+      blocks.push({
+        type: "separator",
+        idHint: `${idHint}-arrow-${index}`,
+        text: "\\Rightarrow",
+      });
+    }
+    pushMathBlock(blocks, segment, `${idHint}-${index + 1}`);
+  });
+  return true;
+}
+
+function readBracedGroup(text, startIndex) {
+  if (text[startIndex] !== "{") return null;
+  let depth = 0;
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "{") depth += 1;
+    else if (char === "}") depth -= 1;
+    if (depth === 0) {
+      return {
+        value: text.slice(startIndex + 1, index),
+        end: index + 1,
+      };
+    }
+  }
+  return null;
+}
+
+function trimAlternativeMathSegment(value = "") {
+  let text = String(value || "").trim();
+  let previous = "";
+  while (text && text !== previous) {
+    previous = text;
+    text = text
+      .replace(/^(?:\\qquad|\\quad|\\[,;!]|~|\s)+/u, "")
+      .replace(/(?:\\qquad|\\quad|\\[,;!]|~|\s)+$/u, "")
+      .trim();
+  }
+  return text;
+}
+
+function separatorLabelFromTextCommand(value = "") {
+  const label = cleanProse(value).toLowerCase();
+  return /^(?:or|and)$/.test(label) ? label : "";
+}
+
+function splitTopLevelTextAlternatives(source = "") {
+  const text = String(source || "");
+  const blocks = [];
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let start = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (braceDepth === 0 && parenDepth === 0) {
+      const command = text.startsWith("\\text", index)
+        ? "\\text"
+        : text.startsWith("\\mathrm", index)
+          ? "\\mathrm"
+          : "";
+      if (command) {
+        const group = readBracedGroup(text, index + command.length);
+        const separatorText = group ? separatorLabelFromTextCommand(group.value) : "";
+        if (separatorText) {
+          const math = trimAlternativeMathSegment(text.slice(start, index));
+          if (math) pushMathBlock(blocks, math, `alternative-${blocks.length + 1}`);
+          blocks.push({
+            type: "separator",
+            idHint: `alternative-separator-${blocks.length + 1}`,
+            text: separatorText,
+          });
+          index = group.end - 1;
+          start = group.end;
+          continue;
+        }
+      }
+    }
+
+    const char = text[index];
+    if (char === "{") braceDepth += 1;
+    else if (char === "}") braceDepth -= 1;
+    else if (char === "(") parenDepth += 1;
+    else if (char === ")") parenDepth -= 1;
+  }
+
+  if (blocks.length === 0) return [];
+  const tail = trimAlternativeMathSegment(text.slice(start));
+  if (tail) pushMathBlock(blocks, tail, `alternative-${blocks.length + 1}`);
+  return blocks.filter((block, index, all) => (
+    block.type !== "separator"
+    || (all[index - 1]?.type === "math" && all[index + 1]?.type === "math")
+  ));
+}
+
 export function splitLatexRenderBlocks(value = "") {
   const source = normalizeMathRendererInput(value).replace(PROBLEM_PREAMBLE_PATTERN, "").trim();
   if (!source) return [];
 
   const boundary = findFirstProseBoundary(source);
   if (!boundary && !(source.length > 160 && /\\text\{/.test(source))) {
+    const alternativeBlocks = splitTopLevelTextAlternatives(source);
+    if (alternativeBlocks.length > 1) return alternativeBlocks;
+    const chainBlocks = [];
+    if (pushEquationChainBlocks(chainBlocks, source, "chain")) return chainBlocks;
     const node = createMathNode(source, { idHint: "math" });
     return [{ type: "math", idHint: "math", latex: node.latex, mathNode: node }];
   }
 
   const blocks = [];
   const firstMath = boundary ? source.slice(0, boundary.index).trim() : source;
-  if (firstMath) pushMathBlock(blocks, firstMath, "primary");
+  if (firstMath && !pushEquationChainBlocks(blocks, firstMath, "primary")) {
+    pushMathBlock(blocks, firstMath, "primary");
+  }
 
   let tail = boundary ? stripLeadingBoundary(source.slice(boundary.index + boundary.match[0].length)) : "";
   tail = tail
@@ -196,7 +303,20 @@ export function MathRenderShell({
 }
 
 function logMathRender(details) {
-  console.info("[omnimath:math-render]", details);
+  if (
+    import.meta.env.DEV
+    && (
+      import.meta.env.VITE_DEBUG_MATH_RENDER === "true"
+      || import.meta.env.VITE_DEBUG_MATH_HOVER === "true"
+      || import.meta.env.VITE_DEBUG_MATH_HOVER === "1"
+    )
+  ) {
+    console.info("[omnimath:math-render]", details);
+  }
+}
+
+function hasMalformedCommandRemnant(value = "") {
+  return MALFORMED_COMMAND_REMNANT_PATTERN.test(normalizeMathRendererInput(value));
 }
 
 export default function MathRenderer({
@@ -206,6 +326,8 @@ export default function MathRenderer({
   fallbackText = "",
   componentName = "MathRenderer",
   forceMath = true,
+  semanticTree = null,
+  interactive = false,
 }) {
   const hostRef = useRef(null);
   const rawMath = safeMathString(math);
@@ -213,9 +335,46 @@ export default function MathRenderer({
   const normalizedMath = useMemo(() => normalizeMathRendererInput(rawMath), [rawMath]);
   const sanitizedMath = useMemo(() => sanitizeLatex(normalizedMath), [normalizedMath]);
   const shouldRenderKatex = forceMath || looksLikeMathExpression(normalizedMath);
+  const semanticRender = useMemo(() => {
+    if (!interactive || !semanticTree) return null;
+    const rendered = serializeSemanticTreeToLatex(semanticTree);
+    if (rendered.annotatedNodeCount > 0 && rendered.latex) {
+      try {
+        katex.renderToString(rendered.latex, {
+          throwOnError: true,
+          strict: /** @type {const} */ ("ignore"),
+          displayMode,
+          trust: createSemanticKatexTrust(),
+        });
+        return rendered;
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.warn("[omnimath:semantic-render-fallback]", {
+            componentName,
+            reason: error?.message || "invalid-semantic-latex",
+            canonicalNodeCount: rendered.canonicalTree?.flatNodes?.length || 0,
+          });
+        }
+        return null;
+      }
+    }
+    if (import.meta.env.DEV) {
+      console.warn("[omnimath:semantic-render-fallback]", {
+        componentName,
+        reason: rendered.error || "no-semantic-annotations",
+        canonicalNodeCount: rendered.canonicalTree?.flatNodes?.length || 0,
+        invalidRangeDiagnostics: rendered.diagnostics || rendered.rangeValidation?.errors || [],
+      });
+    }
+    return null;
+  }, [componentName, displayMode, interactive, semanticTree]);
+  const semanticKatexTrust = useMemo(
+    () => (semanticRender ? createSemanticKatexTrust() : undefined),
+    [semanticRender]
+  );
   const renderMath = useMemo(
-    () => (shouldRenderKatex ? sanitizeKatexInput(sanitizedMath) : sanitizedMath),
-    [sanitizedMath, shouldRenderKatex]
+    () => (semanticRender?.latex || (shouldRenderKatex ? sanitizeKatexInput(sanitizedMath) : sanitizedMath)),
+    [sanitizedMath, semanticRender, shouldRenderKatex]
   );
   const [renderError, setRenderError] = useState("");
 
@@ -233,6 +392,8 @@ export default function MathRenderer({
       katexInput: renderMath,
       sentToKatex: shouldRenderKatex,
       displayMode,
+      interactive,
+      semanticAnnotatedNodeCount: semanticRender?.annotatedNodeCount || 0,
     });
 
     if (!shouldRenderKatex) {
@@ -240,21 +401,61 @@ export default function MathRenderer({
       return undefined;
     }
 
-    console.debug("[omnimath:katex-input]", renderMath);
+    if (
+      import.meta.env.DEV
+      && (
+        import.meta.env.VITE_DEBUG_MATH_RENDER === "true"
+        || import.meta.env.VITE_DEBUG_MATH_HOVER === "true"
+        || import.meta.env.VITE_DEBUG_MATH_HOVER === "1"
+      )
+    ) {
+      console.debug("[omnimath:katex-input]", renderMath);
+    }
+
+    const malformedInput = hasMalformedCommandRemnant(rawMath) || hasMalformedCommandRemnant(sanitizedMath);
 
     try {
+      if (malformedInput) {
+        throw new Error("Malformed generated LaTeX command remnant.");
+      }
+      const katexOptions = {
+        throwOnError: true,
+        strict: /** @type {const} */ ("ignore"),
+        displayMode,
+        ...(semanticKatexTrust ? { trust: semanticKatexTrust } : {}),
+      };
       katex.renderToString(renderMath, {
-        throwOnError: true,
-        strict: "ignore",
-        displayMode,
+        ...katexOptions,
       });
-      katex.render(renderMath, host, {
-        throwOnError: true,
-        strict: "ignore",
-        displayMode,
-      });
+      katex.render(renderMath, host, katexOptions);
       host.removeAttribute("data-math-fallback");
+      host.removeAttribute("data-semantic-render-fallback");
     } catch (error) {
+      if (semanticRender && shouldRenderKatex && !malformedInput) {
+        const plainMath = sanitizeKatexInput(sanitizedMath);
+        try {
+          katex.render(plainMath, host, {
+            throwOnError: true,
+            strict: "ignore",
+            displayMode,
+          });
+          host.removeAttribute("data-math-fallback");
+          host.setAttribute("data-semantic-render-fallback", "plain-katex");
+          if (import.meta.env.DEV) {
+            console.warn("[omnimath:semantic-render-plain-fallback]", {
+              componentName,
+              semanticAnnotatedNodeCount: semanticRender.annotatedNodeCount,
+              semanticError: error?.message || "Unknown KaTeX error",
+              plainKatexInput: plainMath,
+            });
+          }
+          return () => {
+            host.replaceChildren();
+          };
+        } catch {
+          host.removeAttribute("data-semantic-render-fallback");
+        }
+      }
       const message = error?.message || "Unknown KaTeX error";
       setRenderError(message);
       host.textContent = "";
@@ -267,6 +468,8 @@ export default function MathRenderer({
         sanitizedEquation: sanitizedMath,
         katexInput: renderMath,
         displayMode,
+        interactive,
+        semanticAnnotatedNodeCount: semanticRender?.annotatedNodeCount || 0,
         message,
         error,
       });
@@ -275,7 +478,7 @@ export default function MathRenderer({
     return () => {
       host.replaceChildren();
     };
-  }, [componentName, displayMode, fallback, normalizedMath, rawMath, renderMath, sanitizedMath, shouldRenderKatex]);
+  }, [componentName, displayMode, fallback, interactive, normalizedMath, rawMath, renderMath, sanitizedMath, semanticKatexTrust, semanticRender, shouldRenderKatex]);
 
   const Tag = displayMode ? "div" : "span";
 

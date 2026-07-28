@@ -93,6 +93,29 @@ export function getCanonicalSolverInput(payload = {}, fallback = "") {
   return normalizeText(payload.canonicalText || payload.problem || fallback);
 }
 
+export function getCanonicalDisplayText(payload = {}, fallback = "") {
+  return normalizeText(payload.canonicalText || payload.problem || fallback);
+}
+
+export function getCanonicalMathInput(payload = {}, fallback = "") {
+  return normalizeText(payload.canonicalLatex || payload.canonicalText || payload.problem || fallback);
+}
+
+export function getCanonicalDisplayTextSource(payload = {}, fallback = "") {
+  if (normalizeText(payload.canonicalText)) return "canonicalText";
+  if (normalizeText(payload.problem)) return "problem";
+  if (normalizeText(fallback)) return "fallback";
+  return "empty";
+}
+
+export function getCanonicalMathInputSource(payload = {}, fallback = "") {
+  if (normalizeText(payload.canonicalLatex)) return "canonicalLatex";
+  if (normalizeText(payload.canonicalText)) return "canonicalText";
+  if (normalizeText(payload.problem)) return "problem";
+  if (normalizeText(fallback)) return "fallback";
+  return "empty";
+}
+
 export function diffCanonicalProblemPayloads(left = {}, right = {}) {
   const keys = ["canonicalText", "canonicalLatex", "source", "extractionWarnings", "extractionConfidence"];
   return keys

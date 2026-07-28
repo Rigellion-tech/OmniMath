@@ -3,6 +3,31 @@ import { Columns2, Loader2, Sparkles } from "lucide-react";
 import InlineMath from "./InlineMath";
 import { compareMethods } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
+import { createCanonicalProblemPayload, logCanonicalProblem } from "@/lib/canonicalProblem";
+
+function compactAnswer(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\\boxed|\\left|\\right/g, "")
+    .replace(/[{}$\\,\s]/g, "")
+    .trim();
+}
+
+function methodText(method = {}) {
+  return [method.summary, ...(Array.isArray(method.points) ? method.points : [])].filter(Boolean).join(" ");
+}
+
+function methodsDisagreeWithFinal(methods = [], finalAnswer = "") {
+  const final = compactAnswer(finalAnswer);
+  if (!final) return false;
+  return methods.some((method) => {
+    const text = methodText(method);
+    const answerMatch = text.match(/(?:final answer|answer|equals|=)\s*[:=]?\s*([^.;\n]+)/i);
+    if (!answerMatch) return false;
+    const candidate = compactAnswer(answerMatch[1]);
+    return candidate && candidate.length <= 80 && candidate !== final && !candidate.includes(final) && !final.includes(candidate);
+  });
+}
 
 function AlternativeMethod({ problem }) {
   const method = Array.isArray(problem?.alternativeMethods)
@@ -32,7 +57,7 @@ function AlternativeMethod({ problem }) {
 
 export default function WorkspaceCompareView({ problem, selectedStep }) {
   const { getToken } = useAuthToken();
-  const [state, setState] = useState({ loading: false, error: "", methods: null });
+  const [state, setState] = useState({ loading: false, error: "", warning: "", methods: null });
   const alternative = state.methods?.[0]
     ? {
         title: state.methods[0].title,
@@ -45,11 +70,20 @@ export default function WorkspaceCompareView({ problem, selectedStep }) {
 
   useEffect(() => {
     let cancelled = false;
-    setState({ loading: true, error: "", methods: null });
+    setState({ loading: true, error: "", warning: "", methods: null });
+    const canonicalProblem = problem?.canonicalProblem || problem?.imageSource?.canonicalProblem || createCanonicalProblemPayload({
+      canonicalText: problem?.originalProblem || problem?.problem || problem?.expression || "",
+      canonicalLatex: problem?.problemLatex || "",
+      source: problem?.imageSource ? "ocr-reviewed" : "typed",
+      extractionWarnings: problem?.extractionValidation?.issues || [],
+      extractionConfidence: problem?.extractionValidation?.confidence,
+    });
+    logCanonicalProblem("compare request", canonicalProblem, { path: "WorkspaceCompareView" });
     compareMethods({
       getToken,
       payload: {
-        problemLatex: problem?.expression || problem?.problem || problem?.originalProblem || "",
+        problemLatex: canonicalProblem.canonicalText,
+        canonicalProblem,
         finalAnswerLatex: problem?.finalAnswerLatex || problem?.finalAnswer || "",
         steps: (problem?.steps || []).map((step) => ({
           heading: step.label || step.title || "",
@@ -59,11 +93,27 @@ export default function WorkspaceCompareView({ problem, selectedStep }) {
     })
       .then((data) => {
         if (cancelled) return;
-        setState({ loading: false, error: "", methods: data.methods || [] });
+        if (data.canonicalInputHash && data.canonicalInputHash !== canonicalProblem.hash) {
+          console.warn("[omnimath:canonical-problem]", {
+            event: "hash divergence",
+            path: "WorkspaceCompareView.compareMethods",
+            expectedHash: canonicalProblem.hash,
+            receivedHash: data.canonicalInputHash,
+          });
+        }
+        const methods = data.methods || [];
+        setState({
+          loading: false,
+          error: "",
+          warning: methodsDisagreeWithFinal(methods, problem?.finalAnswerLatex || problem?.finalAnswer || "")
+            ? "Methods disagree. Review extraction or solution."
+            : "",
+          methods,
+        });
       })
       .catch((error) => {
         if (cancelled) return;
-        setState({ loading: false, error: error.message || "Could not load compare methods.", methods: null });
+        setState({ loading: false, error: error.message || "Could not load compare methods.", warning: "", methods: null });
       });
 
     return () => {
@@ -108,12 +158,18 @@ export default function WorkspaceCompareView({ problem, selectedStep }) {
             <Loader2 className="h-4 w-4 animate-spin text-teal-100/75" />
             Loading compare methods...
           </div>
-        ) : state.error ? (
-          <p className="mt-3 rounded-xl border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-sm leading-6 text-rose-100/82">
-            {state.error}
-          </p>
         ) : (
           <>
+            {state.error && (
+              <p className="mt-3 rounded-xl border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-sm leading-6 text-rose-100/82">
+                {state.error}
+              </p>
+            )}
+            {state.warning && (
+              <p className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm leading-6 text-amber-50/86">
+                {state.warning}
+              </p>
+            )}
             <h3 className="text-base font-semibold text-cyan-50">{alternative.title}</h3>
             <div className="mt-3 space-y-2">
               {alternative.points.map((point) => (

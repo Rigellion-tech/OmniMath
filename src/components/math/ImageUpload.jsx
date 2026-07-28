@@ -2,6 +2,7 @@ import React, { useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, FileText, ImagePlus, Loader2, Pencil, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
 import { buildExtractionSubmissionPayload, extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
+import { canonicalProblemFromExtraction, logCanonicalProblem } from "@/lib/canonicalProblem";
 import { cn } from "@/lib/utils";
 import {
   analyzeImageQuality,
@@ -365,6 +366,7 @@ export default function ImageUpload({
   onGenerationError,
   onExtractionReview,
   onUsageUpdate,
+  onReviewedProblemSubmitted,
 }) {
   const [preview, setPreview] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -453,21 +455,29 @@ export default function ImageUpload({
 
       onUsageUpdate?.(result.usage);
       extractionSucceeded = true;
-      setExtraction(result);
+      const canonicalProblem = canonicalProblemFromExtraction({
+        extraction: result,
+        canonicalText: result.extractedProblemText || result.rawExtractedText || "",
+        source: result.confidenceTier === "high" && !result.extractionValidation?.critical ? "ocr-direct" : "ocr-reviewed",
+      });
+      logCanonicalProblem("OCR extraction", canonicalProblem, { path: "ImageUpload.handleSubmit" });
+      setExtraction({ ...result, canonicalProblem });
       setEditedText(result.extractedProblemText || result.rawExtractedText || "");
 
       if (result.confidenceTier === "high" && !result.extractionValidation?.critical) {
         const payload = buildExtractionSubmissionPayload({
-          extraction: result,
+          extraction: { ...result, canonicalProblem },
           displayText: result.extractedProblemText || result.rawExtractedText || "",
           rawText: result.rawExtractedText || result.rawOcrText || result.extractedProblemText || "",
           solveDecision: "direct",
+          source: "ocr-direct",
         });
+        const requestSessionId = onReviewedProblemSubmitted?.(payload);
         const solved = await solveExtractedProblem({
           ...payload,
           getToken,
         });
-        onProblemGenerated(solved);
+        onProblemGenerated({ ...solved, _requestSessionId: requestSessionId });
         resetSelection();
         return;
       }
@@ -482,9 +492,13 @@ export default function ImageUpload({
         status: error.status,
         code: error.body?.code,
         usage: error.body?.usage,
+        solutionIssues: error.body?.solutionIssues,
+        retryable: error.body?.retryable,
       });
       if (extractionSucceeded && error.body?.code === "AI_SERVICE_UNAVAILABLE") {
         setSolveError("AI service timed out or connection dropped. Try again.");
+      } else if (extractionSucceeded && error.body?.code === "AI_SOLUTION_QUALITY_INVALID") {
+        setSolveError("The generated solution failed mathematical validation. Retry from the reviewed text.");
       }
       setSubmitting(false);
     }
@@ -504,12 +518,14 @@ export default function ImageUpload({
         displayText: decision === "anyway" ? rawText : editedText,
         rawText: extraction.rawExtractedText || extraction.rawOcrText || rawText,
         solveDecision: decision === "anyway" ? "anyway" : edited ? "edited" : "direct",
+        source: "ocr-reviewed",
       });
+      const requestSessionId = onReviewedProblemSubmitted?.(payload);
       const solved = await solveExtractedProblem({
         ...payload,
         getToken,
       });
-      onProblemGenerated(solved);
+      onProblemGenerated({ ...solved, _requestSessionId: requestSessionId });
       resetSelection();
     } catch (error) {
       console.error("Confirmed image problem solve failed:", error);
@@ -519,9 +535,13 @@ export default function ImageUpload({
         status: error.status,
         code: error.body?.code,
         usage: error.body?.usage,
+        solutionIssues: error.body?.solutionIssues,
+        retryable: error.body?.retryable,
       });
       if (error.body?.code === "AI_SERVICE_UNAVAILABLE") {
         setSolveError("AI service timed out or connection dropped. Try again.");
+      } else if (error.body?.code === "AI_SOLUTION_QUALITY_INVALID") {
+        setSolveError("The generated solution failed mathematical validation. Retry from the reviewed text.");
       }
       setSubmitting(false);
     }

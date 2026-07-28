@@ -49,6 +49,9 @@ export async function query(text, params = []) {
       statusCode: 503,
       code: "DATABASE_UNAVAILABLE",
       publicMessage: "User data storage is temporarily unavailable.",
+      cause: error,
+      pgCode: error.code,
+      relation: error.table || error.relation,
     });
   }
 }

@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  buildRepairSolvePrompt,
-  categorizeRepairIssues,
-  compareRepairCandidateStrength,
-} from "../server/app.js";
+import { buildFreshEscalationSolvePrompt, buildRepairSolvePrompt, categorizeRepairIssues } from "../server/app.js";
 
 function qualityError({ rule = "unsupported_integration_by_parts_setup", evidence = "" } = {}) {
   return {
@@ -20,7 +16,8 @@ function qualityError({ rule = "unsupported_integration_by_parts_setup", evidenc
 }
 
 test("unsupported integration-by-parts repair prompt includes targeted guidance and evidence", () => {
-  const prompt = buildRepairSolvePrompt("Original solve prompt", ["unsupported_integration_by_parts_setup"], {
+  const originalPrompt = "Original solve prompt with Stokes theorem, Green theorem, paraboloid, ellipse, and perfect-square examples.";
+  const prompt = buildRepairSolvePrompt(originalPrompt, ["unsupported_integration_by_parts_setup"], {
     problem: "Evaluate the integral.",
     previousResult: {
       finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
@@ -35,8 +32,8 @@ test("unsupported integration-by-parts repair prompt includes targeted guidance 
     }),
   });
 
-  assert.match(prompt, /Quality repair context/);
-  assert.match(prompt, /Original problem:/);
+  assert.match(prompt, /Repair task/);
+  assert.match(prompt, /Canonical problem:/);
   assert.match(prompt, /Previous invalid solution:/);
   assert.match(prompt, /Failed validation rules:/);
   assert.match(prompt, /Exact failure evidence:/);
@@ -46,6 +43,57 @@ test("unsupported integration-by-parts repair prompt includes targeted guidance 
   assert.match(prompt, /Verify v by differentiating it/);
   assert.match(prompt, /Do not leave v as an unevaluated integral/);
   assert.match(prompt, /If dv has no usable closed form, abandon that integration-by-parts choice/);
+  assert.match(prompt, /Do NOT preserve the previous derivation/);
+  assert.match(prompt, /Assume the previous derivation is mathematically unreliable/);
+  assert.match(prompt, /Reconstruct the solution from scratch/);
+  assert.match(prompt, /avoid integration by parts unless every part is fully justified/);
+  assert.match(prompt, /Do not repeat the previous method/);
+  assert.doesNotMatch(prompt, /Original solve prompt/);
+  assert.doesNotMatch(prompt, /Stokes theorem|Green theorem|paraboloid|ellipse|perfect-square/i);
+});
+
+test("fresh escalation prompt avoids full contaminated derivation", () => {
+  const prompt = buildFreshEscalationSolvePrompt({
+    problem: "\\int_0^\\infty f(x)\\,dx",
+    canonicalLatex: "\\int_0^\\infty f(x)\\,dx",
+    canonicalText: "Evaluate the improper integral.",
+    issues: ["numerical_final_answer_mismatch"],
+    previousResult: {
+      finalAnswerLatex: "\\frac{\\pi}{2}G",
+      steps: Array.from({ length: 6 }, (_, index) => ({
+        latex: `bad_step_${index}=G`,
+        reasoning: "Contaminated derivation text that should not be copied wholesale.",
+      })),
+    },
+    error: {
+      solutionIssues: ["numerical_final_answer_mismatch"],
+      solutionValidationContext: {
+        firstFailingStepId: "s7",
+        relevantStepLatex: "I\\approx 0",
+        numericalCrossCheckResult: {
+          numericalEstimate: 0.7546930417050932,
+          proposedValue: 0,
+          absoluteDifference: 0.7546930417050932,
+          tolerance: 0.0003018772166820373,
+        },
+      },
+      solutionRuleEvaluations: [{
+        issue: "numerical_final_answer_mismatch",
+        result: "fail",
+        failureEvidence: "estimate=0.7546930417050932 proposed=0",
+      }],
+    },
+  });
+
+  assert.match(prompt, /Fresh escalation task/);
+  assert.match(prompt, /Solve the canonical original problem from scratch/);
+  assert.match(prompt, /validation constraint, not as a derivation/);
+  assert.match(prompt, /numerical_final_answer_mismatch/);
+  assert.match(prompt, /0\.7546930417050932/);
+  assert.match(prompt, /Previous final answer to avoid repeating without proof: \\frac\{\\pi\}\{2\}G/);
+  assert.doesNotMatch(prompt, /bad_step_0/);
+  assert.doesNotMatch(prompt, /bad_step_5/);
+  assert.doesNotMatch(prompt, /Previous invalid solution:/);
 });
 
 test("repair prompt caps and sanitizes failure evidence", () => {
@@ -91,7 +139,7 @@ test("mathematical validation failures receive exact restart-and-verify repair g
           name: "numerical_final_answer_cross_check",
           issue: "numerical_final_answer_mismatch",
           result: "fail",
-          failureEvidence: "estimate=0.5; proposed=2",
+          failureEvidence: "estimate=0.5; proposed=2; absDiff=1.5; tolerance=0.0001",
         },
         {
           validatorName: "critical_identity_verification",
@@ -106,12 +154,17 @@ test("mathematical validation failures receive exact restart-and-verify repair g
 
   assert.match(prompt, /numerical_final_answer_mismatch/);
   assert.match(prompt, /invalid_antiderivative/);
-  assert.match(prompt, /estimate=0\.5; proposed=2/);
+  assert.match(prompt, /estimate=0\.5; proposed=2; absDiff=1\.5; tolerance=0\.0001/);
+  assert.match(prompt, /The previous final answer is numerically inconsistent/);
+  assert.match(prompt, /independent numerical estimate: 0\.5/);
+  assert.match(prompt, /proposed model value: 2/);
+  assert.match(prompt, /absolute difference: 1\.5/);
+  assert.match(prompt, /allowed tolerance: 0\.0001/);
   assert.match(prompt, /derivative does not match integrand/);
   assert.match(prompt, /Rebuild the derivation from the earliest suspect step/);
   assert.match(prompt, /do not change only finalAnswerLatex/);
   assert.match(prompt, /Do not preserve the invalid antiderivative or identity/);
-  assert.match(prompt, /rebuild the derivation from the earliest failing step/i);
+  assert.match(prompt, /Reconstruct the solution from scratch/);
   assert.match(prompt, /Verify substitutions, derivatives, signs, and special-function simplifications/);
   assert.match(prompt, /Keep finalAnswerLatex structurally valid/);
 });
@@ -167,12 +220,11 @@ test("structural repair prompt preserves the previous derivation and final answe
   assert.match(prompt, /\\frac\{\\pi\}\{2\}\\ln\^2 2/);
   assert.match(prompt, /0\.7546938294602481/);
   assert.match(prompt, /Undefined generated symbols detected:\n- \\theta/);
-  assert.doesNotMatch(prompt, /Quality repair context/);
   assert.doesNotMatch(prompt, /Reconstruct the solution from scratch/);
   assert.doesNotMatch(prompt, /Assume the previous derivation is mathematically unreliable/);
 });
 
-test("unexplained generated symbols receive binding-specific structural repair guidance", () => {
+test("unexplained generated symbols receive binding-specific repair guidance", () => {
   const prompt = buildRepairSolvePrompt("Original solve prompt", [
     "unexplained_generated_symbol:\\theta",
     "unexplained_generated_symbol:B",
@@ -230,116 +282,89 @@ test("unexplained generated symbols receive binding-specific structural repair g
   assert.match(prompt, /\\sum_\{j\\in J\} a_j/);
   assert.match(prompt, /\\int_D f\(u\)\\,du/);
   assert.match(prompt, /using v before defining it/);
+  assert.match(prompt, /"let K be the constant" only in prose/);
+  assert.match(prompt, /using \\sum_j without a clear bound/);
+  assert.match(prompt, /switching between u and v/);
+  assert.match(prompt, /Return only valid JSON matching the requested schema/);
+  assert.doesNotMatch(prompt, /Stokes|Green|curl|vector calculus|paraboloid|ellipse|Jacobian|perfect-square|quadratics/i);
   assert.doesNotMatch(prompt, /Reconstruct the solution from scratch/);
 });
 
-test("candidate comparison preserves numerically validated initial candidate over weaker repair", () => {
-  const problem = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
-  const initialCandidate = {
-    steps: [
-      {
-        latex: "-\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
-      },
-      {
-        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
-      },
-    ],
-    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
-    numericCheck: "0.7546938294602481",
-  };
-  const repairCandidate = {
-    steps: [
-      {
-        latex: "I=\\frac{\\pi^3}{12}",
-      },
-    ],
-    finalAnswerLatex: "\\frac{\\pi^3}{12}",
-    numericCheck: "2.5838563900249847",
-  };
-
-  const comparison = compareRepairCandidateStrength({
-    problem,
-    initialCandidate,
-    repairCandidate,
-    repairIssues: ["unexplained_generated_symbol:\\theta"],
-    initialError: { solutionIssues: ["unexplained_generated_symbol:\\theta"] },
-    repairError: { solutionIssues: ["numerical_final_answer_mismatch"] },
+test("symbol-specific repair guidance is absent without unexplained symbol issues", () => {
+  const prompt = buildRepairSolvePrompt("Original solve prompt", ["numerical_final_answer_mismatch"], {
+    problem: "\\int_0^1 x\\,dx",
+    previousResult: { finalAnswerLatex: "2", steps: [] },
+    error: qualityError({
+      rule: "numerical_final_answer_mismatch",
+      evidence: "estimate=0.5; proposed=2; absDiff=1.5; tolerance=0.0001",
+    }),
   });
 
-  assert.equal(comparison.selectedCandidate, "initial");
-  assert.equal(comparison.repairAccepted, false);
-  assert.equal(comparison.reason, "initial_numeric_validated_repair_numerical_failure");
-  assert.equal(comparison.initialNumericallyValidated, true);
-  assert.equal(comparison.repairNumericallyFailed, true);
-  assert.equal(comparison.finalAnswerChanged, true);
-  assert.equal(comparison.derivationAgreement, false);
-  assert.equal(comparison.numericalAgreement.initial.issue, null);
-  assert.equal(comparison.numericalAgreement.repair.issue, "numerical_final_answer_mismatch");
-  assert.deepEqual(comparison.structuralFailures.initial, ["unexplained_generated_symbol:\\theta"]);
-  assert.deepEqual(comparison.mathematicalFailures.repair, ["numerical_final_answer_mismatch"]);
+  assert.match(prompt, /The previous final answer is numerically inconsistent/);
+  assert.doesNotMatch(prompt, /Undefined generated symbols detected/);
+  assert.doesNotMatch(prompt, /A symbol mentioned only in prose is not considered defined/);
 });
 
-test("candidate comparison accepts structural repair only when math is preserved and structure improves", () => {
-  const problem = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
-  const initialCandidate = {
-    title: "Integral with correct value and missing theta introduction",
-    problemLatex: problem,
-    steps: [
-      {
-        id: "s1",
-        heading: "Use the logarithm series",
-        latex: "-\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
-        reasoning: "The identity is used after a substitution variable should have been introduced.",
-        anchors: [],
-      },
-      {
-        id: "s2",
-        heading: "Final answer",
-        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
-        reasoning: "The numerical cross-check agrees with this exact value.",
-        anchors: [],
-      },
-    ],
-    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
-    numericCheck: "0.7546938294602481",
-  };
-  const repairCandidate = {
-    title: "Integral with theta introduced",
-    problemLatex: problem,
-    steps: [
-      {
-        id: "s1",
-        heading: "Introduce the substitution variable",
-        latex: "x=\\tan\\theta,\\quad -\\ln(\\cos\\theta)=\\sum_{n=1}^{\\infty}\\frac{(\\sin\\theta)^{2n}}{2n}",
-        reasoning: "This preserves the existing derivation while defining theta before it is reused.",
-        anchors: [],
-      },
-      {
-        id: "s2",
-        heading: "Final answer",
-        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
-        reasoning: "The same final value is preserved.",
-        anchors: [],
-      },
-    ],
-    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
-    numericCheck: "0.7546938294602481",
-  };
-
-  const comparison = compareRepairCandidateStrength({
-    problem,
-    initialCandidate,
-    repairCandidate,
-    repairIssues: ["unexplained_generated_symbol:\\theta"],
-    initialError: { solutionIssues: ["unexplained_generated_symbol:\\theta"] },
+test("symbol repair guidance coexists with numerical mismatch guidance", () => {
+  const prompt = buildRepairSolvePrompt("Original solve prompt", [
+    "numerical_final_answer_mismatch",
+    "unexplained_generated_symbol:B",
+  ], {
+    problem: "\\int_0^1 x\\,dx",
+    previousResult: {
+      finalAnswerLatex: "B",
+      steps: [{ label: "Final", math: "I=B", summary: "B is not defined." }],
+    },
+    error: {
+      solutionIssues: ["numerical_final_answer_mismatch", "unexplained_generated_symbol:B"],
+      solutionRuleEvaluations: [
+        {
+          validatorName: "numerical_final_answer_cross_check",
+          name: "numerical_final_answer_cross_check",
+          issue: "numerical_final_answer_mismatch",
+          result: "fail",
+          failureEvidence: "estimate=0.5; proposed=2; absDiff=1.5; tolerance=0.0001",
+        },
+        {
+          validatorName: "unexplained_generated_symbol",
+          name: "unexplained_generated_symbol",
+          issue: "unexplained_generated_symbol:B",
+          result: "fail",
+          failureEvidence: "B in finalAnswerLatex",
+        },
+      ],
+    },
   });
 
-  assert.equal(comparison.selectedCandidate, "repair");
-  assert.equal(comparison.repairAccepted, true);
-  assert.equal(comparison.reason, "repair_validated");
-  assert.equal(comparison.finalAnswerChanged, false);
-  assert.equal(comparison.derivationAgreement, true);
-  assert.equal(comparison.mathematicsUnchanged, true);
-  assert.equal(comparison.structuralIssuesReduced, true);
-  assert.deepEqual(comparison.validationFailures.repair, []);
+  assert.match(prompt, /The previous final answer is numerically inconsistent/);
+  assert.match(prompt, /independent numerical estimate: 0\.5/);
+  assert.match(prompt, /Undefined generated symbols detected:\n- B/);
+  assert.match(prompt, /Every named quantity or constant must be explicitly defined in rendered LaTeX before first use/);
+  assert.match(prompt, /Return only valid JSON matching the requested schema/);
+});
+
+test("repair prompt keeps JSON contract while omitting unrelated geometry instructions", () => {
+  const prompt = buildRepairSolvePrompt([
+    "You are OmniMath.",
+    "For Stokes/Green/curl problems, use vector calculus rules.",
+    "For the paraboloid z=9-x^2-y^2 above z=0, identify the boundary.",
+    "For Green's theorem on the ellipse x^2/4+y^2/9=1, use the ellipse Jacobian.",
+    "For perfect-square quadratics, use the grouped square example.",
+  ].join("\n"), ["abrupt_special_function_introduction:polylogarithm"], {
+    problem: "\\int_0^\\infty f(x)\\,dx",
+    previousResult: {
+      finalAnswerLatex: "\\operatorname{Li}_3(1)",
+      steps: [{ label: "Shortcut", math: "I=\\operatorname{Li}_3(1)", summary: "Unsupported shortcut." }],
+    },
+    error: qualityError({
+      rule: "abrupt_special_function_introduction:polylogarithm",
+      evidence: "abrupt_special_function_introduction:polylogarithm",
+    }),
+  });
+
+  assert.match(prompt, /Return only valid JSON matching the requested schema/);
+  assert.match(prompt, /Required fields: title, problemLatex, steps, finalAnswerLatex, numericCheck/);
+  assert.match(prompt, /Each step must include id, heading, latex, reasoning, and anchors/);
+  assert.match(prompt, /If a special function was introduced previously, do not introduce it again unless the identity is derived explicitly/);
+  assert.doesNotMatch(prompt, /Stokes|Green|curl|vector calculus|paraboloid|ellipse|Jacobian|perfect-square|quadratics/i);
 });

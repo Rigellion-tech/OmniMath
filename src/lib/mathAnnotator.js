@@ -207,7 +207,10 @@ function normalizeLatexFunctionSpacing(text) {
 }
 
 function normalizeTextCommandContent(value = "") {
-  let text = String(value || "")
+  const raw = String(value || "");
+  const hadLeadingSpace = /^\s/.test(raw);
+  const hadTrailingSpace = /\s$/.test(raw);
+  let text = raw
     .replace(/\\[,;!]/g, " ")
     .replace(/\\quad/g, " ")
     .replace(/\s+/g, " ")
@@ -219,11 +222,13 @@ function normalizeTextCommandContent(value = "") {
 
   if (/^(and|where)$/i.test(text)) return `${text.toLowerCase()} `;
   if (/^is the\b/i.test(text)) return ` ${text} `;
-  return text;
+  return `${hadLeadingSpace ? " " : ""}${text}${hadTrailingSpace ? " " : ""}`;
 }
 
 function spaceAfterTextCommands(value = "") {
-  return String(value || "").replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ");
+  return String(value || "")
+    .replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ")
+    .replace(/(?<=[A-Za-z0-9}\]])\\text\{(\s[^}]*)\}/g, " \\text{$1}");
 }
 
 function normalizeLatexSpacingCommands(value = "") {
@@ -302,7 +307,8 @@ export function normalizeMathText(value = "") {
   }
 
   text = normalizeLatexSpacingCommands(text.replace(/\^\(([^)]+)\)/g, "^{$1}"));
-  return spaceAfterTextCommands(protectedText.restore(text.replace(/\s+/g, "")));
+  return spaceAfterTextCommands(protectedText.restore(text.replace(/\s+/g, "")))
+    .replace(/\\(quad|qquad)(?=\\text\{)/g, "\\$1 ");
 }
 
 function displayText(latex) {
@@ -967,6 +973,18 @@ function renderDerivativeLatex(text, depth) {
   return `\\frac{d}{d${match[1]}}${grouped ? ` ${grouped}` : ""}`;
 }
 
+function renderPowerBaseLatex(base, depth) {
+  const parenthesized = readParenthesized(base, 0);
+  if (parenthesized && parenthesized.endIndex === base.length) {
+    return `\\left(${renderLatexForKatex(parenthesized.value, depth + 1)}\\right)`;
+  }
+
+  const rendered = renderLatexForKatex(base, depth + 1);
+  return splitTopLevelAddends(base).length > 0 || splitTopLevelRelations(base).length > 0
+    ? `\\left(${rendered}\\right)`
+    : rendered;
+}
+
 function renderLatexForKatex(value, depth = 0) {
   if (depth === 0 && shouldPreserveLatex(value)) {
     return normalizeLatexForKatex(normalizeEscapedLatexInput(value));
@@ -1015,7 +1033,7 @@ function renderLatexForKatex(value, depth = 0) {
 
   const power = findPowerSplit(normalized);
   if (power && power.endIndex === normalized.length) {
-    return `${renderLatexForKatex(power.base, depth + 1)}^{${renderLatexForKatex(power.exponent, depth + 1)}}`;
+    return `${renderPowerBaseLatex(power.base, depth)}^{${renderLatexForKatex(power.exponent, depth + 1)}}`;
   }
 
   const fn = parseFunction(normalized);
@@ -1617,6 +1635,7 @@ export function annotateMathExplanation(value) {
   if (!value || typeof value !== "object") return value;
 
   const aiUsage = value._aiUsage;
+  const aiCallCount = value._aiCallCount;
   const problemId = cleanIdPart(value.id || value.demoKey || value.originalProblem || value.problem || value.title || "problem");
   const annotated = {
     ...value,
@@ -1679,7 +1698,15 @@ export function annotateMathExplanation(value) {
   if (aiUsage !== undefined) {
     Object.defineProperty(annotated, "_aiUsage", {
       enumerable: false,
+      configurable: true,
       value: aiUsage,
+    });
+  }
+  if (aiCallCount !== undefined) {
+    Object.defineProperty(annotated, "_aiCallCount", {
+      enumerable: false,
+      configurable: true,
+      value: aiCallCount,
     });
   }
 

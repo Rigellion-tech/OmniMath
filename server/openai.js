@@ -19,11 +19,20 @@ import {
   lazyTokenExplanationSchema,
   RESPONSE_FAILURE_TYPES,
 } from "./mathExplanationSchema.js";
-import { getOpenAiModelForPath, getOpenAiModels, getOpenAiSamplingForPath, logOpenAiModelSelection } from "./openaiModels.js";
+import {
+  buildResponsesModelParameters,
+  estimateModelCostUsd,
+  getOpenAiModelForPath,
+  getOpenAiModels,
+  getOpenAiSamplingForPath,
+  logOpenAiModelSelection,
+  selectOpenAiModel,
+} from "./openaiModels.js";
 
 loadEnvFiles();
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const OPENAI_RESPONSES_HOSTNAME = new URL(OPENAI_RESPONSES_URL).hostname;
 const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 4200;
 const DEFAULT_LAZY_MAX_OUTPUT_TOKENS = 700;
@@ -42,6 +51,8 @@ function isOpenAiDebugEnabled() {
     process.env.OMNIMATH_DEBUG_SOLVE === "true"
     || process.env.OMNIMATH_DEBUG_SOLVE === "1"
     || process.env.VITE_DEBUG_SOLUTION_STATE === "true"
+    || process.env.VITE_DEBUG_MATH_HOVER === "true"
+    || process.env.VITE_DEBUG_MATH_HOVER === "1"
   );
 }
 
@@ -90,6 +101,40 @@ function attachOpenAiUsageToError(error, usage = null, aiCallCount = 0) {
     value: aiCallCount,
   });
   return error;
+}
+
+function tagUsageWithModel(usage = null, model = "") {
+  if (!usage || typeof usage !== "object") return usage;
+  const normalized = normalizeOpenAiUsage(usage, 0);
+  return {
+    ...usage,
+    _omni_model_usage: [
+      {
+        model,
+        input_tokens: normalized.inputTokens,
+        output_tokens: normalized.outputTokens,
+        total_tokens: normalized.totalTokens,
+        output_tokens_details: {
+          reasoning_tokens: normalized.reasoningTokens,
+        },
+      },
+    ],
+  };
+}
+
+function providerCallCountFromError(error) {
+  const diagnosticAttempts = Array.isArray(error?.openAiTransportDiagnostics?.attempts)
+    ? error.openAiTransportDiagnostics.attempts
+    : [];
+  const providerResponses = diagnosticAttempts.filter((attempt) => (
+    attempt?.stage === "provider_response" || attempt?.stage === "provider_error"
+  )).length;
+  if (providerResponses > 0) return providerResponses;
+  return error?.providerStatus !== null
+    && error?.providerStatus !== undefined
+    && Number.isFinite(Number(error.providerStatus))
+    ? 1
+    : 0;
 }
 
 function debugAttemptType(debugContext = {}) {
@@ -256,6 +301,9 @@ function summarizeContentItem(item) {
 function summarizePayload(payload) {
   return {
     model: payload.model,
+    reasoning: payload.reasoning || null,
+    hasTemperature: Object.hasOwn(payload, "temperature"),
+    hasTopP: Object.hasOwn(payload, "top_p"),
     inputItems: Array.isArray(payload.input) ? payload.input.length : 0,
     input: Array.isArray(payload.input)
       ? payload.input.map((item) => ({
@@ -359,6 +407,16 @@ function logOpenAiNonProviderError({ purpose, error }) {
   });
 }
 
+export function classifyOpenAiInfrastructureFailure({ error = null, response = null } = {}) {
+  if (response?.status === 429) return "provider_rate_limit";
+  if (response && RETRYABLE_PROVIDER_STATUSES.has(response.status)) return "provider_http_failure";
+  const code = getErrorCauseCode(error);
+  if (code === "EAI_AGAIN" || code === "ENOTFOUND") return "dns_failure";
+  if (code === "AbortError" || code === "TimeoutError" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "ETIMEDOUT") return "timeout";
+  if (code === "ECONNRESET" || code === "ECONNREFUSED" || code === "EPIPE") return "connect_failure";
+  return code ? "connect_failure" : "unknown_infrastructure_failure";
+}
+
 const TRANSIENT_NETWORK_CODES = new Set([
   "ECONNRESET",
   "UND_ERR_CONNECT_TIMEOUT",
@@ -410,6 +468,10 @@ function isTransientNetworkError(error) {
   return /connect timeout|timed out|connection.*reset|network.*temporar/i.test(message);
 }
 
+export function isRetryableOpenAiTransportError(error) {
+  return isTransientNetworkError(error);
+}
+
 function isRetryableProviderError(response, responseBody) {
   if (!RETRYABLE_PROVIDER_STATUSES.has(response.status)) return false;
   const providerCode = responseBody?.error?.code || responseBody?.error?.type || null;
@@ -418,7 +480,7 @@ function isRetryableProviderError(response, responseBody) {
   return true;
 }
 
-function createOpenAiUnavailableError(error, { statusCode = 503 } = {}) {
+function createOpenAiUnavailableError(error, { statusCode = 503, transportDiagnostics = null } = {}) {
   return Object.assign(new Error(`OpenAI request failed: ${getErrorCauseMessage(error) || "service unavailable"}`, { cause: error }), {
     statusCode,
     code: "AI_SERVICE_UNAVAILABLE",
@@ -427,6 +489,7 @@ function createOpenAiUnavailableError(error, { statusCode = 503 } = {}) {
     providerCode: error?.providerCode || null,
     networkCauseCode: getErrorCauseCode(error),
     networkCauseMessage: getErrorCauseMessage(error),
+    openAiTransportDiagnostics: transportDiagnostics,
   });
 }
 
@@ -480,9 +543,25 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
   const timeoutMs = getOpenAiRequestTimeoutMs(modelPath);
   const startedAt = Date.now();
   let lastRetryableError = null;
+  const transportDiagnostics = {
+    apiHost: OPENAI_RESPONSES_HOSTNAME,
+    model,
+    modelPath,
+    purpose,
+    maxAttempts,
+    timeoutMs,
+    transportAttempts: 0,
+    successfulProviderResponses: 0,
+    retryCount: 0,
+    finalInfrastructureErrorCode: null,
+    finalInfrastructureFailureType: null,
+    attempts: [],
+  };
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let response;
+    transportDiagnostics.transportAttempts = attempt;
+    const attemptStartedAt = Date.now();
     try {
       response = await fetch(OPENAI_RESPONSES_URL, {
         method: "POST",
@@ -492,13 +571,26 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
         dispatcher: getOpenAiAgent(timeoutMs),
       });
     } catch (error) {
+      const failureType = classifyOpenAiInfrastructureFailure({ error });
+      const causeCode = getErrorCauseCode(error);
+      transportDiagnostics.finalInfrastructureErrorCode = causeCode;
+      transportDiagnostics.finalInfrastructureFailureType = failureType;
+      transportDiagnostics.attempts.push({
+        attempt,
+        stage: "transport_error",
+        elapsedMs: Date.now() - attemptStartedAt,
+        retryable: isTransientNetworkError(error) && attempt < maxAttempts,
+        errorCode: causeCode,
+        failureType,
+      });
       logOpenAiNonProviderError({ purpose, error });
       if (error.code === "SERVER_CONFIG_ERROR") throw error;
       if (!isTransientNetworkError(error) || attempt >= maxAttempts) {
-        throw createOpenAiUnavailableError(error);
+        throw createOpenAiUnavailableError(error, { transportDiagnostics });
       }
 
       lastRetryableError = error;
+      transportDiagnostics.retryCount += 1;
       logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error });
       await delay(getOpenAiRetryDelayMs(attempt));
       continue;
@@ -506,6 +598,19 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
 
     const responseBody = await readOpenAiResponseBody(response);
     if (response.ok) {
+      transportDiagnostics.successfulProviderResponses += 1;
+      transportDiagnostics.finalInfrastructureErrorCode = null;
+      transportDiagnostics.finalInfrastructureFailureType = null;
+      transportDiagnostics.attempts.push({
+        attempt,
+        stage: "provider_response",
+        elapsedMs: Date.now() - attemptStartedAt,
+        status: response.status,
+        retryable: false,
+      });
+      if (responseBody.usage) {
+        responseBody.usage = tagUsageWithModel(responseBody.usage, model);
+      }
       Object.defineProperty(responseBody, "_omniOpenAiMeta", {
         enumerable: false,
         configurable: true,
@@ -522,6 +627,11 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
           topP: payload.top_p ?? null,
           temperatureSource: payload.temperature === undefined ? "provider_default" : "payload",
           topPSource: payload.top_p === undefined ? "provider_default" : "payload",
+          reasoningEffort: payload.reasoning?.effort || null,
+          reasoning: payload.reasoning || null,
+          modelRole: debugContext.modelRole || null,
+          samplingOmitted: Boolean(debugContext.samplingOmitted),
+          reasoningOmittedReason: debugContext.reasoningOmittedReason || null,
           normalizedProblemHash: debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null,
           promptHash: debugContext.promptHash || null,
           attemptType: debugAttemptType(debugContext),
@@ -529,6 +639,7 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
           modelInputMessages: createDiagnosticInputMessages(payload.input),
           maxOutputTokens: payload.max_output_tokens ?? null,
           schemaName: payload.text?.format?.name || null,
+          transportDiagnostics,
         },
       });
       logOpenAiDebug("http_response", {
@@ -538,6 +649,10 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
         modelPath,
         temperature: payload.temperature ?? null,
         topP: payload.top_p ?? null,
+        reasoningEffort: payload.reasoning?.effort || null,
+        modelRole: debugContext.modelRole || null,
+        samplingOmitted: Boolean(debugContext.samplingOmitted),
+        reasoningOmittedReason: debugContext.reasoningOmittedReason || null,
         promptHash: debugContext.promptHash || null,
         normalizedProblemHash: debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null,
         attemptType: debugAttemptType(debugContext),
@@ -551,6 +666,17 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
 
     logOpenAiProviderError({ purpose, response, responseBody });
     if (!isRetryableProviderError(response, responseBody)) {
+      transportDiagnostics.finalInfrastructureErrorCode = responseBody?.error?.code || responseBody?.error?.type || `HTTP_${response.status}`;
+      transportDiagnostics.finalInfrastructureFailureType = "provider_http_failure";
+      transportDiagnostics.attempts.push({
+        attempt,
+        stage: "provider_error",
+        elapsedMs: Date.now() - attemptStartedAt,
+        status: response.status,
+        retryable: false,
+        errorCode: transportDiagnostics.finalInfrastructureErrorCode,
+        failureType: transportDiagnostics.finalInfrastructureFailureType,
+      });
       throw createProviderError(response, responseBody);
     }
 
@@ -564,17 +690,39 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
     );
 
     if (attempt >= maxAttempts) {
+      transportDiagnostics.finalInfrastructureErrorCode = providerError.providerCode || `HTTP_${response.status}`;
+      transportDiagnostics.finalInfrastructureFailureType = classifyOpenAiInfrastructureFailure({ response });
+      transportDiagnostics.attempts.push({
+        attempt,
+        stage: "provider_error",
+        elapsedMs: Date.now() - attemptStartedAt,
+        status: response.status,
+        retryable: false,
+        errorCode: transportDiagnostics.finalInfrastructureErrorCode,
+        failureType: transportDiagnostics.finalInfrastructureFailureType,
+      });
       throw createOpenAiUnavailableError(providerError, {
         statusCode: response.status === 429 ? 502 : 503,
+        transportDiagnostics,
       });
     }
 
     lastRetryableError = providerError;
+    transportDiagnostics.retryCount += 1;
+    transportDiagnostics.attempts.push({
+      attempt,
+      stage: "provider_error",
+      elapsedMs: Date.now() - attemptStartedAt,
+      status: response.status,
+      retryable: true,
+      errorCode: providerError.providerCode || `HTTP_${response.status}`,
+      failureType: classifyOpenAiInfrastructureFailure({ response }),
+    });
     logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error: providerError, response });
     await delay(getOpenAiRetryDelayMs(attempt));
   }
 
-  throw createOpenAiUnavailableError(lastRetryableError || new Error("OpenAI request failed."));
+  throw createOpenAiUnavailableError(lastRetryableError || new Error("OpenAI request failed."), { transportDiagnostics });
 }
 
 export function estimatePromptTokens(text = "") {
@@ -610,6 +758,12 @@ export function estimateOpenAiCostBudget({ prompt = "", image = null, maxOutputT
 export function normalizeOpenAiUsage(usage, fallbackTotalTokens = 0) {
   const inputTokens = Number(usage?.input_tokens || usage?.prompt_tokens || 0);
   const outputTokens = Number(usage?.output_tokens || usage?.completion_tokens || 0);
+  const reasoningTokens = Number(
+    usage?.output_tokens_details?.reasoning_tokens
+    || usage?.completion_tokens_details?.reasoning_tokens
+    || usage?.reasoning_tokens
+    || 0
+  );
   const totalTokens = Number(usage?.total_tokens || 0)
     || inputTokens + outputTokens
     || Math.max(0, Math.ceil(Number(fallbackTotalTokens) || 0));
@@ -617,11 +771,24 @@ export function normalizeOpenAiUsage(usage, fallbackTotalTokens = 0) {
   return {
     inputTokens,
     outputTokens,
+    reasoningTokens,
     totalTokens,
   };
 }
 
-export function estimateOpenAiCost(usage) {
+export function estimateOpenAiCost(usage, { model = "" } = {}) {
+  const modelUsage = Array.isArray(usage?._omni_model_usage) ? usage._omni_model_usage : [];
+  if (modelUsage.length > 0) {
+    return modelUsage.reduce((total, item) => {
+      const itemModel = item?.model || model;
+      const itemCost = itemModel ? estimateModelCostUsd(itemModel, item) : null;
+      return total + (Number.isFinite(itemCost) ? itemCost : estimateOpenAiCost(item));
+    }, 0);
+  }
+  if (model) {
+    const modelCost = estimateModelCostUsd(model, usage);
+    if (Number.isFinite(modelCost)) return modelCost;
+  }
   const normalized = normalizeOpenAiUsage(usage);
   const inputCost = readPositiveNumber(
     "OPENAI_INPUT_COST_PER_1M_TOKENS",
@@ -728,6 +895,12 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
     topP: meta.topP ?? null,
     temperatureSource: meta.temperatureSource || "provider_default",
     topPSource: meta.topPSource || "provider_default",
+    reasoningEffort: meta.reasoningEffort ?? null,
+    reasoning: meta.reasoning || null,
+    modelRole: meta.modelRole || null,
+    samplingOmitted: Boolean(meta.samplingOmitted),
+    reasoningOmittedReason: meta.reasoningOmittedReason || null,
+    transportDiagnostics: meta.transportDiagnostics || null,
     promptHash: debugContext.promptHash || meta.promptHash || null,
     normalizedProblemHash: meta.normalizedProblemHash || (debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null),
     attemptType: debugContext.attemptType || meta.attemptType || debugAttemptType(debugContext),
@@ -894,15 +1067,22 @@ async function requestOpenAi({
   schema = fastSolveSchema,
   schemaName = "math_solve",
   maxOutputTokens = getSolveMaxOutputTokens(),
-  model = getOpenAiModelForPath(modelPath),
+  model = "",
   debugContext = {},
 }) {
-  const sampling = getOpenAiSamplingForPath(modelPath);
+  const selection = selectOpenAiModel({ modelPath, model, debugContext });
+  const modelParameters = buildResponsesModelParameters(selection);
+  const enrichedDebugContext = {
+    ...debugContext,
+    modelRole: selection.role,
+    samplingOmitted: selection.samplingOmitted,
+    reasoningOmittedReason: selection.reasoningOmittedReason,
+  };
   const payload = {
-    model,
+    model: selection.modelId,
     input: [{ role: "user", content }],
     max_output_tokens: maxOutputTokens,
-    ...sampling,
+    ...modelParameters,
     text: {
       format: {
         type: "json_schema",
@@ -912,13 +1092,20 @@ async function requestOpenAi({
       },
     },
   };
-  logOpenAiModelSelection(modelPath, { purpose });
+  logOpenAiModelSelection(modelPath, { purpose, selection });
   logOpenAiRequest({ purpose, payload });
   logOpenAiDebug("request_settings", {
     requestId: debugContext.requestId || null,
     purpose,
-    model,
+    model: selection.modelId,
     modelPath,
+    modelRole: selection.role,
+    modelSource: selection.modelSource,
+    reasoningEffort: selection.reasoningEffort,
+    requestedReasoningEffort: selection.requestedReasoningEffort || null,
+    reasoningOmittedReason: selection.reasoningOmittedReason || null,
+    samplingOmitted: selection.samplingOmitted,
+    freshSolve: selection.freshSolve,
     promptHash: hashDebugText(debugContentText(content)),
     configuredPromptHash: debugContext.promptHash || null,
     normalizedProblemHash: debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null,
@@ -930,7 +1117,7 @@ async function requestOpenAi({
     topPSource: payload.top_p === undefined ? "provider_default" : "payload",
     schemaName,
   });
-  const responseBody = await fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext });
+  const responseBody = await fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext: enrichedDebugContext });
 
   logOpenAiResponse({ purpose, responseBody, outputText: extractOutputText(responseBody) });
   return responseBody;
@@ -961,6 +1148,13 @@ function mergeUsage(left, right) {
     input_tokens: a.inputTokens + b.inputTokens,
     output_tokens: a.outputTokens + b.outputTokens,
     total_tokens: a.totalTokens + b.totalTokens,
+    output_tokens_details: {
+      reasoning_tokens: a.reasoningTokens + b.reasoningTokens,
+    },
+    _omni_model_usage: [
+      ...(Array.isArray(left?._omni_model_usage) ? left._omni_model_usage : []),
+      ...(Array.isArray(right?._omni_model_usage) ? right._omni_model_usage : []),
+    ],
   };
 }
 
@@ -1081,7 +1275,11 @@ ${originalProblem || "Use the problem from the prior prompt."}`;
 
 function generatedAttemptType(debugContext = {}, compact = false) {
   const base = debugAttemptType(debugContext);
-  const prefix = base === "repair" || base === "quality-repair" ? "repair" : "initial";
+  const prefix = base === "repair" || base === "quality-repair"
+    ? "repair"
+    : base === "escalation" || base === "quality-escalation"
+      ? "escalation"
+      : "initial";
   return `${prefix}-${compact ? "compact" : "full"}`;
 }
 
@@ -1105,6 +1303,7 @@ export async function createMathExplanation({
   originalProblem = "",
   debugContext = {},
   onGeneratedResponseFailure = null,
+  modelPath = "solver",
 }) {
   const content = [{ type: "input_text", text: prompt }];
   if (image) {
@@ -1134,11 +1333,11 @@ export async function createMathExplanation({
       schema: image ? imageSolveSchema : fastSolveSchema,
       schemaName: image ? "math_image_solve" : "math_fast_solve",
       maxOutputTokens: getSolveOutputTokenBudget({ prompt }),
-      modelPath: "solver",
+      modelPath,
       debugContext,
     });
   } catch (error) {
-    attachOpenAiUsageToError(error, null, 1);
+    attachOpenAiUsageToError(error, null, providerCallCountFromError(error));
     throw error;
   }
   let usage = responseBody.usage || null;
@@ -1185,7 +1384,7 @@ export async function createMathExplanation({
         schema: compactSolveSchema,
         schemaName: "math_compact_solve",
         maxOutputTokens: getSolveOutputTokenBudget({ prompt: compactPrompt, compact: true }),
-        modelPath: "solver",
+        modelPath,
         debugContext: {
           ...debugContext,
           promptHash: hashDebugText(compactPrompt),
@@ -1194,7 +1393,7 @@ export async function createMathExplanation({
         },
       });
     } catch (compactRequestError) {
-      attachOpenAiUsageToError(compactRequestError, usage, 2);
+      attachOpenAiUsageToError(compactRequestError, usage, aiCallCount + providerCallCountFromError(compactRequestError));
       throw compactRequestError;
     }
     usage = mergeUsage(usage, compactResponse.usage || null);

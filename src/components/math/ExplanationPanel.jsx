@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { GripHorizontal, Loader2, Pin, Send, X } from "lucide-react";
 import InlineMath from "./InlineMath";
@@ -6,9 +7,28 @@ import MathText from "./MathText";
 import { explainFollowup, explainPin, explainToken } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { useHover } from "@/lib/HoverContext";
+import {
+  getHoverTargetIdentity,
+  createStableLazyPayload,
+  resolveLazyExplanationForTarget,
+  shouldApplyLazyExplanation,
+} from "@/lib/hoverTargetIdentity";
 import { userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { getProblemLabel } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
+import { getSolutionSteps } from "@/lib/solutionSteps";
+import {
+  HOVER_LOADING_DELAY_MS,
+  HOVER_TIMEOUT_MESSAGE,
+  HOVER_STILL_GENERATING_DELAY_MS,
+  HOVER_TIMEOUT_MS,
+  INITIAL_LAZY_EXPLANATION_STATE,
+  PIN_TIMEOUT_MS,
+  createLazyRequestDescriptor,
+  getLazyLoadingMessage,
+  isCurrentLazyRequest,
+  reduceLazyExplanationLifecycle,
+} from "@/lib/lazyExplanationLifecycle";
 import { clampTooltipPosition, getTooltipPositionFromRect } from "@/lib/tooltipPosition";
 import { cn } from "@/lib/utils";
 
@@ -23,10 +43,7 @@ const DEPTHS = [
 
 const HOVER_DEBOUNCE_MS = 400;
 const HOVER_RATE_LIMIT_MS = 1000;
-const HOVER_TIMEOUT_MS = 6500;
-const PIN_TIMEOUT_MS = 12000;
 const RATE_LIMIT_MESSAGE = "Explanation paused. Try again in a few seconds.";
-const TIMEOUT_MESSAGE = "Explanation took too long. Try pinning or retry.";
 const lazyExplanationCache = new Map();
 const inFlightExplanations = new Map();
 const pinExplanationCache = new Map();
@@ -35,6 +52,22 @@ const pinRequestLocks = new Set();
 const requestCooldownUntil = new Map();
 let activeHoverRequest = null;
 let nextHoverRequestAt = 0;
+const DEBUG_SOLUTION_STATE = import.meta.env.DEV
+  && import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true";
+const DEBUG_MATH_HOVER = import.meta.env.DEV
+  && (
+    import.meta.env.VITE_DEBUG_MATH_HOVER === "true"
+    || import.meta.env.VITE_DEBUG_MATH_HOVER === "1"
+    || import.meta.env.VITE_DEBUG_SEMANTIC_HITBOXES === "true"
+  );
+
+function logSolutionState(event, details = {}) {
+  if (!DEBUG_SOLUTION_STATE) return;
+  console.info("[omnimath:solution-state]", {
+    event,
+    ...details,
+  });
+}
 
 function stableHash(value = "") {
   let hash = 2166136261;
@@ -46,12 +79,41 @@ function stableHash(value = "") {
   return (hash >>> 0).toString(36);
 }
 
+function createDebugRequestId(mode, requestId, cacheKey) {
+  return `${mode}-${requestId}-${stableHash(cacheKey)}`;
+}
+
 function logLazyExplanation(event, details = {}) {
   if (!import.meta.env.DEV) return;
   console.info("[omnimath:lazy-explanation]", {
     event,
     ...details,
   });
+}
+
+function logExplanationTarget(event, details = {}) {
+  if (!DEBUG_SOLUTION_STATE && !DEBUG_MATH_HOVER) return;
+  console.info("[omnimath:explanation-target]", {
+    event,
+    ...details,
+  });
+}
+
+function getViewportSize() {
+  if (typeof window === "undefined") return { width: 1024, height: 768 };
+  return {
+    width: window.visualViewport?.width || window.innerWidth,
+    height: window.visualViewport?.height || window.innerHeight,
+  };
+}
+
+function getInitialClampedTooltipPosition(hoverLens, padding = 12) {
+  const viewport = getViewportSize();
+  const maxSize = {
+    width: Math.min(360, Math.max(160, viewport.width - padding * 2)),
+    height: Math.max(80, viewport.height - padding * 2),
+  };
+  return clampTooltipPosition(hoverLens?.x || padding, hoverLens?.y || padding, maxSize, viewport, padding);
 }
 
 function getProblemLatex(problem, context) {
@@ -100,6 +162,10 @@ function getParentExpression(item) {
 }
 
 function getAnchorId(item) {
+  const identity = item?.semanticIdentity || null;
+  if (identity?.semanticId || identity?.targetId) return identity.semanticId || identity.targetId;
+  const semanticSelection = item?.semanticSelection || item?.selectedSemanticRange || item?.context?.semanticSelection || null;
+  if (semanticSelection?.id) return semanticSelection.id;
   return item?.selectedTokens?.[0]?.anchorId
     || item?.selectedTokens?.[0]?.id
     || item?.referenceId
@@ -109,10 +175,11 @@ function getAnchorId(item) {
 }
 
 function getLazyCacheKey(item, problem, mode, explanationLevel = "default") {
+  const identity = getHoverTargetIdentity(item);
   const problemId = getProblemId(problem, item?.context);
   const stepId = item?.stepId || item?.context?.stepId || "step";
-  const anchorId = getAnchorId(item);
-  const selected = item?.selectedText || item?.display || "";
+  const anchorId = identity.semanticId || identity.targetId || getAnchorId(item);
+  const selected = identity.sourceText || item?.selectedText || item?.display || "";
   const parentExpression = getParentExpression(item);
   const contextHash = stableHash([
     getProblemLatex(problem, item?.context),
@@ -133,11 +200,26 @@ function getLazyCacheKey(item, problem, mode, explanationLevel = "default") {
 }
 
 function createLazyPayload(item, problem) {
+  const identity = getHoverTargetIdentity(item);
   const currentStep = getStepLatex(item);
-  const selectedLatex = item?.selectedText || item?.display || currentStep;
+  const selectedLatex = identity.sourceText || item?.selectedText || item?.display || currentStep;
   const parentExpression = getParentExpression(item);
+  const semanticSelection = item?.semanticSelection || item?.selectedSemanticRange || item?.context?.semanticSelection || null;
+  const selectedTokenId = identity.targetId || semanticSelection?.id || item?.selectedTokens?.[0]?.id || item?.referenceId || "";
 
-  return {
+  logExplanationTarget("payload", {
+    referenceType: item?.referenceType || "token",
+    semanticId: identity.semanticId || identity.targetId,
+    targetId: identity.targetId,
+    sourceRange: identity.sourceRange,
+    sourceText: identity.sourceText,
+    tooltipTitle: identity.tooltipTitle || identity.label,
+    selectedLatex,
+    semanticSelection,
+    selectedSemanticRange: semanticSelection,
+  });
+
+  return createStableLazyPayload(item, {
     problemId: getProblemId(problem, item?.context),
     problemContext: getProblemLabel(problem || item?.context?.problem, "Math problem"),
     stepLatex: currentStep,
@@ -145,9 +227,9 @@ function createLazyPayload(item, problem) {
     parentExpression,
     stepHeading: item?.stepTitle || item?.context?.stepTitle || item?.title || "",
     stepId: item?.stepId || item?.context?.stepId || "",
-    anchorId: item?.selectedTokens?.[0]?.anchorId || item?.selectedTokens?.[0]?.id || item?.referenceId || "",
-    selectedTokenId: item?.selectedTokens?.[0]?.id || item?.referenceId || "",
-  };
+    anchorId: identity.semanticId || semanticSelection?.anchorId || selectedTokenId,
+    selectedTokenId,
+  });
 }
 
 function readSessionCache(cacheKey) {
@@ -181,7 +263,7 @@ function getCachedHoverFallback(item, problem) {
   const levels = ["beginner", "intermediate", "advanced", "default"];
   for (const level of levels) {
     const cached = lazyExplanationCache.get(getLazyCacheKey(item, problem, "hover", level));
-    if (cached) return cached;
+    if (cached && shouldApplyLazyExplanation(item, cached)) return cached;
   }
   return null;
 }
@@ -197,35 +279,71 @@ function normalizeLazyError(error) {
   return error?.message || "Could not load this explanation.";
 }
 
-function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal }) {
+function getLazyTargetId(item) {
+  const identity = item?.semanticIdentity || null;
+  return identity?.semanticId
+    || identity?.targetId
+    || item?.semanticSelection?.id
+    || item?.selectedSemanticRange?.id
+    || item?.context?.semanticSelection?.id
+    || item?.selectedTokens?.[0]?.id
+    || item?.selectedTokens?.[0]?.semanticNodeId
+    || item?.referenceId
+    || item?.id
+    || "";
+}
+
+function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, requestDescriptor = null }) {
   const inFlightMap = getInFlightMap(mode);
   const cache = getMemoryCache(mode);
   const existing = inFlightMap.get(cacheKey);
   if (existing) {
-    logLazyExplanation(mode === "pin" ? "pin request reused" : "request reused", { mode, cacheKey });
+    logLazyExplanation(mode === "pin" ? "pin request reused" : "request reused", {
+      mode,
+      cacheKey,
+      requestId: requestDescriptor?.requestId || null,
+      targetId: requestDescriptor?.targetId || null,
+    });
     return existing.promise;
   }
 
   const request = mode === "pin" ? explainPin : explainToken;
   const startedAt = performance.now();
-  logLazyExplanation(mode === "pin" ? "pin API fired" : "API call fired", { mode, cacheKey });
-  const promise = request({ payload: createLazyPayload(item, problem), getToken, signal })
+  const payload = {
+    ...createLazyPayload(item, problem),
+    debugRequestId: createDebugRequestId(mode, requestDescriptor?.requestId || "request", cacheKey),
+  };
+  logLazyExplanation(mode === "pin" ? "pin API fired" : "API call fired", {
+    mode,
+    cacheKey,
+    requestId: requestDescriptor?.requestId || null,
+    debugRequestId: payload.debugRequestId,
+    semanticNodeId: payload.semanticId,
+    selectedText: payload.semanticSourceText || payload.targetSourceText || "",
+    sourceRange: payload.targetSourceRange || payload.semanticSourceRange || null,
+  });
+  const promise = request({ payload, getToken, signal })
     .then((data) => {
-      const resolved = {
-        title: userFacingTooltipTitle({
-          title: data.title || item.title,
-          selectedText: item.selectedText || item.display,
-          display: item.display,
-          latex: item.latex,
-          role: item.role,
-        }),
-        explanation: data.explanation || "",
-      };
+      logLazyExplanation("response arrival", {
+        mode,
+        cacheKey,
+        requestId: requestDescriptor?.requestId || null,
+        debugRequestId: payload.debugRequestId,
+        responseSemanticId: data.semanticId || data.targetId || null,
+        responseTitle: data.title || "",
+        serverResponseTextLength: Number(data.responseTextLength || data.explanationLength || 0) || String(data.explanation || "").length,
+        clientReceivedTextLength: String(data.explanation || "").length,
+      });
+      const resolved = resolveLazyExplanationForTarget(data, item);
       cache.set(cacheKey, resolved);
       writeSessionCache(cacheKey, resolved);
       logLazyExplanation("API completed", {
         mode,
         cacheKey,
+        requestId: requestDescriptor?.requestId || null,
+        debugRequestId: payload.debugRequestId,
+        responseSemanticId: resolved.semanticId || resolved.targetId || null,
+        storedHoverExplanationLength: String(resolved.explanation || "").length,
         durationMs: Math.round(performance.now() - startedAt),
         cached: Boolean(data.cached),
       });
@@ -239,6 +357,8 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal }) 
         logLazyExplanation("pin API failed", {
           mode,
           cacheKey,
+          requestId: requestDescriptor?.requestId || null,
+          debugRequestId: payload.debugRequestId,
           status: error?.status || null,
           message: error?.message || "Request failed",
           durationMs: Math.round(performance.now() - startedAt),
@@ -247,6 +367,8 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal }) 
         logLazyExplanation("API failed", {
           mode,
           cacheKey,
+          requestId: requestDescriptor?.requestId || null,
+          debugRequestId: payload.debugRequestId,
           status: error?.status || null,
           message: error?.message || "Request failed",
           durationMs: Math.round(performance.now() - startedAt),
@@ -264,44 +386,119 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal }) 
 }
 
 function useLazyExplanation(item, problem, mode, getToken, enabled = true, explanationLevel = "default") {
-  const [state, setState] = useState({ loading: false, error: "", data: null });
+  const [state, setState] = useState(INITIAL_LAZY_EXPLANATION_STATE);
   const cacheKey = item && enabled ? getLazyCacheKey(item, problem, mode, explanationLevel) : "";
   const requestIdRef = useRef(0);
+  const activeRequestRef = useRef(null);
 
   useEffect(() => {
     if (!item || !enabled || !cacheKey) {
-      setState({ loading: false, error: "", data: null });
+      activeRequestRef.current = null;
+      setState((current) => reduceLazyExplanationLifecycle(current, { type: "idle" }));
       return undefined;
     }
 
     const cache = getMemoryCache(mode);
     const cached = cache.get(cacheKey) || readSessionCache(cacheKey);
-    if (cached) {
+    if (cached && shouldApplyLazyExplanation(item, cached)) {
       cache.set(cacheKey, cached);
       logLazyExplanation(mode === "pin" ? "pin cache hit" : "cache hit", { mode, cacheKey });
-      setState({ loading: false, error: "", data: cached });
+      activeRequestRef.current = null;
+      setState((current) => reduceLazyExplanationLifecycle(current, { type: "cache_hit", data: cached }));
       return undefined;
     }
 
     const cooldownUntil = requestCooldownUntil.get(cacheKey) || 0;
     if (cooldownUntil > Date.now()) {
       logLazyExplanation("API returned 429", { mode, cacheKey, paused: true });
-      setState({ loading: false, error: RATE_LIMIT_MESSAGE, data: null });
+      activeRequestRef.current = null;
+      setState({
+        loading: false,
+        error: RATE_LIMIT_MESSAGE,
+        data: null,
+        phase: "error",
+        request: null,
+      });
       return undefined;
     }
 
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
+    const request = createLazyRequestDescriptor({
+      requestId,
+      cacheKey,
+      mode,
+      targetId: getLazyTargetId(item),
+    });
+    activeRequestRef.current = request;
     let cancelled = false;
-    let timedOut = false;
     const controller = new AbortController();
     const hoverFallback = mode === "pin" ? getCachedHoverFallback(item, problem) : null;
     const debounceMs = mode === "hover" ? HOVER_DEBOUNCE_MS : 0;
     let timerId = null;
+    let loadingTimerId = null;
+    let stillGeneratingTimerId = null;
     let timeoutId = null;
 
-    logLazyExplanation(`${mode} requested`, { mode, cacheKey });
-    setState({ loading: true, error: "", data: hoverFallback });
+    const identity = getHoverTargetIdentity(item);
+    logLazyExplanation(`${mode} requested`, {
+      mode,
+      cacheKey,
+      requestId,
+      targetId: request.targetId,
+      semanticNodeId: identity.semanticId || identity.targetId || null,
+      selectedText: identity.sourceText || item?.selectedText || item?.display || "",
+      sourceRange: identity.sourceRange || null,
+    });
+    setState((current) => reduceLazyExplanationLifecycle(current, {
+      type: "request_started",
+      request,
+      fallback: hoverFallback,
+    }));
+    logLazyExplanation("state update", {
+      mode,
+      cacheKey,
+      requestId,
+      transition: "request_started",
+      phase: "pending",
+      targetId: request.targetId,
+    });
+
+    const isCurrent = () => !cancelled && isCurrentLazyRequest(activeRequestRef.current, request);
+
+    const startHoverLoadingTimers = () => {
+      if (mode !== "hover") return;
+      loadingTimerId = window.setTimeout(() => {
+        if (!isCurrent()) return;
+        setState((current) => reduceLazyExplanationLifecycle(current, {
+          type: "loading_delay",
+          request,
+        }));
+        logLazyExplanation("state update", {
+          mode,
+          cacheKey,
+          requestId,
+          transition: "loading_delay",
+          phase: "loading",
+          targetId: request.targetId,
+        });
+      }, HOVER_LOADING_DELAY_MS);
+      stillGeneratingTimerId = window.setTimeout(() => {
+        if (!isCurrent()) return;
+        setState((current) => reduceLazyExplanationLifecycle(current, {
+          type: "still_generating",
+          request,
+        }));
+        logLazyExplanation("state update", {
+          mode,
+          cacheKey,
+          requestId,
+          transition: "still_generating",
+          phase: "still-generating",
+          targetId: request.targetId,
+        });
+      }, HOVER_STILL_GENERATING_DELAY_MS);
+    };
 
     const runRequest = () => {
       if (cancelled) return;
@@ -311,7 +508,13 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         if (cachedBeforePin) {
           pinExplanationCache.set(cacheKey, cachedBeforePin);
           logLazyExplanation("pin cache hit", { mode, cacheKey });
-          setState({ loading: false, error: "", data: cachedBeforePin });
+          if (shouldApplyLazyExplanation(item, cachedBeforePin)) {
+            activeRequestRef.current = null;
+            setState((current) => reduceLazyExplanationLifecycle(current, {
+              type: "cache_hit",
+              data: cachedBeforePin,
+            }));
+          }
           return;
         }
 
@@ -323,15 +526,55 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
             problem,
             getToken,
             signal: controller.signal,
-          })
+            requestDescriptor: request,
+            })
             .then((resolved) => {
-              if (cancelled || requestIdRef.current !== requestId) return;
-              setState({ loading: false, error: "", data: resolved });
+              if (!isCurrent()) return;
+              const applies = shouldApplyLazyExplanation(item, resolved);
+              logLazyExplanation("state update", {
+                mode,
+                cacheKey,
+                requestId,
+                transition: "request_succeeded",
+                applies,
+                reason: applies ? null : "target_mismatch",
+                targetId: request.targetId,
+                responseTargetId: resolved.targetId || null,
+              });
+              setState((current) => reduceLazyExplanationLifecycle(current, {
+                type: "request_succeeded",
+                request,
+                data: resolved,
+                applies,
+                reason: applies ? null : "target_mismatch",
+              }));
             })
             .catch((error) => {
-              if (cancelled || requestIdRef.current !== requestId || error?.name === "AbortError") return;
+              if (!isCurrent() || error?.name === "AbortError") {
+                logLazyExplanation("request abort ignored", {
+                  mode,
+                  cacheKey,
+                  requestId,
+                  reason: error?.name === "AbortError" ? "AbortError" : "not-current",
+                  targetId: request.targetId,
+                });
+                return;
+              }
               if (isRateLimitError(error)) requestCooldownUntil.set(cacheKey, Date.now() + 5000);
-              setState({ loading: false, error: normalizeLazyError(error), data: hoverFallback });
+              logLazyExplanation("state update", {
+                mode,
+                cacheKey,
+                requestId,
+                transition: "request_failed",
+                error: normalizeLazyError(error),
+                targetId: request.targetId,
+              });
+              setState((current) => reduceLazyExplanationLifecycle(current, {
+                type: "request_failed",
+                request,
+                error: normalizeLazyError(error),
+                fallback: hoverFallback,
+              }));
             });
           return;
         }
@@ -344,15 +587,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
       }
 
       if (mode === "hover") {
-        if (activeHoverRequest?.cacheKey && activeHoverRequest.cacheKey !== cacheKey) {
-          activeHoverRequest.controller.abort();
-          logLazyExplanation("hover cancelled", {
-            mode,
-            cacheKey: activeHoverRequest.cacheKey,
-            reason: "new stable hover",
-          });
-        }
-        activeHoverRequest = { cacheKey, controller };
+        activeHoverRequest = request;
         const waitMs = Math.max(0, nextHoverRequestAt - Date.now());
         if (waitMs > 0) {
           timerId = window.setTimeout(runRequest, waitMs);
@@ -361,17 +596,23 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         nextHoverRequestAt = Date.now() + HOVER_RATE_LIMIT_MS;
       }
 
+      startHoverLoadingTimers();
       timeoutId = window.setTimeout(() => {
-        timedOut = true;
+        if (!isCurrent()) return;
         controller.abort();
-        if (!cancelled && requestIdRef.current === requestId) {
-          setState({
-            loading: false,
-            error: TIMEOUT_MESSAGE,
-            data: hoverFallback,
-          });
-        }
-        logLazyExplanation("request timed out", { mode, cacheKey });
+        setState((current) => reduceLazyExplanationLifecycle(current, {
+          type: "request_failed",
+          request,
+          error: HOVER_TIMEOUT_MESSAGE,
+          fallback: hoverFallback,
+        }));
+        logLazyExplanation("request timed out", {
+          mode,
+          cacheKey,
+          requestId,
+          reason: "timeout",
+          targetId: request.targetId,
+        });
       }, mode === "hover" ? HOVER_TIMEOUT_MS : PIN_TIMEOUT_MS);
 
       createLazyRequest({
@@ -381,35 +622,75 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         problem,
         getToken,
         signal: controller.signal,
+        requestDescriptor: request,
       })
         .then((resolved) => {
-          if (cancelled || requestIdRef.current !== requestId) return;
-          setState({ loading: false, error: "", data: resolved });
+          if (!isCurrent()) return;
+          const applies = shouldApplyLazyExplanation(item, resolved);
+          logLazyExplanation("state update", {
+            mode,
+            cacheKey,
+            requestId,
+            transition: "request_succeeded",
+            applies,
+            reason: applies ? null : "target_mismatch",
+            targetId: request.targetId,
+            responseTargetId: resolved.targetId || null,
+          });
+          setState((current) => reduceLazyExplanationLifecycle(current, {
+            type: "request_succeeded",
+            request,
+            data: resolved,
+            applies,
+            reason: applies ? null : "target_mismatch",
+          }));
         })
         .catch((error) => {
-          if (cancelled || requestIdRef.current !== requestId || error?.name === "AbortError") return;
+          if (!isCurrent() || error?.name === "AbortError") {
+            logLazyExplanation("request abort ignored", {
+              mode,
+              cacheKey,
+              requestId,
+              reason: error?.name === "AbortError" ? "AbortError" : "not-current",
+              targetId: request.targetId,
+            });
+            return;
+          }
           if (isRateLimitError(error)) {
             requestCooldownUntil.set(cacheKey, Date.now() + 5000);
           }
-          setState({
-            loading: false,
+          logLazyExplanation("state update", {
+            mode,
+            cacheKey,
+            requestId,
+            transition: "request_failed",
             error: normalizeLazyError(error),
-            data: hoverFallback,
+            targetId: request.targetId,
           });
+          setState((current) => reduceLazyExplanationLifecycle(current, {
+            type: "request_failed",
+            request,
+            error: normalizeLazyError(error),
+            fallback: hoverFallback,
+          }));
         })
         .finally(() => {
           if (timeoutId) {
             window.clearTimeout(timeoutId);
             timeoutId = null;
           }
-          if (timedOut && !cancelled && requestIdRef.current === requestId) {
-            setState({
-              loading: false,
-              error: TIMEOUT_MESSAGE,
-              data: hoverFallback,
-            });
+          if (loadingTimerId) {
+            window.clearTimeout(loadingTimerId);
+            loadingTimerId = null;
           }
-          if (activeHoverRequest?.cacheKey === cacheKey) {
+          if (stillGeneratingTimerId) {
+            window.clearTimeout(stillGeneratingTimerId);
+            stillGeneratingTimerId = null;
+          }
+          if (isCurrentLazyRequest(activeRequestRef.current, request)) {
+            activeRequestRef.current = null;
+          }
+          if (isCurrentLazyRequest(activeHoverRequest, request)) {
             activeHoverRequest = null;
           }
         });
@@ -420,11 +701,21 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
     return () => {
       cancelled = true;
       if (timerId) window.clearTimeout(timerId);
+      if (loadingTimerId) window.clearTimeout(loadingTimerId);
+      if (stillGeneratingTimerId) window.clearTimeout(stillGeneratingTimerId);
       if (timeoutId) window.clearTimeout(timeoutId);
+      if (isCurrentLazyRequest(activeRequestRef.current, request)) {
+        activeRequestRef.current = null;
+      }
       if (mode === "hover") {
-        controller.abort();
-        if (activeHoverRequest?.cacheKey === cacheKey) activeHoverRequest = null;
-        logLazyExplanation("hover cancelled", { mode, cacheKey, reason: "unmounted or changed" });
+        if (isCurrentLazyRequest(activeHoverRequest, request)) activeHoverRequest = null;
+        logLazyExplanation("hover cancelled", {
+          mode,
+          cacheKey,
+          requestId,
+          reason: "unmounted or changed",
+          targetId: request.targetId,
+        });
       }
       if (mode === "pin" && !inFlightPinRequests.has(cacheKey)) {
         pinRequestLocks.delete(cacheKey);
@@ -465,6 +756,7 @@ function FollowupChat({ item, problem, getToken }) {
           currentStep: context.currentStep || null,
           selectedText: item.selectedText || item.display || "",
           selectedTokens: item.selectedTokens || [],
+          semanticSelection: item.semanticSelection || context.semanticSelection || null,
           pinnedExplanation: currentExplanation,
           question: trimmed,
           history: messages,
@@ -545,9 +837,10 @@ function FloatingWindow({ item, index, problem, getToken }) {
     || item.content?.[item.depth]
     || item.content?.intermediate
     || item.title;
+  const identity = getHoverTargetIdentity(item);
   const displayTitle = userFacingTooltipTitle({
-    title: lazyState.data?.title || item.title,
-    selectedText: item.selectedText || item.display,
+    title: identity.tooltipTitle || identity.label || item.title,
+    selectedText: identity.sourceText || item.selectedText || item.display,
     display: item.display,
     latex: item.latex,
     role: item.role,
@@ -632,6 +925,9 @@ function FloatingWindow({ item, index, problem, getToken }) {
   return (
     <motion.article
       ref={windowRef}
+      data-semantic-id={identity.semanticId || identity.targetId || undefined}
+      data-tooltip-semantic-id={identity.semanticId || identity.targetId || undefined}
+      data-source-range={identity.sourceRange ? `${identity.sourceRange.start}:${identity.sourceRange.end}` : undefined}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -744,6 +1040,7 @@ export function ExplanationPopover() {
   const { getToken } = useAuthToken();
   const tooltipRef = useRef(null);
   const [adjustedPosition, setAdjustedPosition] = useState(null);
+  const [maxTooltipHeight, setMaxTooltipHeight] = useState(null);
   const hoverDepth = explanationLevel >= 2 ? "intermediate" : "beginner";
   const lazyState = useLazyExplanation(
     hoverLens,
@@ -753,125 +1050,161 @@ export function ExplanationPopover() {
     Boolean(hoverLens),
     hoverDepth
   );
+  const content = hoverLens
+    ? (explanationLevel >= 2 ? hoverLens.content?.intermediate : hoverLens.content?.beginner)
+    : "";
+  const identity = hoverLens ? getHoverTargetIdentity(hoverLens) : {};
+  const displayTitle = hoverLens ? userFacingTooltipTitle({
+    title: identity.tooltipTitle || identity.label || hoverLens.title,
+    selectedText: identity.sourceText || hoverLens.selectedText || hoverLens.display,
+    display: hoverLens.display,
+    latex: hoverLens.latex,
+    role: hoverLens.role,
+  }) : "";
+  const lazyContent = lazyState.data?.explanation || content || displayTitle;
+  const loadingMessage = getLazyLoadingMessage("hover", lazyState.phase);
+
+  useEffect(() => {
+    if (!hoverLens) return undefined;
+    const identity = getHoverTargetIdentity(hoverLens);
+    logLazyExplanation("tooltip mount", {
+      semanticNodeId: identity.semanticId || identity.targetId || null,
+      selectedText: identity.sourceText || hoverLens.selectedText || hoverLens.display || "",
+      sourceRange: identity.sourceRange || null,
+      tooltipId: hoverLens.id,
+    });
+    return () => {
+      logLazyExplanation("tooltip unmount", {
+        semanticNodeId: identity.semanticId || identity.targetId || null,
+        selectedText: identity.sourceText || hoverLens.selectedText || hoverLens.display || "",
+        sourceRange: identity.sourceRange || null,
+        tooltipId: hoverLens.id,
+      });
+    };
+  }, [hoverLens]);
 
   useLayoutEffect(() => {
     setAdjustedPosition(null);
   }, [hoverLens?.id, hoverLens?.x, hoverLens?.y]);
 
-  useLayoutEffect(() => {
+  const recalculateTooltipPosition = useCallback(() => {
     const tooltip = tooltipRef.current;
     const anchor = hoverLens?.anchor;
-    if (!tooltip || !anchor) return;
-
-    const tooltipRect = tooltip.getBoundingClientRect();
-    const hoveredRects = Array.from(document.querySelectorAll("[data-explainable='true']:hover"))
-      .map((node) => node.getBoundingClientRect())
-      .filter((rect) => rect.width > 0 && rect.height > 0);
-    const collisionAnchor = hoveredRects.reduce((current, rect) => ({
-      left: Math.min(current.left, rect.left),
-      right: Math.max(current.right, rect.right),
-      top: Math.min(current.top, rect.top),
-      bottom: Math.max(current.bottom, rect.bottom),
-      width: Math.max(current.right, rect.right) - Math.min(current.left, rect.left),
-      height: Math.max(current.bottom, rect.bottom) - Math.min(current.top, rect.top),
-    }), anchor);
-    const intersects = (left, right) => !(
-      left.right <= right.left
-      || left.left >= right.right
-      || left.bottom <= right.top
-      || left.top >= right.bottom
-    );
-
-    if (!intersects(tooltipRect, collisionAnchor)) return;
+    if (!tooltip || !anchor || typeof window === "undefined") return;
 
     const viewport = {
-      width: window.innerWidth,
-      height: window.innerHeight,
+      width: window.visualViewport?.width || window.innerWidth,
+      height: window.visualViewport?.height || window.innerHeight,
     };
-    const size = {
-      width: tooltipRect.width,
-      height: tooltipRect.height,
-    };
-    const gap = 12;
     const padding = 12;
-    const candidates = [
-      { x: collisionAnchor.right + gap, y: collisionAnchor.top },
-      { x: collisionAnchor.left - gap - size.width, y: collisionAnchor.top },
-      {
-        x: collisionAnchor.left + collisionAnchor.width / 2 - size.width / 2,
-        y: collisionAnchor.bottom + gap,
-      },
-      {
-        x: collisionAnchor.left + collisionAnchor.width / 2 - size.width / 2,
-        y: collisionAnchor.top - gap - size.height,
-      },
-      getTooltipPositionFromRect(collisionAnchor, { size, viewport, gap, padding }),
-      getTooltipPositionFromRect(collisionAnchor, { index: 1, size, viewport, gap, padding }),
-    ].map((candidate) => clampTooltipPosition(candidate.x, candidate.y, size, viewport, padding));
-    const next = candidates.find((candidate) => {
-      const rect = {
-        left: candidate.x,
-        right: candidate.x + size.width,
-        top: candidate.y,
-        bottom: candidate.y + size.height,
-      };
-      return !intersects(rect, collisionAnchor);
-    }) || candidates[0];
-
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const size = {
+      width: Math.min(Math.ceil(tooltipRect.width || 280), Math.max(160, viewport.width - padding * 2)),
+      height: Math.min(Math.ceil(tooltipRect.height || 120), Math.max(80, viewport.height - padding * 2)),
+    };
+    const next = getTooltipPositionFromRect(anchor, {
+      size,
+      viewport,
+      gap: 12,
+      padding,
+    });
+    const clamped = clampTooltipPosition(next.x, next.y, size, viewport, padding);
+    setMaxTooltipHeight(Math.max(80, viewport.height - padding * 2));
     setAdjustedPosition((current) => (
-      current && Math.abs(current.x - next.x) < 1 && Math.abs(current.y - next.y) < 1
+      current && Math.abs(current.x - clamped.x) < 1 && Math.abs(current.y - clamped.y) < 1
         ? current
-        : next
+        : clamped
     ));
-  }, [hoverLens, lazyState.data, lazyState.error, lazyState.loading]);
+    logLazyExplanation("tooltip measurement", {
+      tooltipMeasuredWidth: tooltipRect.width,
+      tooltipMeasuredHeight: tooltipRect.height,
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+      anchor,
+      chosenX: next.x,
+      chosenY: next.y,
+      finalClampedX: clamped.x,
+      finalClampedY: clamped.y,
+      scrollWidth: tooltip.scrollWidth,
+      clientWidth: tooltip.clientWidth,
+      scrollHeight: tooltip.scrollHeight,
+      clientHeight: tooltip.clientHeight,
+      responseTextLength: String(lazyState.data?.explanation || "").length,
+      renderedTextLength: tooltip.textContent?.length || 0,
+    });
+  }, [hoverLens?.anchor, lazyState.data?.explanation]);
+
+  useLayoutEffect(() => {
+    if (!hoverLens) return undefined;
+    recalculateTooltipPosition();
+    let frame = requestAnimationFrame(recalculateTooltipPosition);
+    const tooltip = tooltipRef.current;
+    const resizeObserver = typeof ResizeObserver !== "undefined" && tooltip
+      ? new ResizeObserver(() => {
+          cancelAnimationFrame(frame);
+          frame = requestAnimationFrame(recalculateTooltipPosition);
+        })
+      : null;
+    resizeObserver?.observe(tooltip);
+    const handleViewportChange = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(recalculateTooltipPosition);
+    };
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    window.visualViewport?.addEventListener?.("resize", handleViewportChange);
+    window.visualViewport?.addEventListener?.("scroll", handleViewportChange);
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+      window.visualViewport?.removeEventListener?.("resize", handleViewportChange);
+      window.visualViewport?.removeEventListener?.("scroll", handleViewportChange);
+    };
+  }, [hoverLens, lazyContent, lazyState.error, lazyState.loading, lazyState.phase, recalculateTooltipPosition]);
 
   if (!hoverLens) return null;
+  const initialPosition = adjustedPosition || getInitialClampedTooltipPosition(hoverLens);
 
-  const content = explanationLevel >= 2
-    ? hoverLens.content?.intermediate
-    : hoverLens.content?.beginner;
-  const displayTitle = userFacingTooltipTitle({
-    title: lazyState.data?.title || hoverLens.title,
-    selectedText: hoverLens.selectedText || hoverLens.display,
-    display: hoverLens.display,
-    latex: hoverLens.latex,
-    role: hoverLens.role,
-  });
-  const lazyContent = lazyState.data?.explanation || content || displayTitle;
-
-  return (
+  const tooltipNode = (
     <motion.div
       ref={tooltipRef}
+      data-semantic-id={identity.semanticId || identity.targetId || undefined}
+      data-tooltip-semantic-id={identity.semanticId || identity.targetId || undefined}
+      data-source-range={identity.sourceRange ? `${identity.sourceRange.start}:${identity.sourceRange.end}` : undefined}
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 4 }}
       transition={{ duration: 0.14 }}
-      className="omni-quick-tooltip fixed z-[80] max-w-[280px] rounded-xl px-3 py-2"
+      className="omni-quick-tooltip fixed z-[80] w-max max-w-[min(360px,calc(100vw-24px))] rounded-xl px-3 py-2"
       style={{
-        left: adjustedPosition?.x ?? hoverLens.x,
-        top: adjustedPosition?.y ?? hoverLens.y,
+        left: initialPosition.x,
+        top: initialPosition.y,
+        maxHeight: maxTooltipHeight ? `${maxTooltipHeight}px` : "calc(100vh - 24px)",
       }}
       onMouseEnter={holdHoverLens}
       onMouseMove={holdHoverLens}
       onMouseLeave={releaseHoverLens}
     >
       <h3 className="mb-1 text-xs font-semibold text-cyan-50/95"><MathText>{displayTitle}</MathText></h3>
-      {lazyState.loading ? (
-        <div className="flex items-center gap-2 text-xs leading-5 text-slate-100/75">
-          <Loader2 className="h-3 w-3 animate-spin text-teal-100/80" />
-          Loading...
-        </div>
-      ) : lazyState.error ? (
+      {lazyState.error ? (
         <div className="text-xs leading-5 text-rose-100/82">
           {lazyState.error}
         </div>
+      ) : lazyState.loading && loadingMessage ? (
+        <div className="flex items-center gap-2 text-xs leading-5 text-slate-100/75">
+          <Loader2 className="h-3 w-3 animate-spin text-teal-100/80" />
+          {loadingMessage}
+        </div>
       ) : (
-        <div className="omni-math-text max-w-full overflow-x-auto text-xs leading-5 text-slate-100/80 omni-scrollbar">
+        <div className="omni-math-text max-w-full overflow-x-hidden break-words text-xs leading-5 text-slate-100/80 omni-scrollbar">
           <MathText>{lazyContent}</MathText>
         </div>
       )}
     </motion.div>
   );
+  return typeof document !== "undefined" ? createPortal(tooltipNode, document.body) : tooltipNode;
 }
 
 export function PinnedLensLayer({ problem }) {
@@ -893,5 +1226,12 @@ export function PinnedLensLayer({ problem }) {
 }
 
 export default function ExplanationPanel({ problem }) {
+  useEffect(() => {
+    logSolutionState("ExplanationPanel props", {
+      problemId: problem?.id,
+      sessionId: problem?.sessionId,
+      propStepCount: getSolutionSteps(problem || {}).length,
+    });
+  }, [problem]);
   return <PinnedLensLayer problem={problem} />;
 }

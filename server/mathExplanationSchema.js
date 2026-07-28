@@ -965,7 +965,7 @@ function isDuplicateProblemStep(step, problemLatex, index = 0) {
 }
 
 function isFinalAnswerHeading(value = "") {
-  return /final\s+answer|answer$/iu.test(safeString(value));
+  return /(?:^|\b)final\b|answer$/iu.test(safeString(value));
 }
 
 function stepHeadingValue(step = {}) {
@@ -1184,6 +1184,11 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Compact model response does not contain meaningful solution steps.");
+  }
+
+  const finalStep = steps.at(-1);
+  if (!isFinalAnswerHeading(finalStep?.heading)) {
+    throw createInvalidResponseError("Compact model response must end with a final answer step.");
   }
 
   const finalAnswerLatex = simplifyDisplayedLatex(steps.at(-1)?.latex || problemLatex);

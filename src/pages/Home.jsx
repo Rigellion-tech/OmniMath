@@ -5,11 +5,30 @@ import { useAuthToken } from "@/lib/auth";
 import { cleanLatexSnippet, getProblemLabel, getSessionLabel, getStatusStepText } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
 import {
+  getSolutionSteps,
+  hasPersistableSessionContent,
+  mergeSessionListPreservingActiveSolution,
+  mergeSessionPreservingSolutionSteps,
+  withNormalizedSolutionSteps,
+} from "@/lib/solutionSteps";
+import {
+  clearSessionSolution,
+  commitGeneratedProblemToSessions,
+  commitReviewedProblemToSessions,
+  createGeneratedProblemState,
+  createPendingReviewedProblemState,
+  emptyGenerationStatus,
+  enforceStatusMatchesRenderedSolution,
+  getActiveRenderedProblem,
+} from "@/lib/solutionState";
+import {
   createUserSession,
   fetchUsageSnapshot,
   fetchUserSessions,
   updateUserSession,
 } from "@/api/userClient";
+import { normalizeSolveResponse } from "@/api/mathClient";
+import { createCanonicalProblemPayload, logCanonicalProblem } from "@/lib/canonicalProblem";
 import ProblemBlock from "@/components/math/ProblemBlock";
 import ExplanationPanel from "@/components/math/ExplanationPanel";
 import ProblemInput from "@/components/math/ProblemInput";
@@ -23,6 +42,17 @@ const emptyProblem = {
   expression: "",
   steps: [],
 };
+
+const DEBUG_SOLUTION_STATE = import.meta.env.DEV
+  && import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true";
+
+function logSolutionState(event, details = {}) {
+  if (!DEBUG_SOLUTION_STATE) return;
+  console.info("[omnimath:solution-state]", {
+    event,
+    ...details,
+  });
+}
 
 function createSession(overrides = {}) {
   const now = new Date().toISOString();
@@ -39,7 +69,7 @@ function createSession(overrides = {}) {
     steps: [],
     pinnedWindows: [],
     persisted: false,
-    dirty: true,
+    dirty: false,
     ...overrides,
   };
 }
@@ -59,9 +89,14 @@ function normalizeSession(session) {
   const problem = session.problem
     || (Array.isArray(session.problems) ? session.problems[session.problems.length - 1] : null)
     || emptyProblem;
-  const normalizedProblem = stripDemoFields(problem);
+  const sessionSteps = getSolutionSteps(session);
+  const problemSteps = getSolutionSteps(problem);
+  const normalizedProblem = withNormalizedSolutionSteps({
+    ...stripDemoFields(problem),
+    steps: problemSteps.length > 0 ? problemSteps : sessionSteps,
+  });
   const normalizedProblems = Array.isArray(session.problems)
-    ? session.problems.map(stripDemoFields)
+    ? session.problems.map((item) => withNormalizedSolutionSteps(stripDemoFields(item)))
     : normalizedProblem?.expression
       ? [normalizedProblem]
       : [];
@@ -73,7 +108,7 @@ function normalizeSession(session) {
     title: session.title || titleFromProblem(normalizedProblem, "New math session"),
     problem: normalizedProblem,
     problems: normalizedProblems,
-    steps: Array.isArray(session.steps) ? session.steps : normalizedProblem?.steps || [],
+    steps: sessionSteps.length > 0 ? sessionSteps : getSolutionSteps(normalizedProblem),
     messages: Array.isArray(session.messages) ? session.messages : [],
     pinnedWindows: Array.isArray(session.pinnedWindows) ? session.pinnedWindows : [],
     persisted: Boolean(session.persisted),
@@ -92,9 +127,9 @@ function compactTitle(value) {
 function getUsageMeta(usage) {
   if (!usage) return "";
 
-  const parts = [`${usage.used}/${usage.limit} used today`];
+  const parts = [`${getUsageUsed(usage)}/${usage.limit} used today`];
   if (usage.monthly) {
-    parts.push(`${usage.monthly.used}/${usage.monthly.limit} used this month`);
+    parts.push(`${getUsageUsed(usage.monthly)}/${usage.monthly.limit} used this month`);
   }
   if (usage.resetsAt) {
     const resetDate = new Date(usage.resetsAt);
@@ -109,8 +144,15 @@ function getUsageMeta(usage) {
   return parts.join(" | ");
 }
 
+function getUsageUsed(usage) {
+  return Number.isFinite(Number(usage?.used))
+    ? Number(usage.used)
+    : Math.max(0, Number(usage?.limit || 0) - Number(usage?.remaining || 0));
+}
+
 function IssueCard({ status }) {
   if (status.type !== "error" && status.type !== "limit") return null;
+  const hints = Array.isArray(status.hints) ? status.hints : [];
 
   return (
     <div className="mb-5 flex items-start gap-3 rounded-2xl border border-rose-300/[0.16] bg-rose-400/[0.055] p-4 shadow-[0_18px_44px_rgba(0,0,0,0.2)]">
@@ -127,9 +169,28 @@ function IssueCard({ status }) {
         {status.meta && (
           <p className="mt-2 text-xs text-slate-300/55">{status.meta}</p>
         )}
+        {hints.length > 0 && (
+          <ul className="mt-2 grid gap-1 text-xs leading-5 text-slate-200/68">
+            {hints.map((hint) => (
+              <li key={hint}>{hint}</li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );
+}
+
+function qualityFailureHints(solutionIssues = []) {
+  const issueSet = new Set(Array.isArray(solutionIssues) ? solutionIssues : []);
+  const hints = [];
+  if (issueSet.has("numerical_final_answer_mismatch")) {
+    hints.push("The proposed final value disagreed with an independent numerical check.");
+  }
+  if (issueSet.has("detached_relation_leading_fragment")) {
+    hints.push("A generated equation fragment had invalid presentation structure.");
+  }
+  return hints;
 }
 
 export default function Home() {
@@ -151,23 +212,31 @@ export default function Home() {
   });
   const boardRef = useRef(null);
   const saveTimerRef = useRef(null);
+  const sessionsRef = useRef(sessions);
+  const activeSessionIdRef = useRef(activeSessionId);
+  const sessionRestoreAttemptedRef = useRef(false);
   const { getToken, isLoaded, isSignedIn, isMock } = useAuthToken();
   const { settings } = useSettings();
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const problem = useMemo(() => {
-    const activeProblem = activeSession?.problem ?? emptyProblem;
+    const renderedProblem = getActiveRenderedProblem(activeSession, emptyProblem);
     return {
-      ...activeProblem,
-      id: activeProblem.id || activeSession?.id,
+      ...renderedProblem,
+      id: renderedProblem.id || activeSession?.id,
       sessionId: activeSession?.id,
     };
   }, [activeSession]);
   const providerKey = activeSession?.id ?? "default";
 
+  useEffect(() => {
+    sessionsRef.current = sessions;
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId, sessions]);
+
   const updateActiveSession = useCallback((updater, { markDirty = true } = {}) => {
-    setSessions((prev) =>
-      prev.map((session) =>
+    setSessions((prev) => {
+      const nextSessions = prev.map((session) =>
         session.id === activeSessionId
           ? {
               ...session,
@@ -176,16 +245,21 @@ export default function Home() {
               dirty: markDirty || session.dirty,
             }
           : session
-      )
-    );
+      );
+      sessionsRef.current = nextSessions;
+      return nextSessions;
+    });
   }, [activeSessionId]);
 
   useEffect(() => {
     if (!isLoaded) return undefined;
     if (!isSignedIn || isMock) {
+      sessionRestoreAttemptedRef.current = false;
       setSessionLoading(false);
       return undefined;
     }
+    if (sessionRestoreAttemptedRef.current) return undefined;
+    sessionRestoreAttemptedRef.current = true;
 
     let cancelled = false;
     setSessionLoading(true);
@@ -206,21 +280,45 @@ export default function Home() {
             dirty: false,
           }));
 
-        if (restored.length > 0) {
-          setSessions(restored);
-          setActiveSessionId(restored[0].id);
+        const currentSessions = sessionsRef.current;
+        const currentActiveSessionId = activeSessionIdRef.current;
+        const merged = mergeSessionListPreservingActiveSolution(currentSessions, currentActiveSessionId, restored);
+
+        if (merged.sessions.length > 0) {
+          const nextActive = merged.sessions.find((session) => session.id === merged.activeSessionId) || merged.sessions[0];
+          const restoredSteps = getSolutionSteps(nextActive);
+          const restoredCanonical = nextActive.problem?.canonicalProblem || (nextActive.problem?.expression || nextActive.problem?.problem
+            ? createCanonicalProblemPayload({
+                canonicalText: nextActive.problem?.originalProblem || nextActive.problem?.problem || nextActive.problem?.expression || "",
+                canonicalLatex: nextActive.problem?.problemLatex || "",
+                source: nextActive.problem?.imageSource ? "ocr-reviewed" : "typed",
+                extractionWarnings: nextActive.problem?.extractionValidation?.issues || [],
+                extractionConfidence: nextActive.problem?.extractionValidation?.confidence,
+              })
+            : null);
+          if (restoredCanonical) {
+            logCanonicalProblem("saved session restore", restoredCanonical, { sessionId: nextActive.id });
+          }
+          setSessions(merged.sessions);
+          setActiveSessionId(nextActive.id);
+          sessionsRef.current = merged.sessions;
+          activeSessionIdRef.current = nextActive.id;
           setGenerationStatus({
-            type: restored[0].problem?.steps?.length ? "success" : "empty",
-            label: restored[0].problem?.steps?.length ? "Session restored" : "Session ready",
-            detail: restored[0].problem?.steps?.length
-              ? getStatusStepText(restored[0].problem.steps)
-              : getSessionLabel(restored[0], "Ready for a problem."),
+            type: restoredSteps.length ? "success" : "empty",
+            label: restoredSteps.length
+              ? merged.preservedActive ? "Explanation ready" : "Session restored"
+              : "Session ready",
+            detail: restoredSteps.length
+              ? getStatusStepText(restoredSteps)
+              : getSessionLabel(nextActive, "Ready for a problem."),
             meta: "",
           });
         } else {
-          const session = createSession({ title: "New math session" });
+          const session = createSession({ title: "New math session", dirty: false });
           setSessions([session]);
           setActiveSessionId(session.id);
+          sessionsRef.current = [session];
+          activeSessionIdRef.current = session.id;
         }
       })
       .catch((error) => {
@@ -237,7 +335,13 @@ export default function Home() {
   }, [getToken, isLoaded, isMock, isSignedIn]);
 
   useEffect(() => {
-    if (!activeSession?.dirty || !isSignedIn || isMock || !settings.productivity.autosave) return undefined;
+    if (
+      !activeSession?.dirty
+      || !hasPersistableSessionContent(activeSession)
+      || !isSignedIn
+      || isMock
+      || !settings.productivity.autosave
+    ) return undefined;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
 
     saveTimerRef.current = setTimeout(async () => {
@@ -253,17 +357,24 @@ export default function Home() {
           persisted: true,
           dirty: false,
         });
+        const mergedSession = normalizeSession(mergeSessionPreservingSolutionSteps(activeSession, savedSession));
 
-        setSessions((prev) =>
-          prev.map((session) => (
-            session.id === activeSession.id ? savedSession : session
-          ))
-        );
-        if (activeSessionId === activeSession.id) setActiveSessionId(savedSession.id);
+        setSessions((prev) => {
+          const nextSessions = prev.map((session) => (
+            session.id === activeSession.id ? mergedSession : session
+          ));
+          sessionsRef.current = nextSessions;
+          return nextSessions;
+        });
+        if (activeSessionId === activeSession.id) {
+          setActiveSessionId(mergedSession.id);
+          activeSessionIdRef.current = mergedSession.id;
+        }
         setSyncStatus("Saved");
       } catch (error) {
         setSessionError(error.message || "Could not save this session.");
-        setSyncStatus("");
+        const hasLiveSteps = getSolutionSteps(activeSession).length > 0;
+        setSyncStatus(hasLiveSteps ? "Solved but not saved" : "");
       }
     }, 700);
 
@@ -283,8 +394,11 @@ export default function Home() {
 
   const handleNewSession = () => {
     const session = createSession();
-    setSessions((prev) => [session, ...prev]);
+    const nextSessions = [session, ...sessionsRef.current];
+    setSessions(nextSessions);
     setActiveSessionId(session.id);
+    sessionsRef.current = nextSessions;
+    activeSessionIdRef.current = session.id;
     setSidebarOpen(false);
     setGenerationStatus({
       type: "empty",
@@ -294,14 +408,31 @@ export default function Home() {
     });
   };
 
+  const handleProblemReset = () => {
+    const resetSessionId = activeSessionIdRef.current;
+    const nextSessions = sessionsRef.current.map((session) => (
+      session.id === resetSessionId ? clearSessionSolution(session) : session
+    ));
+    setSessions(nextSessions);
+    sessionsRef.current = nextSessions;
+    setGenerationStatus(emptyGenerationStatus());
+    logSolutionState("reset", {
+      activeSessionId: resetSessionId,
+      renderedStepCount: 0,
+      statusType: "empty",
+    });
+  };
+
   const handleSessionSelect = (sessionId) => {
     const selectedSession = sessions.find((session) => session.id === sessionId);
+    const selectedSteps = getSolutionSteps(selectedSession);
     setActiveSessionId(sessionId);
+    activeSessionIdRef.current = sessionId;
     setGenerationStatus({
-      type: selectedSession?.problem?.steps?.length ? "success" : "empty",
-      label: selectedSession?.problem?.steps?.length ? "Session restored" : "Session ready",
-      detail: selectedSession?.problem?.steps?.length
-        ? getStatusStepText(selectedSession.problem.steps)
+      type: selectedSteps.length ? "success" : "empty",
+      label: selectedSteps.length ? "Session restored" : "Session ready",
+      detail: selectedSteps.length
+        ? getStatusStepText(selectedSteps)
         : getSessionLabel(selectedSession, "Ready for a problem."),
       meta: "",
     });
@@ -318,23 +449,68 @@ export default function Home() {
   };
 
   const handleProblemGenerated = (data) => {
-    handleUsageUpdate(data.usage);
-    const problemData = stripDemoFields(data);
-    updateActiveSession((session) => ({
-      problem: problemData,
-      problems: [...(session.problems || []), problemData],
-      steps: problemData.steps || [],
-      title: titleFromProblem(problemData, "Math Problem"),
-    }));
-    setGenerationStatus({
-      type: "success",
-      label: "Explanation ready",
-      detail: getStatusStepText(problemData.steps),
-      meta: data.runtimeNotice || "",
+    const normalizedData = normalizeSolveResponse(data, { endpoint: "Home.handleProblemGenerated" });
+    if (normalizedData.canonicalProblem) {
+      logCanonicalProblem("solve response", normalizedData.canonicalProblem, { endpoint: normalizedData.metadata?.endpoint });
+    }
+    handleUsageUpdate(normalizedData.usage || normalizedData.metadata?.usage);
+    const requestSessionId = data?._requestSessionId || data?.requestSessionId || activeSessionIdRef.current;
+    const beforeActiveSessionId = activeSessionIdRef.current;
+    const { problemData, steps: normalizedSteps, status: responseStatus } = createGeneratedProblemState(normalizedData);
+    logSolutionState("solve response", {
+      submittedProblemText: normalizedData.originalProblem || normalizedData.problem || normalizedData.expression || "",
+      requestSessionId,
+      activeSessionIdBeforeWrite: beforeActiveSessionId,
+      apiResponseStepCount: getSolutionSteps(data).length,
+      normalizedSolutionStepCount: normalizedSteps.length,
+    });
+
+    const commitResult = commitGeneratedProblemToSessions({
+      sessions: sessionsRef.current,
+      activeSessionId: activeSessionIdRef.current,
+      requestSessionId,
+      problemData,
+    });
+    logSolutionState("session write", {
+      requestedSessionId: requestSessionId,
+      sessionIdBeingWritten: commitResult.activeSessionId,
+      activeSessionIdBeforeWrite: activeSessionIdRef.current,
+      normalizedSolutionStepCount: normalizedSteps.length,
+      renderedStepCountAfterWrite: commitResult.committedSteps.length,
+      wrote: commitResult.wrote,
+    });
+
+    setSessions(commitResult.sessions);
+    sessionsRef.current = commitResult.sessions;
+
+    const committedStepCount = commitResult.committedSteps.length;
+    const nextActiveSessionId = commitResult.activeSessionId || activeSessionIdRef.current;
+    if (nextActiveSessionId && nextActiveSessionId !== activeSessionIdRef.current) {
+      setActiveSessionId(nextActiveSessionId);
+      activeSessionIdRef.current = nextActiveSessionId;
+    }
+
+    const nextStatus = committedStepCount > 0
+      ? responseStatus
+      : createGeneratedProblemState({ steps: [] }).status;
+    setGenerationStatus(nextStatus);
+    logSolutionState("status commit", {
+      activeSessionIdAfterWrite: nextActiveSessionId,
+      solutionStepCountInActiveSession: committedStepCount,
+      statusType: nextStatus.type,
+      statusLabel: nextStatus.label,
+      statusDetail: nextStatus.detail,
     });
   };
 
-  const handleGenerationStart = ({ source }) => {
+  const handleGenerationStart = (event = {}) => {
+    const { source } = event;
+    logSolutionState("submit", {
+      source,
+      submittedProblemText: event.problem || "",
+      activeSessionIdBeforeRequest: activeSessionIdRef.current,
+      requestSessionId: event.requestSessionId || activeSessionIdRef.current,
+    });
     setGenerationStatus({
       type: "loading",
       label: source === "image" ? "Reading image" : "Solving problem",
@@ -356,7 +532,39 @@ export default function Home() {
     });
   };
 
-  const handleGenerationError = ({ source, message, status, code, usage }) => {
+  const handleReviewedProblemSubmitted = (payload = {}) => {
+    const requestSessionId = activeSessionIdRef.current;
+    const problemData = createPendingReviewedProblemState(payload);
+    const commitResult = commitReviewedProblemToSessions({
+      sessions: sessionsRef.current,
+      activeSessionId: activeSessionIdRef.current,
+      requestSessionId,
+      problemData,
+    });
+    setSessions(commitResult.sessions);
+    sessionsRef.current = commitResult.sessions;
+    if (commitResult.activeSessionId && commitResult.activeSessionId !== activeSessionIdRef.current) {
+      setActiveSessionId(commitResult.activeSessionId);
+      activeSessionIdRef.current = commitResult.activeSessionId;
+    }
+    logSolutionState("reviewed problem committed", {
+      requestSessionId,
+      activeSessionId: commitResult.activeSessionId,
+      canonicalInputHash: payload.canonicalProblem?.hash || "",
+      wrote: commitResult.wrote,
+    });
+    return commitResult.activeSessionId || requestSessionId;
+  };
+
+  const handleGenerationError = ({
+    source,
+    message,
+    status,
+    code,
+    usage,
+    solutionIssues = [],
+    retryable = false,
+  }) => {
     handleUsageUpdate(usage);
     const isLimitError = status === 429 && code === "USAGE_LIMIT_EXCEEDED";
     if (isLimitError) {
@@ -371,22 +579,46 @@ export default function Home() {
 
     const isServerError = status >= 500;
     const isAiUnavailable = code === "AI_SERVICE_UNAVAILABLE";
+    const isQualityInvalid = code === "AI_SOLUTION_QUALITY_INVALID";
     const showBackendMessage = isServerError && import.meta.env.DEV && message;
-    setGenerationStatus({
+    const qualityHints = qualityFailureHints(solutionIssues);
+    const nextStatus = {
       type: "error",
-      label: source === "image"
+      label: isQualityInvalid
+        ? "Mathematical validation failed"
+        : source === "image"
         ? "Image analysis failed"
         : source === "image-solve"
           ? "Solution generation failed"
           : "Generation failed",
-      detail: isAiUnavailable
+      detail: isQualityInvalid
+        ? "The generated solution failed mathematical validation. Your reviewed problem has been preserved."
+        : isAiUnavailable
         ? "AI service timed out or connection dropped. Try again."
         : isServerError
         ? showBackendMessage
           ? message
           : "The AI backend could not complete the request."
         : message || "The solver could not complete that request.",
-      meta: "",
+      meta: retryable && source === "image-solve" ? "Retry solve from the reviewed extraction." : "",
+      code,
+      solutionIssues,
+      retryable,
+      hints: qualityHints.length > 0
+        ? qualityHints
+        : isQualityInvalid
+          ? ["Retry from the reviewed problem when ready."]
+          : [],
+    };
+    setGenerationStatus(nextStatus);
+    logSolutionState("status commit", {
+      source,
+      statusType: nextStatus.type,
+      statusLabel: nextStatus.label,
+      statusDetail: nextStatus.detail,
+      httpStatus: status,
+      code,
+      finalUiState: "error-status-rendered",
     });
   };
 
@@ -411,6 +643,33 @@ export default function Home() {
   }, [activeSessionId, settings.interaction.stickyLensPositions]);
 
   const isGenerating = generationStatus.type === "loading";
+  const displayedGenerationStatus = useMemo(
+    () => enforceStatusMatchesRenderedSolution(generationStatus, problem),
+    [generationStatus, problem]
+  );
+  const renderedStepCount = getSolutionSteps(problem).length;
+  useEffect(() => {
+    logSolutionState("active render state", {
+      activeSessionId,
+      problemSessionId: problem.sessionId,
+      renderedSessionId: problem.sessionId,
+      solutionStepCountInActiveSession: renderedStepCount,
+      statusType: generationStatus.type,
+      statusLabel: generationStatus.label,
+      statusDetail: generationStatus.detail,
+      displayedStatusType: displayedGenerationStatus.type,
+      displayedStatusLabel: displayedGenerationStatus.label,
+    });
+  }, [
+    activeSessionId,
+    displayedGenerationStatus.label,
+    displayedGenerationStatus.type,
+    generationStatus.detail,
+    generationStatus.label,
+    generationStatus.type,
+    problem.sessionId,
+    renderedStepCount,
+  ]);
   const aiUsage = usageByKind.ai || usageByKind.explanation || usageByKind.image;
   const tokenDaily = aiUsage?.tokens?.daily;
   const tokenMonthly = aiUsage?.tokens?.monthly;
@@ -481,8 +740,8 @@ export default function Home() {
                       key={key}
                       className="rounded-full border border-teal-300/[0.16] bg-teal-300/[0.055] px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-teal-100/75"
                     >
-                      {label}: {usage.remaining}/{usage.limit} today
-                      {usage.monthly ? ` · ${usage.monthly.remaining}/${usage.monthly.limit} month` : ""}
+                      {label}: {getUsageUsed(usage)}/{usage.limit} used today
+                      {usage.monthly ? ` · ${getUsageUsed(usage.monthly)}/${usage.monthly.limit} used this month` : ""}
                     </div>
                   ))}
                   <div className="hidden items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.035] px-3 py-1.5 text-xs text-slate-300/60 md:flex">
@@ -502,8 +761,10 @@ export default function Home() {
                 <div className="min-w-0 flex-1">
                   <ProblemInput
                     key={activeSession?.id}
+                    activeSessionId={activeSession?.id}
                     history={activeSession?.messages ?? []}
                     onHistoryChange={handleHistoryChange}
+                    onReset={handleProblemReset}
                     onProblemGenerated={handleProblemGenerated}
                     onGenerationStart={handleGenerationStart}
                     onGenerationError={handleGenerationError}
@@ -515,16 +776,19 @@ export default function Home() {
                   onGenerationError={handleGenerationError}
                   onExtractionReview={handleExtractionReview}
                   onUsageUpdate={handleUsageUpdate}
+                  onReviewedProblemSubmitted={handleReviewedProblemSubmitted}
                 />
               </div>
 
-              <GenerationStatus status={generationStatus} />
+              {displayedGenerationStatus.type !== "error" && displayedGenerationStatus.type !== "limit" && (
+                <GenerationStatus status={displayedGenerationStatus} />
+              )}
             </div>
           </header>
 
           <main ref={boardRef} className="relative z-10 mx-auto w-full max-w-[clamp(1100px,88vw,1680px)] px-4 py-8 sm:px-6 xl:px-10">
             <div className="mx-auto min-w-0">
-              <IssueCard status={generationStatus} />
+              <IssueCard status={displayedGenerationStatus} />
               <ProblemBlock problem={problem} loading={isGenerating} />
             </div>
           </main>

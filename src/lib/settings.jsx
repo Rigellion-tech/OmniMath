@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS = {
     hoverDelay: 125,
     lensDragSmoothness: "balanced",
     stickyLensPositions: true,
+    debugSemanticHitboxes: false,
   },
   learning: {
     explanationDepth: "intermediate",

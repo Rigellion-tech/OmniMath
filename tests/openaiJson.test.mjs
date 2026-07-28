@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createMathExplanation, parseJsonResponse } from "../server/openai.js";
-import { assertFastSolveResponse } from "../server/mathExplanationSchema.js";
+import { assertCompactSolveResponse, assertFastSolveResponse } from "../server/mathExplanationSchema.js";
 
 process.env.OPENAI_API_KEY ||= "test-key";
 process.env.OPENAI_RETRY_BASE_DELAY_MS = "1";
@@ -24,7 +24,7 @@ function assertObject(value) {
   return value;
 }
 
-function fastSolveOutput(problemLatex = "x+1=2") {
+function fastSolveOutput(problemLatex = "x+1=2", extra = {}) {
   return body(JSON.stringify({
     title: "Solve equation",
     problemLatex,
@@ -39,7 +39,7 @@ function fastSolveOutput(problemLatex = "x+1=2") {
     ],
     finalAnswerLatex: "x=1",
     numericCheck: "",
-  }));
+  }), extra);
 }
 
 function compactSolveOutput(problemLatex = "x+1=2") {
@@ -56,6 +56,36 @@ function compactSolveOutput(problemLatex = "x+1=2") {
       },
     ],
   }));
+}
+
+function compactTrailingSideCalculationOutput(problemLatex = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx") {
+  return {
+    title: "Compact solve with trailing side calculation",
+    problemLatex,
+    steps: [
+      {
+        id: "s1",
+        heading: "Substitute",
+        latex: "x=\\tan\\theta",
+        reasoning: "Introduce theta.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Final Answer",
+        latex: "\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: "State the final value.",
+        anchors: [],
+      },
+      {
+        id: "s3",
+        heading: "Check endpoint",
+        latex: "0",
+        reasoning: "A side calculation should not become finalAnswerLatex.",
+        anchors: [],
+      },
+    ],
+  };
 }
 
 function requestPromptText(payload) {
@@ -257,6 +287,13 @@ describe("createMathExplanation compact fallback", () => {
     }
   });
 
+  it("rejects compact responses whose trailing step is not the final answer", () => {
+    assert.throws(
+      () => assertCompactSolveResponse(compactTrailingSideCalculationOutput()),
+      /must end with a final answer step/
+    );
+  });
+
   it("does not compact retry non-retryable quality-class parse errors", async () => {
     assert.throws(
       () => parseJsonResponse(body('{"title":"Quality invalid"}'), () => {
@@ -438,6 +475,117 @@ describe("OpenAI solver sampling", () => {
       assert.equal(requests.length, 1);
       assert.equal(requests[0].temperature, 0);
       assert.equal(requests[0].top_p, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("sends reasoning effort and omits sampling for reasoning repair models", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalEnv = {
+      OMNIMATH_REPAIR_MODEL: process.env.OMNIMATH_REPAIR_MODEL,
+      OMNIMATH_REPAIR_REASONING_EFFORT: process.env.OMNIMATH_REPAIR_REASONING_EFFORT,
+    };
+    process.env.OMNIMATH_REPAIR_MODEL = "o4-mini";
+    process.env.OMNIMATH_REPAIR_REASONING_EFFORT = "high";
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requests.push(payload);
+      return jsonResponse(200, fastSolveOutput());
+    };
+
+    try {
+      await createMathExplanation({
+        prompt: "Repair the prior invalid solve for x+1=2",
+        originalProblem: "x+1=2",
+        debugContext: {
+          requestId: "reasoning-repair",
+          normalizedProblem: "x+1=2",
+          promptHash: "prompt-repair",
+          retryPurpose: "quality-repair",
+          attemptType: "repair",
+        },
+      });
+
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, "o4-mini");
+      assert.deepEqual(requests[0].reasoning, { effort: "high" });
+      assert.equal(Object.hasOwn(requests[0], "temperature"), false);
+      assert.equal(Object.hasOwn(requests[0], "top_p"), false);
+      assert.equal(requests[0].text.format.strict, true);
+      assert.equal(requests[0].text.format.type, "json_schema");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalEnv.OMNIMATH_REPAIR_MODEL === undefined) delete process.env.OMNIMATH_REPAIR_MODEL;
+      else process.env.OMNIMATH_REPAIR_MODEL = originalEnv.OMNIMATH_REPAIR_MODEL;
+      if (originalEnv.OMNIMATH_REPAIR_REASONING_EFFORT === undefined) delete process.env.OMNIMATH_REPAIR_REASONING_EFFORT;
+      else process.env.OMNIMATH_REPAIR_REASONING_EFFORT = originalEnv.OMNIMATH_REPAIR_REASONING_EFFORT;
+    }
+  });
+
+  it("does not send unsupported reasoning effort values", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalEnv = {
+      OMNIMATH_SOLVER_MODEL: process.env.OMNIMATH_SOLVER_MODEL,
+      OMNIMATH_SOLVER_REASONING_EFFORT: process.env.OMNIMATH_SOLVER_REASONING_EFFORT,
+    };
+    process.env.OMNIMATH_SOLVER_MODEL = "o4-mini";
+    process.env.OMNIMATH_SOLVER_REASONING_EFFORT = "xhigh";
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return jsonResponse(200, fastSolveOutput());
+    };
+
+    try {
+      await createMathExplanation({
+        prompt: "Solve x+1=2",
+        originalProblem: "x+1=2",
+        debugContext: {
+          requestId: "reasoning-unsupported",
+          normalizedProblem: "x+1=2",
+          promptHash: "prompt",
+        },
+      });
+
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, "o4-mini");
+      assert.equal(Object.hasOwn(requests[0], "reasoning"), false);
+      assert.equal(Object.hasOwn(requests[0], "temperature"), false);
+      assert.equal(Object.hasOwn(requests[0], "top_p"), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalEnv.OMNIMATH_SOLVER_MODEL === undefined) delete process.env.OMNIMATH_SOLVER_MODEL;
+      else process.env.OMNIMATH_SOLVER_MODEL = originalEnv.OMNIMATH_SOLVER_MODEL;
+      if (originalEnv.OMNIMATH_SOLVER_REASONING_EFFORT === undefined) delete process.env.OMNIMATH_SOLVER_REASONING_EFFORT;
+      else process.env.OMNIMATH_SOLVER_REASONING_EFFORT = originalEnv.OMNIMATH_SOLVER_REASONING_EFFORT;
+    }
+  });
+
+  it("preserves provider reasoning token usage details", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return jsonResponse(200, fastSolveOutput("x+1=2", {
+        usage: {
+          input_tokens: 11,
+          output_tokens: 22,
+          output_tokens_details: { reasoning_tokens: 7 },
+          total_tokens: 33,
+        },
+      }));
+    };
+
+    try {
+      const result = await createMathExplanation({ prompt: "Solve x+1=2", originalProblem: "x+1=2" });
+
+      assert.equal(requests.length, 1);
+      assert.equal(result._aiUsage.input_tokens, 11);
+      assert.equal(result._aiUsage.output_tokens, 22);
+      assert.equal(result._aiUsage.output_tokens_details.reasoning_tokens, 7);
+      assert.equal(result._aiUsage.total_tokens, 33);
     } finally {
       globalThis.fetch = originalFetch;
     }

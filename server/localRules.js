@@ -105,11 +105,107 @@ function findRule(value = "") {
   return RULES.find((rule) => rule.patterns.some((pattern) => pattern.test(text))) || null;
 }
 
+function isEquationLike(value = "") {
+  return /(?:=|\\le|\\ge|<=|>=)/.test(String(value || ""));
+}
+
+function asksForDerivativeOrRule(value = "") {
+  return /(?:differentiat|derivative|d\/dx|\\frac\{d\}\{dx\}|prime|power rule|product rule|chain rule|quotient rule|what rule|which rule|explain .*rule)/i
+    .test(String(value || ""));
+}
+
 function isStokesParaboloidCurlProblem(value = "") {
   const text = String(value);
   return /(?:stokes|curl|\\nabla\s*\\times|∇\s*×|\\iint|∬)/iu.test(text)
     && /paraboloid|9\s*-\s*x\^?2\s*-\s*y\^?2|9\s*-\s*x\{?\^?2\}?/iu.test(text)
     && /yz\^?2|e\^\(?x\^?2|\\sin|sin\s*\(y\)|\\ln|ln\s*\(1\s*\+\s*z\^?2\)|\\cos|cos\s*\(xy\)/iu.test(text);
+}
+
+function normalizeQuadraticInput(value = "") {
+  return String(value || "")
+    .replace(/²/g, "^2")
+    .replace(/\^\{2\}/g, "^2")
+    .replace(/−/g, "-")
+    .replace(/\s+/g, "");
+}
+
+function parsePerfectSquareQuadratic(value = "") {
+  const compact = normalizeQuadraticInput(value);
+  const match = compact.match(/^x\^2([+-])(\d+)x([+-])(\d+)=0$/i);
+  if (!match) return null;
+
+  const middle = (match[1] === "-" ? -1 : 1) * Number(match[2]);
+  const constant = (match[3] === "-" ? -1 : 1) * Number(match[4]);
+  if (!Number.isSafeInteger(middle) || !Number.isSafeInteger(constant) || constant <= 0) return null;
+  if (middle % 2 !== 0) return null;
+
+  const k = middle / 2;
+  const absK = Math.abs(k);
+  if (absK ** 2 !== constant) return null;
+
+  const sign = k < 0 ? "-" : "+";
+  const left = `x^2${sign}${Math.abs(middle)}x+${constant}`;
+  return {
+    absK,
+    sign,
+    originalEquation: `${left}=0`,
+    groupedEquation: `(x${sign}${absK})^2=0`,
+    linearEquation: `x${sign}${absK}=0`,
+    finalAnswer: `x=${-k}`,
+    reasoningFact: `${constant}=${absK}^2 and ${Math.abs(middle)}=2\\cdot${absK}`,
+  };
+}
+
+function createPerfectSquareQuadraticExplanation(problem) {
+  const square = parsePerfectSquareQuadratic(problem);
+  if (!square) return null;
+
+  const steps = [
+    {
+      id: "perfect-square-original",
+      label: "Start with the equation",
+      math: square.originalEquation,
+      summary: "Keep the original equation as the expression being solved.",
+      chunks: [],
+    },
+    {
+      id: "perfect-square-factor",
+      label: "Factor the perfect square",
+      math: square.groupedEquation,
+      summary: `${square.reasoningFact}, so the left side is the perfect square trinomial ${square.groupedEquation.replace("=0", "")}.`,
+      chunks: [],
+    },
+    {
+      id: "perfect-square-linear",
+      label: "Take the zero square root",
+      math: square.linearEquation,
+      summary: "A square equals zero only when its base equals zero.",
+      chunks: [],
+    },
+    {
+      id: "perfect-square-final",
+      label: "Final Answer",
+      math: square.finalAnswer,
+      summary: "Solve the resulting linear equation.",
+      chunks: [],
+    },
+  ];
+
+  return {
+    title: "Solve perfect square quadratic",
+    originalProblem: problem,
+    expression: square.originalEquation,
+    finalAnswer: square.finalAnswer,
+    finalAnswerLatex: square.finalAnswer,
+    summary: "Factor the perfect-square trinomial, then solve the repeated-root linear equation.",
+    explanations: {
+      beginner: "The quadratic is a perfect square, so it becomes one squared binomial equal to zero.",
+      intermediate: "Because the square equals zero, the binomial itself must equal zero.",
+      advanced: "The repeated root comes from a zero discriminant perfect-square trinomial.",
+    },
+    tokens: [],
+    steps,
+  };
 }
 
 function createStokesParaboloidCurlExplanation(problem) {
@@ -194,6 +290,7 @@ function buildToken(rule, stepId = "local-step") {
 }
 
 export function explainLocalRule(value) {
+  if (isEquationLike(value) && !asksForDerivativeOrRule(value)) return null;
   const rule = findRule(value);
   if (!rule) return null;
 
@@ -224,6 +321,9 @@ export function applyLocalRulesToExplanation(explanation) {
 }
 
 export function createLocalRuleExplanation(problem, { source = "text" } = {}) {
+  const perfectSquareExplanation = createPerfectSquareQuadraticExplanation(problem);
+  if (perfectSquareExplanation) return perfectSquareExplanation;
+
   const stokesExplanation = createStokesParaboloidCurlExplanation(problem);
   if (stokesExplanation) return stokesExplanation;
 

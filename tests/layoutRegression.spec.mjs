@@ -1,7 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { deflateSync } from "node:zlib";
+import katex from "katex";
 import { annotateMathExplanation } from "../src/lib/mathAnnotator.js";
+import { buildSemanticTree } from "../src/lib/mathSemanticTree.js";
+import { createSemanticKatexTrust, serializeSemanticTreeToLatex } from "../src/lib/semanticMathRenderer.js";
 import { createLocalRuleExplanation } from "../server/localRules.js";
 
 const ARTIFACT_DIR = "test-artifacts/layout-regression";
@@ -195,7 +198,7 @@ function createHierarchicalTokenApiResponse() {
       {
         id: "hierarchy-step-2",
         label: "Vector calculus target",
-        math: "∬_S (∇ × F) · n dS = 18π",
+        math: "\\iint_S (\\nabla \\times F) \\cdot n\\,dS = 18\\pi",
         summary: "Keep the surface integral and its nested vector-calculus pieces inspectable.",
       },
       {
@@ -203,6 +206,36 @@ function createHierarchicalTokenApiResponse() {
         label: "Cosine power integral",
         math: "\\int_0^{2\\pi} \\cos^4\\theta\\,d\\theta = \\frac{3\\pi}{4}",
         summary: "Integral of cos^4 over [0, 2π].",
+      },
+      {
+        id: "hierarchy-step-4",
+        label: "Radial final integral",
+        math: "\\int_0^1 (6r+12r^2)\\,dr",
+        summary: "Evaluate the final radial integral after simplifying the integrand.",
+      },
+      {
+        id: "hierarchy-step-5",
+        label: "Odd-function integral",
+        math: "3\\int_0^{2\\pi}\\cos\\theta\\,d\\theta",
+        summary: "The odd-function integral cancels by symmetry.",
+      },
+      {
+        id: "hierarchy-step-6",
+        label: "Zero product simplification",
+        math: "e^{4\\cos^2\\theta}\\sin(0)=0,\\quad (0)(-2\\sin\\theta)=0",
+        summary: "Zero factors make each product vanish.",
+      },
+      {
+        id: "hierarchy-step-7",
+        label: "Cosine square target",
+        math: "\\cos^2\\theta",
+        summary: "Keep the powered cosine attached to its argument.",
+      },
+      {
+        id: "hierarchy-step-8",
+        label: "Small token product",
+        math: "4r^2\\cos^2\\theta+\\sin^2\\theta",
+        summary: "Hover should prefer coefficients, function names, exponents, and variables.",
       },
     ],
     finalAnswerLatex: "18\\pi",
@@ -218,6 +251,98 @@ function createHierarchicalTokenApiResponse() {
     },
     saved: false,
     source: "playwright hierarchy fixture",
+    demoMode: true,
+  };
+}
+
+function createComplexIntegralHoverInvestigationResponse() {
+  const originalIntegral = "\\int_0^\\infty\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+  const finalAnswer = "\\frac{\\pi}{2}\\ln^2(2)";
+  const steps = [
+    {
+      id: "complex-hover-step-1",
+      label: "Step 1 tangent substitution",
+      math: "x=\\tan\\theta,\\quad dx=\\sec^2\\theta\\,d\\theta,\\quad x\\,dx=\\tan\\theta\\sec^2\\theta\\,d\\theta",
+      summary: "Introduce x=tan theta and transform the differential.",
+    },
+    {
+      id: "complex-hover-nested-log-fraction",
+      label: "Nested logarithmic fraction",
+      math: "\\frac{\\ln\\left(1+\\frac{x^2}{1+x^2}\\right)}{1+\\frac{x}{1+x}}",
+      summary: "Keep nested logarithmic fraction ownership inspectable.",
+    },
+    {
+      id: "complex-hover-step-2",
+      label: "Step 2 transformed integral",
+      math: "\\int_0^{\\pi/2}\\frac{\\ln(\\sec^2\\theta)\\theta\\sec^2\\theta}{\\tan\\theta(1+\\tan^2\\theta)}\\,d\\theta=\\int_0^{\\pi/2}\\frac{\\theta\\ln(\\sec^2\\theta)}{\\sin\\theta\\cos\\theta}\\,d\\theta",
+      summary: "Substitute and simplify the right hand integrand.",
+    },
+    {
+      id: "complex-hover-step-4",
+      label: "Step 4 secant cancellation",
+      math: "(\\sec^2\\theta)^{a-1}\\frac{\\sec^2\\theta}{\\sec^2\\theta}=\\sec^{2a-2}\\theta",
+      summary: "The secant-square factors cancel.",
+    },
+    {
+      id: "complex-hover-step-5",
+      label: "Step 5 bounded auxiliary integral",
+      math: "F(a)=\\int_0^{\\pi/2}\\frac{\\theta(\\sec^{2a}\\theta-1)}{\\sin\\theta\\cos\\theta}\\,d\\theta=\\int_0^{\\pi/2}\\theta\\frac{\\cos^{-2a}\\theta-1}{\\sin\\theta\\cos\\theta}\\,d\\theta",
+      summary: "Introduce a parameterized integral with a complex upper bound.",
+    },
+    {
+      id: "complex-hover-step-6",
+      label: "Step 6 right side",
+      math: "F'(0)=\\int_0^{\\pi/2}\\frac{-2\\theta\\ln(\\cos\\theta)}{\\sin\\theta\\cos\\theta}\\,d\\theta=2\\int_0^{\\pi/2}\\theta\\ln(\\sec\\theta)\\csc\\theta\\sec\\theta\\,d\\theta",
+      summary: "Differentiate under the integral sign.",
+    },
+    {
+      id: "complex-hover-step-7",
+      label: "Step 7 integration by parts setup",
+      math: "\\int_0^{\\pi/2}\\theta\\frac{d}{d\\theta}\\ln(\\tan\\theta)\\,d\\theta=\\left[\\theta\\ln(\\tan\\theta)\\right]_0^{\\pi/2}-\\int_0^{\\pi/2}\\ln(\\tan\\theta)\\,d\\theta",
+      summary: "Set up integration by parts with endpoint terms.",
+    },
+    {
+      id: "complex-hover-step-8",
+      label: "Step 8 logarithmic identity",
+      math: "\\int_0^{\\pi/2}\\ln(\\cos\\theta)\\,d\\theta=-\\frac{\\pi}{2}\\ln 2,\\quad \\theta\\tan\\theta\\,d\\theta",
+      summary: "Use the standard logarithmic cosine integral.",
+    },
+    {
+      id: "complex-hover-step-9",
+      label: "Step 9 differential expression",
+      math: "(\\ln(\\cos\\theta)-\\theta\\tan\\theta)d\\theta=\\ln(\\cos\\theta)\\,d\\theta-\\theta\\tan\\theta\\,d\\theta",
+      summary: "Expand the differential expression.",
+    },
+    {
+      id: "complex-hover-final-step",
+      label: "Final answer",
+      math: `${originalIntegral}=${finalAnswer}`,
+      summary: "Evaluate the original integral.",
+    },
+  ];
+  const annotated = annotateMathExplanation({
+    title: "Complex improper integral hover investigation",
+    problem: originalIntegral,
+    expression: originalIntegral,
+    extractedProblemLatex: originalIntegral,
+    steps: steps.map((step) => ({
+      ...step,
+      chunks: [{
+        id: `${step.id}-chunk`,
+        display: step.math,
+        latex: step.math,
+        text: step.math,
+        role: "equation",
+      }],
+    })),
+    finalAnswerLatex: finalAnswer,
+  });
+
+  return {
+    ...annotated,
+    usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+    saved: false,
+    source: "playwright complex improper integral hover investigation fixture",
     demoMode: true,
   };
 }
@@ -286,32 +411,163 @@ async function installHierarchicalTokenApiFixtures(page, { lazyRequests = [] } =
   });
 
   await page.route("**/api/explain-token", async (route) => {
-    lazyRequests.push({ endpoint: "hover", body: route.request().postDataJSON() });
+    const body = route.request().postDataJSON();
+    lazyRequests.push({ endpoint: "hover", body });
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        title: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}" ? "3π/4 value" : "Parent expression",
-        explanation: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}"
+        title: body?.selectedLatex === "\\frac{3\\pi}{4}" ? "3π/4 value" : `Selected ${body?.selectedLatex || "math"}`,
+        explanation: body?.selectedLatex === "\\frac{3\\pi}{4}"
           ? "The value 3π/4 is the evaluated result of the integral, separate from the integral setup."
-          : "Parent expression was selected.",
+          : `${body?.selectedLatex || "This expression"} was selected.`,
       }),
     });
   });
 
   await page.route("**/api/explain-pin", async (route) => {
-    lazyRequests.push({ endpoint: "pin", body: route.request().postDataJSON() });
+    const body = route.request().postDataJSON();
+    lazyRequests.push({ endpoint: "pin", body });
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        title: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}" ? "3π/4 value" : "Parent expression",
-        explanation: route.request().postDataJSON()?.selectedLatex === "\\frac{3\\pi}{4}"
+        title: body?.selectedLatex === "\\frac{3\\pi}{4}" ? "3π/4 value" : `Pinned ${body?.selectedLatex || "math"}`,
+        explanation: body?.selectedLatex === "\\frac{3\\pi}{4}"
           ? "The value 3π/4 is the evaluated result of the integral, separate from the integral setup."
-          : "Parent expression was selected.",
+          : `${body?.selectedLatex || "This expression"} was pinned.`,
       }),
     });
   });
+}
+
+async function installLocalSemanticLayerFixture(page, { lazyRequests = [], longLazyContent = false, lazyDelayMs = 0 } = {}) {
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Local semantic layer",
+        problem: "Inspect 3x + 45 = 67.",
+        expression: "3x+45=67",
+        steps: [{
+          id: "local-semantic-step",
+          label: "Unannotated equation",
+          math: "3x+45=67",
+          summary: "The frontend should build semantic targets locally.",
+          chunks: [{
+            id: "local-semantic-chunk",
+            display: "3x+45=67",
+            latex: "3x+45=67",
+            text: "3x+45=67",
+            role: "equation",
+            short: "Equation",
+            medium: "Equation",
+            deep: "Equation",
+          }],
+        }, {
+          id: "local-semantic-fraction-step",
+          label: "Nested fraction",
+          math: "\\frac{\\cos(xy)}{1+x^2+y^2}",
+          summary: "The frontend should expose the fraction, numerator, denominator, and function argument from AST nodes.",
+          chunks: [{
+            id: "local-semantic-fraction-chunk",
+            display: "\\frac{\\cos(xy)}{1+x^2+y^2}",
+            latex: "\\frac{\\cos(xy)}{1+x^2+y^2}",
+            text: "\\frac{\\cos(xy)}{1+x^2+y^2}",
+            role: "fraction",
+            short: "Fraction",
+            medium: "Fraction",
+            deep: "Fraction",
+          }],
+        }, {
+          id: "local-semantic-function-step",
+          label: "Function argument",
+          math: "\\cos(xy)",
+          summary: "The frontend should expose the function argument from AST nodes.",
+          chunks: [{
+            id: "local-semantic-function-chunk",
+            display: "\\cos(xy)",
+            latex: "\\cos(xy)",
+            text: "\\cos(xy)",
+            role: "function",
+            short: "Function",
+            medium: "Function",
+            deep: "Function",
+          }],
+        }, {
+          id: "local-semantic-aggregate-integral-step",
+          label: "Aggregate integral",
+          math: "\\int_0^{\\pi/2}\\sin^2(x+1)\\,dx",
+          summary: "The complete integral, upper bound, power, and grouped argument should all remain inspectable.",
+          chunks: [{
+            id: "local-semantic-aggregate-integral-chunk",
+            display: "\\int_0^{\\pi/2}\\sin^2(x+1)\\,dx",
+            latex: "\\int_0^{\\pi/2}\\sin^2(x+1)\\,dx",
+            text: "\\int_0^{\\pi/2}\\sin^2(x+1)\\,dx",
+            role: "integral",
+            short: "Integral",
+            medium: "Integral",
+            deep: "Integral",
+          }],
+        }, {
+          id: "local-semantic-grouped-power-step",
+          label: "Grouped power expression",
+          math: "(x+1)^2+\\frac{1}{x+2}",
+          summary: "Grouped powers and right-hand fraction regions should expose aggregate and child targets.",
+          chunks: [{
+            id: "local-semantic-grouped-power-chunk",
+            display: "(x+1)^2+\\frac{1}{x+2}",
+            latex: "(x+1)^2+\\frac{1}{x+2}",
+            text: "(x+1)^2+\\frac{1}{x+2}",
+            role: "expression",
+            short: "Grouped power",
+            medium: "Grouped power",
+            deep: "Grouped power",
+          }],
+        }, {
+          id: "local-semantic-arctan-step",
+          label: "Arctangent argument",
+          math: "\\arctan(x-y)",
+          summary: "The frontend should expose the function call and its argument from AST nodes.",
+          chunks: [{
+            id: "local-semantic-arctan-chunk",
+            display: "\\arctan(x-y)",
+            latex: "\\arctan(x-y)",
+            text: "\\arctan(x-y)",
+            role: "function",
+            short: "Function",
+            medium: "Function",
+            deep: "Function",
+          }],
+        }],
+        finalAnswerLatex: "67",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 7, remaining: 43, limit: 50 },
+        saved: false,
+        demoMode: true,
+      }),
+    });
+  });
+
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      lazyRequests.push({ endpoint: endpoint.includes("pin") ? "pin" : "hover", body });
+      if (lazyDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, lazyDelayMs));
+      const explanation = longLazyContent
+        ? `${body?.selectedLatex || "This expression"} was selected. ${"This long hover explanation must wrap cleanly without horizontal clipping while the tooltip remains inside the viewport. ".repeat(8)}`
+        : `${body?.selectedLatex || "This expression"} was selected.`;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          title: `Selected ${body?.selectedLatex || "math"}`,
+          explanation,
+          responseTextLength: explanation.length,
+        }),
+      });
+    });
+  }
 }
 
 async function applyBrowserZoom(page, zoom) {
@@ -382,7 +638,7 @@ async function assertLayoutIntegrity(page, { checkHover = false } = {}) {
       const rect = math.getBoundingClientRect();
       const style = getComputedStyle(math);
       if (style.visibility === "hidden" || rect.width === 0 || rect.height === 0) continue;
-      const container = math.closest(".omni-problem-preview, .omni-math-block, .omni-solution-line, .omni-floating-window");
+      const container = math.closest(".omni-problem-preview, .omni-math-block, .omni-solution-line");
       const containerRect = container?.getBoundingClientRect();
       const containerStyle = container ? getComputedStyle(container) : null;
       if (containerRect && containerStyle?.overflowY === "hidden" && rect.bottom > containerRect.bottom + tolerance) {
@@ -402,7 +658,8 @@ async function assertLayoutIntegrity(page, { checkHover = false } = {}) {
       }
 
       if (targetRect) {
-        for (const { rect } of windows) {
+        for (const { node, rect } of windows) {
+          if (node.classList.contains("omni-quick-tooltip")) continue;
           if (intersects(targetRect, rect)) {
             failures.push(`hover tooltip overlaps selected math target: target=${JSON.stringify({
               left: targetRect.left,
@@ -434,6 +691,75 @@ async function assertLayoutIntegrity(page, { checkHover = false } = {}) {
   expect(errors).toEqual([]);
 }
 
+async function moveSemanticPointer(page, x, y) {
+  await page.mouse.move(x, y, { steps: 1 });
+  const delivered = await page.evaluate(({ x, y }) => {
+    const element = document.elementFromPoint(x, y);
+    return Boolean(element?.closest?.(".math-semantic-hitbox[data-token-id], [data-inspectable='math-token']"));
+  }, { x, y });
+  if (delivered) return;
+
+  await page.evaluate(({ x, y }) => {
+    const containsPoint = (rect) => (
+      x >= rect.left
+      && x <= rect.right
+      && y >= rect.top
+      && y <= rect.bottom
+    );
+    const overlayHost = [...document.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+      .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0 && containsPoint(rect))
+      .sort((left, right) => (left.rect.width * left.rect.height) - (right.rect.width * right.rect.height))[0]
+      ?.node
+      ?.closest("[data-inspectable='math-token']");
+    const nativeHost = document
+      .elementFromPoint(x, y)
+      ?.closest?.("[data-inspectable='math-token']");
+    const nearestHost = [...document.querySelectorAll("[data-inspectable='math-token']")]
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+        const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+        return { node, distance: Math.hypot(dx, dy) };
+      })
+      .sort((left, right) => left.distance - right.distance)[0]
+      ?.node;
+    const host = overlayHost || nativeHost || nearestHost;
+    if (!host) return;
+    host.dispatchEvent(new MouseEvent("mousemove", {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+    }));
+  }, { x, y });
+}
+
+async function contextClickSemanticPointer(page, x, y) {
+  await page.evaluate(({ x, y }) => {
+    const containsPoint = (rect) => (
+      x >= rect.left
+      && x <= rect.right
+      && y >= rect.top
+      && y <= rect.bottom
+    );
+    const host = [...document.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+      .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0 && containsPoint(rect))
+      .sort((left, right) => (left.rect.width * left.rect.height) - (right.rect.width * right.rect.height))[0]
+      ?.node
+      ?.closest("[data-inspectable='math-token']");
+    if (!host) return;
+    host.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      button: 2,
+    }));
+  }, { x, y });
+}
+
 test("Stokes theorem solution stays contained and renderable at browser zoom levels", async ({ page }) => {
   await mkdir(ARTIFACT_DIR, { recursive: true });
   await installApiFixtures(page);
@@ -461,10 +787,10 @@ test("Stokes theorem solution stays contained and renderable at browser zoom lev
     await page.evaluate(() => window.scrollTo(0, 0));
     await assertLayoutIntegrity(page);
 
-    const hoverTarget = page.locator("[data-explainable='true']").first();
+    const hoverTarget = page.locator("[data-inspectable='math-subtoken']").first();
     await expect(hoverTarget).toBeVisible();
     await hoverTarget.evaluate((node) => node.setAttribute("data-layout-hover-target", "true"));
-    await hoverTarget.hover();
+    await hoverTarget.hover({ force: true });
     await page.waitForTimeout(800);
     await assertLayoutIntegrity(page, { checkHover: true });
 
@@ -489,7 +815,7 @@ test("hierarchical math tokens expose nested hover, pin, drag, tooltip, and KaTe
   await expect(page.getByRole("button", { name: /Algebra target/i })).toBeVisible();
   await expect(page.getByRole("button", { name: /Vector calculus target/i })).toBeVisible();
 
-  for (const latex of ["3x", "3", "x", "45", "67", "S", "\\\\nabla", "F", "n", "dS", "18\\\\pi"]) {
+  for (const latex of ["3", "x", "45", "67", "S", "n", "dS", "18", "\\\\pi"]) {
     await expect(page.locator(`[data-inspectable='math-subtoken'][data-token-latex='${latex}']`).first()).toBeVisible();
   }
 
@@ -502,9 +828,9 @@ test("hierarchical math tokens expose nested hover, pin, drag, tooltip, and KaTe
   await assertLayoutIntegrity(page, { checkHover: true });
   await xToken.evaluate((node) => node.removeAttribute("data-layout-hover-target"));
 
-  const nablaBox = await page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\nabla']").first().boundingBox();
-  expect(nablaBox).not.toBeNull();
-  await page.mouse.click(nablaBox.x + nablaBox.width / 2, nablaBox.y + nablaBox.height / 2, { button: "right" });
+  const vectorTokenBox = await page.locator("[data-inspectable='math-subtoken'][data-token-latex='n']").first().boundingBox();
+  expect(vectorTokenBox).not.toBeNull();
+  await page.mouse.click(vectorTokenBox.x + vectorTokenBox.width / 2, vectorTokenBox.y + vectorTokenBox.height / 2, { button: "right" });
   await expect(page.locator(".omni-floating-window")).toBeVisible();
 
   const start = await page.locator("[data-inspectable='math-subtoken'][data-token-latex='3']").first().boundingBox();
@@ -527,7 +853,2021 @@ test("hierarchical math tokens expose nested hover, pin, drag, tooltip, and KaTe
   await assertLayoutIntegrity(page);
 });
 
-test("fraction result hit-testing prefers the fraction child over the integral parent", async ({ page }) => {
+test("local semantic layer creates subtoken targets without solver annotations", async ({ page }) => {
+  const lazyRequests = [];
+  await installLocalSemanticLayerFixture(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect local semantic parsing.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByText("AI: 7/50 used today")).toBeVisible();
+
+  const hoverLatex = async (latex, expectedLatex = latex, xRatio = 0.5, stepLabel = null) => {
+    await expect.poll(() => page.evaluate(({ targetLatex, stepLabel: label }) => {
+      const scope = label
+        ? [...document.querySelectorAll(".step-card")].find((card) => card.textContent?.includes(label))
+        : document;
+      return [...(scope?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .some((candidate) => candidate.getAttribute("data-token-latex") === targetLatex);
+    }, { targetLatex: latex, stepLabel })).toBe(true);
+    const targetHandle = await page.evaluateHandle(({ targetLatex, stepLabel: label }) => {
+      const scope = label
+        ? [...document.querySelectorAll(".step-card")].find((card) => card.textContent?.includes(label))
+        : document;
+      return [...(scope?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .find((candidate) => candidate.getAttribute("data-token-latex") === targetLatex);
+    }, { targetLatex: latex, stepLabel });
+    const target = targetHandle.asElement();
+    expect(target).not.toBeNull();
+    const box = await page.evaluate(({ targetLatex, stepLabel: label }) => {
+      const scope = label
+        ? [...document.querySelectorAll(".step-card")].find((card) => card.textContent?.includes(label))
+        : document;
+      const node = [...(scope?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .find((candidate) => candidate.getAttribute("data-token-latex") === targetLatex);
+      node.scrollIntoView({ block: "center", inline: "center" });
+      const rect = node.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    }, { targetLatex: latex, stepLabel });
+    await moveSemanticPointer(
+      page,
+      box.x + Math.max(1, box.width * xRatio),
+      box.y + Math.max(1, box.height / 2)
+    );
+    await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+    if (expectedLatex !== null) {
+      await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex)
+        .toBe(expectedLatex);
+    }
+    return box;
+  };
+
+  await hoverLatex("x");
+  await expect(page.locator(".omni-quick-tooltip")).toContainText("x");
+  await hoverLatex("3");
+  const fortyFive = await hoverLatex("45");
+  await page.mouse.click(fortyFive.x + fortyFive.width / 2, fortyFive.y + fortyFive.height / 2, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("45");
+  await page.getByRole("button", { name: /Close explanation/i }).click();
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
+
+  const sixtySeven = await hoverLatex("67");
+  await page.mouse.move(fortyFive.x + fortyFive.width / 2, fortyFive.y + fortyFive.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(sixtySeven.x + sixtySeven.width / 2, sixtySeven.y + sixtySeven.height / 2, { steps: 6 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-solution-flow .omni-token-selected")).not.toHaveCount(0);
+  await page.mouse.click(6, 6);
+  await page.mouse.move(6, 6);
+
+  await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\frac{\\\\cos(xy)}{1+x^2+y^2}']")).toHaveCount(0);
+  await hoverLatex("\\cos", "\\cos", 0.5, "Nested fraction");
+  const xInFraction = await hoverLatex("x", "x", 0.5, "Nested fraction");
+  const yInFraction = await hoverLatex("y", "y", 0.5, "Nested fraction");
+  await page.mouse.click(yInFraction.x + yInFraction.width / 2, yInFraction.y + yInFraction.height / 2, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("y");
+  await page.getByRole("button", { name: /Close explanation/i }).click();
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
+
+  await page.mouse.move(xInFraction.x + xInFraction.width / 2, xInFraction.y + xInFraction.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(yInFraction.x + yInFraction.width / 2, yInFraction.y + yInFraction.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-solution-flow .omni-token-selected")).not.toHaveCount(0);
+  await page.mouse.click(6, 6);
+  await page.mouse.move(6, 6);
+
+  await hoverLatex("\\arctan", null);
+  await expect(page.locator(".omni-quick-tooltip")).toContainText(/arctan|Function name/i);
+  const arctanXTarget = page.locator("[data-inspectable='math-subtoken'][data-token-id*='arctan'][data-token-latex='x']").first();
+  await expect(arctanXTarget).toBeVisible();
+  const arctanX = await arctanXTarget.boundingBox();
+  expect(arctanX).not.toBeNull();
+  await moveSemanticPointer(page, arctanX.x + arctanX.width / 2, arctanX.y + arctanX.height / 2);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("x");
+  await page.mouse.click(arctanX.x + arctanX.width / 2, arctanX.y + arctanX.height / 2, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("x");
+});
+
+test("one typed submission produces one initial solve request despite rapid duplicate actions", async ({ page }) => {
+  let solveRequests = 0;
+  let releaseSolve;
+  const solveGate = new Promise((resolve) => {
+    releaseSolve = resolve;
+  });
+  await page.route("**/api/explain", async (route) => {
+    solveRequests += 1;
+    await solveGate;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createHierarchicalTokenApiResponse()),
+    });
+  });
+  await page.route("**/api/explain-token", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createLazyExplanationResponse()),
+    });
+  });
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect 3x + 45 = 67.");
+  const explainButton = page.getByRole("button", { name: /Explain/i });
+  await explainButton.click();
+  await page.keyboard.press("Enter");
+  await explainButton.click({ force: true, timeout: 150 }).catch(() => {});
+  await page.waitForTimeout(100);
+  releaseSolve();
+
+  await expect(page.getByRole("button", { name: /Algebra target/i })).toBeVisible();
+  expect(solveRequests).toBe(1);
+});
+
+test("debug hover performance counters prove pointer movement uses cached semantic geometry", async ({ page }) => {
+  await installLocalSemanticLayerFixture(page);
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect local semantic hover performance.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByText("AI: 7/50 used today")).toBeVisible();
+
+  const target = page.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
+  await expect(target).toBeVisible();
+  const box = await target.boundingBox();
+  expect(box).not.toBeNull();
+  await target.hover({ force: true });
+  await page.waitForTimeout(300);
+
+  const debugEnabled = await page.evaluate(() => Boolean(window.__OMNIMATH_HOVER_PERF__));
+  test.skip(!debugEnabled, "Set VITE_DEBUG_MATH_HOVER=1 or VITE_DEBUG_MATH_HOVER_PERF=1 to enable investigation counters.");
+  await page.evaluate(() => {
+    window.__OMNIMATH_HOVER_PERF__.createdAt = Date.now();
+    window.__OMNIMATH_HOVER_PERF__.counters = {};
+    window.__OMNIMATH_HOVER_PERF__.last = {};
+    window.__OMNIMATH_HOVER_PERF__.events = [];
+  });
+
+  await target.evaluate((node) => {
+    const host = node.closest("[data-inspectable='math-token']") || node;
+    const rect = node.getBoundingClientRect();
+    for (let index = 0; index < 12; index += 1) {
+      host.dispatchEvent(new MouseEvent("mousemove", {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.left + Math.max(1, Math.min(rect.width - 1, rect.width / 2 + index * 0.2)),
+        clientY: rect.top + Math.max(1, rect.height / 2),
+      }));
+    }
+  });
+  await page.waitForTimeout(120);
+
+  const counters = await page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.counters || {});
+  expect(counters.annotatedMouseMove || 0).toBeGreaterThanOrEqual(10);
+  expect(counters.pointerResolve || 0).toBeGreaterThanOrEqual(10);
+  expect(counters.getBoundingClientRectCalls || 0).toBe(0);
+  expect(counters.pointerLayoutReadCount || 0).toBe(0);
+  expect(counters.geometryMeasurement || 0).toBe(0);
+  expect(counters.sameTargetMoveSkipped || 0).toBeGreaterThanOrEqual(8);
+
+  const overlayPointerEvents = await page.evaluate(() => (
+    [...document.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+      .map((node) => window.getComputedStyle(node).pointerEvents)
+  ));
+  expect(overlayPointerEvents.length).toBeGreaterThan(0);
+  expect(overlayPointerEvents.every((value) => value === "none")).toBe(true);
+
+  await page.evaluate(() => {
+    window.__OMNIMATH_HOVER_PERF__.counters = {};
+    window.__OMNIMATH_HOVER_PERF__.last = {};
+    window.__OMNIMATH_HOVER_PERF__.events = [];
+    const chunkId = document
+      .querySelector("[data-inspectable='math-subtoken'][data-token-latex='x']")
+      ?.closest("[data-inspectable='math-token']")
+      ?.getAttribute("data-token-id");
+    for (let index = 0; index < 5; index += 1) {
+      window.__OMNIMATH_HOVER_PERF__.invalidateSemanticGeometry?.("debug-coalesced-invalidation", chunkId);
+    }
+  });
+  await expect.poll(() => page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.counters?.geometryMeasurement || 0)).toBeGreaterThanOrEqual(1);
+  const invalidationCounters = await page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.counters || {});
+  expect(invalidationCounters.geometryInvalidated || 0).toBeGreaterThanOrEqual(5);
+  expect(invalidationCounters.geometryMeasurement || 0).toBe(1);
+});
+
+test("aggregate semantic hover and quick tooltip stay stable at viewport edges", async ({ page }) => {
+  const lazyRequests = [];
+  await installLocalSemanticLayerFixture(page, { lazyRequests, longLazyContent: true, lazyDelayMs: 150 });
+  await page.setViewportSize({ width: 520, height: 420 });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect aggregate semantic parsing.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Aggregate integral/i })).toBeVisible();
+
+  const targetBox = async (stepLabel, role, kind = "group", occurrence = 0) => page.evaluate(({ stepLabel, role, kind, occurrence }) => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(stepLabel));
+    const selector = kind === "any"
+      ? `.math-semantic-hitbox[data-token-role='${role}']`
+      : `.math-semantic-hitbox[data-target-kind='${kind}'][data-token-role='${role}']`;
+    const candidates = [...(step?.querySelectorAll(selector) || [])]
+      .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+      .sort((left, right) => (right.rect.width * right.rect.height) - (left.rect.width * left.rect.height));
+    const selected = candidates[occurrence]?.node || null;
+    if (!selected) return null;
+    selected.scrollIntoView({ block: "center", inline: "nearest" });
+    const rect = selected.getBoundingClientRect();
+    return {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      latex: selected.getAttribute("data-token-latex"),
+      semanticId: selected.getAttribute("data-semantic-id"),
+    };
+  }, { stepLabel, role, kind, occurrence });
+
+  const groupGapPoint = async (stepLabel, role) => page.evaluate(({ stepLabel, role }) => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(stepLabel));
+    const group = step?.querySelector(`.math-semantic-hitbox[data-target-kind='group'][data-token-role='${role}']`);
+    if (!group) return null;
+    group.scrollIntoView({ block: "center", inline: "nearest" });
+    const groupRect = group.getBoundingClientRect();
+    const leafRects = [...step.querySelectorAll(".math-semantic-hitbox[data-target-kind='leaf']")]
+      .map((node) => node.getBoundingClientRect())
+      .filter((rect) => (
+        rect.right > groupRect.left
+        && rect.left < groupRect.right
+        && rect.bottom > groupRect.top
+        && rect.top < groupRect.bottom
+      ));
+    for (let y = groupRect.top + 1; y < groupRect.bottom - 1; y += 2) {
+      for (let x = groupRect.left + 1; x < groupRect.right - 1; x += 2) {
+        if (!leafRects.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)) {
+          return { x, y };
+        }
+      }
+    }
+    return { x: groupRect.left + groupRect.width / 2, y: groupRect.top + groupRect.height / 2 };
+  }, { stepLabel, role });
+
+  const hoverAndRead = async (box, position = { x: 0.82, y: 0.58 }) => {
+    expect(box).not.toBeNull();
+    const previous = lazyRequests.filter((request) => request.endpoint === "hover").length;
+    await moveSemanticPointer(page, box.x + Math.max(1, box.width * position.x), box.y + Math.max(1, box.height * position.y));
+    await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+    await page.waitForTimeout(180);
+    const hoverRequests = lazyRequests.filter((request) => request.endpoint === "hover");
+    if (hoverRequests.length > previous) return hoverRequests.at(-1)?.body;
+    return page.evaluate(() => {
+      const diagnostic = window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ || {};
+      return {
+        selectedLatex: diagnostic.chosenLatex || diagnostic.selected?.selectedText || diagnostic.selected?.sourceText || "",
+        selectedNode: {
+          role: diagnostic.chosenRole || diagnostic.selected?.role || "",
+          aggregate: Boolean(diagnostic.selected?.aggregate),
+          sourceRange: diagnostic.selected?.sourceRange || null,
+        },
+        semanticId: diagnostic.chosenNodeId || diagnostic.selected?.semanticId || null,
+      };
+    });
+  };
+
+  const fullIntegral = await targetBox("Aggregate integral", "integral", "group");
+  const fullBody = await hoverAndRead(fullIntegral, { x: 0.45, y: 0.86 });
+  expect(fullBody.selectedLatex).toContain("\\int");
+  expect(fullBody.selectedNode?.role).toBe("integral");
+  expect(fullBody.selectedNode?.aggregate).toBe(true);
+  expect(fullBody.selectedNode?.sourceRange).toBeTruthy();
+
+  const upperBound = await targetBox("Aggregate integral", "upperBound", "any");
+  const upperBody = await hoverAndRead(upperBound, { x: 0.5, y: 0.5 });
+  expect(upperBody.selectedLatex).toContain("\\pi");
+  expect(upperBody.selectedNode?.role).toBe("upperBound");
+
+  const power = await targetBox("Grouped power expression", "power", "group");
+  const powerPoint = await groupGapPoint("Grouped power expression", "power");
+  expect(powerPoint).not.toBeNull();
+  const powerBody = await hoverAndRead({ ...power, x: powerPoint.x, y: powerPoint.y, width: 1, height: 1 }, { x: 0, y: 0 });
+  expect(powerBody.selectedLatex).toContain("^2");
+  expect(powerBody.selectedNode?.aggregate).toBe(true);
+
+  const exponent = await targetBox("Grouped power expression", "exponent", "leaf");
+  const exponentBody = await hoverAndRead(exponent, { x: 0.5, y: 0.5 });
+  expect(exponentBody.selectedLatex).toBe("2");
+  expect(exponentBody.selectedNode?.role).toBe("exponent");
+
+  const denominator = await targetBox("Grouped power expression", "denominator", "group");
+  const denominatorBody = await hoverAndRead(denominator, { x: 0.8, y: 0.55 });
+  expect(denominatorBody.selectedLatex.length).toBeGreaterThan(0);
+
+  await expect(page.locator(".omni-quick-tooltip")).toContainText(/wrap cleanly|selected/i);
+  const tooltipBox = await page.locator(".omni-quick-tooltip").boundingBox();
+  expect(tooltipBox).not.toBeNull();
+  expect(tooltipBox.x).toBeGreaterThanOrEqual(11);
+  expect(tooltipBox.y).toBeGreaterThanOrEqual(11);
+  expect(tooltipBox.x + tooltipBox.width).toBeLessThanOrEqual(521);
+  expect(tooltipBox.y + tooltipBox.height).toBeLessThanOrEqual(421);
+  const overflow = await page.locator(".omni-quick-tooltip").evaluate((node) => ({
+    scrollWidth: node.scrollWidth,
+    clientWidth: node.clientWidth,
+    scrollHeight: node.scrollHeight,
+    clientHeight: node.clientHeight,
+    textLength: node.textContent?.length || 0,
+  }));
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  expect(overflow.textLength).toBeGreaterThan(20);
+
+  await page.mouse.move(tooltipBox.x + tooltipBox.width / 2, tooltipBox.y + Math.min(tooltipBox.height - 2, 20));
+  await page.waitForTimeout(220);
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+});
+
+test("malformed solver math does not render as raw LaTeX text", async ({ page }) => {
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Malformed fixture",
+        problem: "Malformed fixture",
+        expression: "{frac}",
+        steps: [{
+          id: "malformed-step",
+          label: "Malformed generated math",
+          math: "{frac}",
+          summary: "Malformed math should fail closed.",
+          chunks: [{ id: "bad", display: "{frac}", latex: "{frac}", text: "{frac}", role: "equation" }],
+          lines: [{ id: "bad-line", kind: "math", role: "solution_step", text: "", latex: "{frac}", tokens: [] }],
+        }],
+        finalAnswerLatex: "{frac}",
+        finalAnswer: "{frac}",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+        saved: false,
+        demoMode: true,
+      }),
+    });
+  });
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Malformed fixture.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByText("Malformed generated math")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("{frac}");
+  await expect(page.locator("[data-math-render-error='true']")).not.toHaveCount(0);
+});
+
+test("semantic geometry covers composite KaTeX leaves without whole-step fallback", async ({ page }) => {
+  const lazyRequests = [];
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Composite geometry coverage",
+        problem: "Inspect composite geometry.",
+        expression: "\\int_0^1 \\frac{\\ln(1+x)+\\cos(x)}{1+x^2}\\,dx",
+        steps: [{
+          id: "geo-quadratic",
+          label: "Geometry quadratic",
+          math: "3x^2+5x-451=0",
+          summary: "Simple quadratic leaves remain covered.",
+          chunks: [{ id: "geo-quadratic-chunk", display: "3x^2+5x-451=0", latex: "3x^2+5x-451=0", text: "3x^2+5x-451=0", role: "equation" }],
+        }, {
+          id: "geo-integral",
+          label: "Geometry integral",
+          math: "\\int_0^1 \\frac{\\ln(1+x)+\\cos(x)}{1+x^2}\\,dx",
+          summary: "Integral bounds, nested fraction, functions, products, and differential remain covered.",
+          chunks: [{ id: "geo-integral-chunk", display: "\\int_0^1 \\frac{\\ln(1+x)+\\cos(x)}{1+x^2}\\,dx", latex: "\\int_0^1 \\frac{\\ln(1+x)+\\cos(x)}{1+x^2}\\,dx", text: "\\int_0^1 \\frac{\\ln(1+x)+\\cos(x)}{1+x^2}\\,dx", role: "equation" }],
+        }, {
+          id: "geo-full-integral",
+          label: "Full structural integral",
+          math: "\\int_0^\\infty[\\ln(1+x^2)\\arctan(x)]/[x(1+x^2)]\\,dx",
+          summary: "The reported integral keeps repeated powers and function calls occurrence-specific.",
+          chunks: [{ id: "geo-full-integral-chunk", display: "\\int_0^\\infty[\\ln(1+x^2)\\arctan(x)]/[x(1+x^2)]\\,dx", latex: "\\int_0^\\infty[\\ln(1+x^2)\\arctan(x)]/[x(1+x^2)]\\,dx", text: "\\int_0^\\infty[\\ln(1+x^2)\\arctan(x)]/[x(1+x^2)]\\,dx", role: "equation" }],
+        }, {
+          id: "geo-functions",
+          label: "Geometry functions",
+          math: "\\ln(x)+\\cos(x)+\\cot(x)+\\arctan(x)",
+          summary: "Known function names are complete leaf targets.",
+          chunks: [{ id: "geo-functions-chunk", display: "\\ln(x)+\\cos(x)+\\cot(x)+\\arctan(x)", latex: "\\ln(x)+\\cos(x)+\\cot(x)+\\arctan(x)", text: "\\ln(x)+\\cos(x)+\\cot(x)+\\arctan(x)", role: "equation" }],
+        }, {
+          id: "geo-nested",
+          label: "Geometry nested fractions",
+          math: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}",
+          summary: "Nested fractions and radicals expose descendants.",
+          chunks: [{ id: "geo-nested-chunk", display: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}", latex: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}", text: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}", role: "equation" }],
+        }, {
+          id: "geo-chain",
+          label: "Geometry equality chain",
+          math: "x^2+2x+1=(x+1)^2=0\nx+1=0\nx=-1",
+          summary: "Multiline equality chains keep every line targetable.",
+          chunks: [
+            { id: "geo-chain-1", display: "x^2+2x+1=(x+1)^2=0", latex: "x^2+2x+1=(x+1)^2=0", text: "x^2+2x+1=(x+1)^2=0", role: "equation" },
+            { id: "geo-chain-2", display: "x+1=0", latex: "x+1=0", text: "x+1=0", role: "equation" },
+            { id: "geo-chain-3", display: "x=-1", latex: "x=-1", text: "x=-1", role: "equation" },
+          ],
+        }],
+        finalAnswerLatex: "x=-1",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+      }),
+    });
+  });
+  await page.route("**/api/explain-token", async (route) => {
+    const body = route.request().postDataJSON();
+    lazyRequests.push({ endpoint: "hover", body });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ title: "ok", explanation: "ok" }),
+    });
+  });
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect composite geometry.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Geometry integral/i })).toBeVisible();
+
+  const coverage = await page.evaluate(() => {
+    const expectedByStep = {
+      "Geometry quadratic": ["3", "x", "2", "5", "-451", "-", "=", "0"],
+      "Geometry integral": ["\\int", "0", "1", "\\ln", "\\cos", "x", "2", "dx"],
+      "Full structural integral": ["\\int", "0", "\\infty", "\\ln", "\\arctan", "x", "2"],
+      "Geometry functions": ["\\ln", "\\cos", "\\cot", "\\arctan", "x"],
+      "Geometry nested fractions": ["1", "2", "\\sqrt", "9", "4", "16", "25"],
+      "Geometry equality chain": ["x", "2", "1", "=", "-1"],
+    };
+    const failures = [];
+    const stepSummaries = {};
+    for (const [label, expectedLatexes] of Object.entries(expectedByStep)) {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(label));
+      const stepRect = step?.getBoundingClientRect();
+      const leaves = [...(step?.querySelectorAll("[data-inspectable='math-subtoken'][data-target-kind='leaf']") || [])]
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return {
+            latex: node.getAttribute("data-token-latex"),
+            role: node.getAttribute("data-token-role"),
+            source: node.getAttribute("data-rect-source"),
+            width: rect.width,
+            height: rect.height,
+            rect,
+          };
+        });
+      const targets = [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return {
+            latex: node.getAttribute("data-token-latex"),
+            width: rect.width,
+            height: rect.height,
+          };
+        });
+      stepSummaries[label] = leaves.map(({ latex, role, source, width, height }) => ({ latex, role, source, width, height }));
+      for (const expectedLatex of expectedLatexes) {
+        if (!targets.some((target) => target.latex === expectedLatex && target.width > 0 && target.height > 0)) {
+          failures.push(`${label}: missing ${expectedLatex}`);
+        }
+      }
+      for (const leaf of leaves) {
+        if (stepRect && leaf.width >= stepRect.width * 0.9) {
+          failures.push(`${label}: whole-step fallback for ${leaf.latex}`);
+        }
+      }
+    }
+    const functionStep = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes("Geometry functions"));
+    const functionLeaves = [...(functionStep?.querySelectorAll("[data-inspectable='math-subtoken'][data-target-kind='leaf']") || [])]
+      .map((node) => node.getAttribute("data-token-latex"));
+    for (const name of ["\\ln", "\\cos", "\\cot", "\\arctan"]) {
+      if (functionLeaves.filter((latex) => latex === name).length !== 1) failures.push(`function ${name} not exactly one target`);
+    }
+    for (const character of ["l", "n", "c", "o", "s", "t", "a", "r"]) {
+      if (functionLeaves.includes(character)) failures.push(`function split into character ${character}`);
+    }
+    return { failures, stepSummaries };
+  });
+
+  expect(coverage.failures).toEqual([]);
+
+  const tokenBox = async (stepLabel, latex, role = null, occurrence = 0) => page.evaluate(({ stepLabel, latex, role, occurrence }) => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(stepLabel));
+    const matches = [...(step?.querySelectorAll("[data-inspectable='math-subtoken'], .math-semantic-hitbox[data-token-id]") || [])]
+      .filter((node) => (
+        node.getAttribute("data-token-latex") === latex
+        && (!role || node.getAttribute("data-token-role") === role)
+      ))
+      .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0);
+    const selected = matches[occurrence]?.node || null;
+    if (!selected) return null;
+    selected.scrollIntoView({ block: "center", inline: "center" });
+    const rect = selected.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  }, { stepLabel, latex, role, occurrence });
+
+  const hoverBox = async (box, expectedLatex, expectedRole = null) => {
+    expect(box).not.toBeNull();
+    const previousHoverCount = lazyRequests.filter((request) => request.endpoint === "hover").length;
+    await page.mouse.move(4, 4);
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    await expect.poll(() => {
+      const hoverRequests = lazyRequests.filter((request) => request.endpoint === "hover");
+      return hoverRequests.length > previousHoverCount ? hoverRequests.at(-1)?.body?.selectedLatex : undefined;
+    }).toBe(expectedLatex);
+    if (expectedRole) {
+      await expect.poll(() => {
+        const hoverRequests = lazyRequests.filter((request) => request.endpoint === "hover");
+        return hoverRequests.length > previousHoverCount ? hoverRequests.at(-1)?.body?.selectedNode?.role : undefined;
+      }).toBe(expectedRole);
+    }
+    await expect.poll(() => {
+      const hoverRequests = lazyRequests.filter((request) => request.endpoint === "hover");
+      return hoverRequests.length > previousHoverCount ? hoverRequests.at(-1)?.body?.selectedNode?.id || "" : "";
+    }).not.toBe("");
+  };
+
+  await hoverBox(await tokenBox("Full structural integral", "x", "base", 0), "x", "base");
+  await hoverBox(await tokenBox("Full structural integral", "2", "exponent", 0), "2", "exponent");
+  await hoverBox(await tokenBox("Full structural integral", "\\arctan", "functionName", 0), "\\arctan", "functionName");
+  await hoverBox(await tokenBox("Full structural integral", "x", "factor", 0), "x", "factor");
+  await hoverBox(await tokenBox("Full structural integral", "2", "exponent", 1), "2", "exponent");
+  await hoverBox(await tokenBox("Full structural integral", "\\infty", "upperBound", 0), "\\infty", "upperBound");
+});
+
+test("semantic identity stays stable from function hitbox through tooltip, API, and pin", async ({ page }) => {
+  const requests = [];
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Semantic identity audit",
+        problem: "Audit repeated function identity.",
+        expression: "\\frac{\\ln(\\sec^2\\theta)\\theta}{\\tan\\theta}+\\tan\\theta",
+        steps: [{
+          id: "identity-functions",
+          label: "Identity functions",
+          math: "\\frac{\\ln(\\sec^2\\theta)\\theta}{\\tan\\theta}+\\tan\\theta",
+          summary: "Repeated functions keep distinct semantic identities.",
+          chunks: [{
+            id: "identity-functions-chunk",
+            display: "\\frac{\\ln(\\sec^2\\theta)\\theta}{\\tan\\theta}+\\tan\\theta",
+            latex: "\\frac{\\ln(\\sec^2\\theta)\\theta}{\\tan\\theta}+\\tan\\theta",
+            text: "\\frac{\\ln(\\sec^2\\theta)\\theta}{\\tan\\theta}+\\tan\\theta",
+            role: "equation",
+          }],
+        }],
+        finalAnswerLatex: "\\frac{\\ln(\\sec^2\\theta)\\theta}{\\tan\\theta}+\\tan\\theta",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+      }),
+    });
+  });
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      requests.push({ endpoint: endpoint.includes("pin") ? "pin" : "hover", body });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          semanticId: body.semanticId,
+          targetId: body.targetId,
+          targetLabel: body.targetLabel,
+          title: `Server tried ${body.selectedLatex}`,
+          explanation: `${body.selectedLatex} explanation for ${body.semanticId}`,
+        }),
+      });
+    });
+  }
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Audit repeated function identity.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Identity functions/i })).toBeVisible();
+
+  const audit = await page.evaluate(() => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes("Identity functions"));
+    const leaves = [...(step?.querySelectorAll("[data-inspectable='math-subtoken'][data-target-kind='leaf']") || [])]
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        return {
+          id: node.getAttribute("data-token-id"),
+          semanticId: node.getAttribute("data-semantic-id"),
+          latex: node.getAttribute("data-token-latex"),
+          sourceRange: node.getAttribute("data-source-range"),
+          width: rect.width,
+          height: rect.height,
+        };
+      });
+    return {
+      leaves,
+      tanLeaves: leaves.filter((leaf) => leaf.latex === "\\tan"),
+      characterFunctionLeaves: leaves.filter((leaf) => ["t", "a", "n", "s", "e", "c", "l"].includes(leaf.latex)),
+    };
+  });
+  expect(audit.characterFunctionLeaves).toEqual([]);
+  expect(audit.tanLeaves.length).toBeGreaterThanOrEqual(2);
+  expect(new Set(audit.tanLeaves.map((leaf) => leaf.semanticId)).size).toBe(audit.tanLeaves.length);
+  for (const leaf of audit.leaves) {
+    expect(leaf.semanticId).toBe(leaf.id);
+    expect(leaf.sourceRange).toMatch(/^\d+:\d+$/);
+    expect(leaf.width).toBeGreaterThan(0);
+    expect(leaf.height).toBeGreaterThan(0);
+  }
+
+  const denominatorTan = audit.tanLeaves[0];
+  const tanTarget = page.locator(`[data-inspectable='math-subtoken'][data-semantic-id='${denominatorTan.semanticId}']`).first();
+  await tanTarget.hover({ force: true });
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-semantic-id", denominatorTan.semanticId);
+  await expect.poll(() => requests.filter((request) => request.endpoint === "hover").at(-1)?.body?.semanticId).toBe(denominatorTan.semanticId);
+  const hoverBody = requests.filter((request) => request.endpoint === "hover").at(-1)?.body;
+  expect(hoverBody.targetId).toBe(denominatorTan.semanticId);
+  expect(hoverBody.selectedTokenId).toBe(denominatorTan.semanticId);
+  expect(hoverBody.selectedLatex).toBe("\\tan");
+  expect(hoverBody.selectedLatex).not.toContain("\\frac");
+  await expect(page.locator(".omni-quick-tooltip h3")).toContainText("tan");
+
+  const box = await tanTarget.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+  await expect(page.locator(".omni-floating-window")).toHaveAttribute("data-semantic-id", denominatorTan.semanticId);
+  await expect.poll(() => requests.filter((request) => request.endpoint === "pin").at(-1)?.body?.semanticId).toBe(denominatorTan.semanticId);
+});
+
+test("nested integral and signed exponent targets preserve semantic identity", async ({ page }) => {
+  const requests = [];
+  const canonicalIntegral = "\\int_0^\\infty\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+  const signedExponentProduct = "(\\sec^2\\theta)^{a-1}\\frac{\\sec^2\\theta}{\\sec^2\\theta}";
+  const polynomial = "435x^2+514514x+4155=31451545";
+
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Nested math interaction regression",
+        problem: "Inspect nested math selection.",
+        expression: canonicalIntegral,
+        steps: [{
+          id: "canonical-integral-step",
+          label: "Canonical nested integral",
+          math: canonicalIntegral,
+          summary: "Every meaningful descendant of the integral should stay targetable.",
+          chunks: [{ id: "canonical-integral-chunk", display: canonicalIntegral, latex: canonicalIntegral, text: canonicalIntegral, role: "equation" }],
+        }, {
+          id: "signed-exponent-step",
+          label: "Signed exponent product",
+          math: signedExponentProduct,
+          summary: "The visible -1 in the exponent should not resolve to the adjacent secant fraction.",
+          chunks: [{ id: "signed-exponent-chunk", display: signedExponentProduct, latex: signedExponentProduct, text: signedExponentProduct, role: "equation" }],
+        }, {
+          id: "polynomial-compat-step",
+          label: "Polynomial compatibility",
+          math: polynomial,
+          summary: "Simple polynomial interaction behavior should remain unchanged.",
+          chunks: [{ id: "polynomial-compat-chunk", display: polynomial, latex: polynomial, text: polynomial, role: "equation" }],
+        }],
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+      }),
+    });
+  });
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      requests.push({ endpoint: endpoint.includes("pin") ? "pin" : "hover", body });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          semanticId: body.semanticId,
+          targetId: body.targetId,
+          targetLabel: body.targetLabel,
+          title: `Selected ${body.selectedLatex}`,
+          explanation: `${body.selectedLatex} explanation for ${body.semanticId}`,
+        }),
+      });
+    });
+  }
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect nested math selection.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Canonical nested integral/i })).toBeVisible();
+
+  const tokenBox = async (stepLabel, latex, role = null, occurrence = 0) => page.evaluate(({ stepLabel, latex, role, occurrence }) => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(stepLabel));
+    const stepRect = step?.getBoundingClientRect();
+    const matches = [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+      .filter((node) => (
+        node.getAttribute("data-token-latex") === latex
+        && (!role || node.getAttribute("data-token-role") === role)
+      ))
+      .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0);
+    const selected = matches[occurrence]?.node || null;
+    if (!selected) return null;
+    selected.scrollIntoView({ block: "center", inline: "center" });
+    const rect = selected.getBoundingClientRect();
+    return {
+      id: selected.getAttribute("data-token-id"),
+      semanticId: selected.getAttribute("data-semantic-id"),
+      latex: selected.getAttribute("data-token-latex"),
+      role: selected.getAttribute("data-token-role"),
+      sourceRange: selected.getAttribute("data-source-range"),
+      rectSource: selected.getAttribute("data-rect-source"),
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      stepWidth: stepRect?.width || 0,
+    };
+  }, { stepLabel, latex, role, occurrence });
+
+  const hoverBox = async (box, expectedLatex) => {
+    expect(box).not.toBeNull();
+    const previousHoverCount = requests.filter((request) => request.endpoint === "hover").length;
+    await page.mouse.move(4, 4);
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    await expect.poll(() => {
+      const hoverRequests = requests.filter((request) => request.endpoint === "hover");
+      return hoverRequests.length > previousHoverCount ? hoverRequests.at(-1)?.body : null;
+    }).not.toBeNull();
+    const body = requests.filter((request) => request.endpoint === "hover").at(-1)?.body;
+    expect(body.selectedLatex).toBe(expectedLatex);
+    expect(body.semanticId).toBe(box.semanticId);
+    expect(body.targetId).toBe(box.semanticId);
+    expect(body.selectedNode?.id).toBe(box.semanticId);
+    return body;
+  };
+
+  const integralChecks = [
+    ["\\int", "integralSymbol", 0],
+    ["0", "lowerBound", 0],
+    ["\\infty", "upperBound", 0],
+    ["\\ln", "functionName", 0],
+    ["\\arctan", "functionName", 0],
+    ["x", "argument", 0],
+    ["x", "factor", 0],
+    ["2", "exponent", 0],
+    ["2", "exponent", 1],
+  ];
+  for (const [latex, role, occurrence] of integralChecks) {
+    const box = await tokenBox("Canonical nested integral", latex, role, occurrence);
+    expect(box).not.toBeNull();
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    expect(box.width).toBeLessThan(box.stepWidth * 0.8);
+    expect(box.sourceRange).toMatch(/^\d+:\d+$/);
+  }
+
+  const signedOne = await tokenBox("Signed exponent product", "-1", "constant", 0);
+  const fractionSec = await tokenBox("Signed exponent product", "\\sec", "functionName", 1);
+  expect(signedOne).not.toBeNull();
+  expect(fractionSec).not.toBeNull();
+  expect(signedOne.semanticId).not.toBe(fractionSec.semanticId);
+  const hoverBody = await hoverBox(signedOne, "-1");
+  expect(hoverBody.selectedLatex).not.toContain("\\frac");
+  await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-semantic-id", signedOne.semanticId);
+  await page.mouse.click(signedOne.x + signedOne.width / 2, signedOne.y + signedOne.height / 2, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+  await expect(page.locator(".omni-floating-window")).toHaveAttribute("data-semantic-id", signedOne.semanticId);
+  await expect.poll(() => requests.filter((request) => request.endpoint === "pin").at(-1)?.body?.semanticId).toBe(signedOne.semanticId);
+  const pinBody = requests.filter((request) => request.endpoint === "pin").at(-1)?.body;
+  expect(pinBody.selectedLatex).toBe("-1");
+  expect(pinBody.selectedLatex).not.toContain("\\frac");
+  await page.getByRole("button", { name: /Close explanation/i }).first().click({ force: true });
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
+  await page.mouse.move(4, 4);
+
+  for (const [latex, role, occurrence] of [
+    ["435", "coefficient", 0],
+    ["x", "base", 0],
+    ["2", "exponent", 0],
+    ["514514", "coefficient", 0],
+    ["+", "operator", 0],
+    ["31451545", "rightSide", 0],
+  ]) {
+    const box = await tokenBox("Polynomial compatibility", latex, role, occurrence);
+    await hoverBox(box, latex);
+  }
+});
+
+test("complex improper integral semantic rendering matches plain KaTeX geometry", async ({ page }) => {
+  const latex = "\\int_0^\\infty\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+  const semanticTree = buildSemanticTree({ stepId: "visual-complex-integral", displayLatex: latex, enabled: true });
+  const semanticRender = serializeSemanticTreeToLatex(semanticTree);
+  expect(semanticRender.error).toBe("");
+  expect(semanticRender.annotatedNodeCount).toBeGreaterThan(0);
+
+  const katexOptions = { throwOnError: true, strict: "ignore", displayMode: true };
+  const plainHtml = katex.renderToString(latex, katexOptions);
+  const semanticHtml = katex.renderToString(semanticRender.latex, {
+    ...katexOptions,
+    trust: createSemanticKatexTrust(),
+  });
+  const katexCss = await readFile("node_modules/katex/dist/katex.min.css", "utf8");
+
+  await page.setContent(`
+    <style>
+      ${katexCss}
+      body { margin: 0; padding: 32px; background: #101820; color: white; font-size: 20px; }
+      .row { display: flex; align-items: flex-start; gap: 32px; }
+      .sample { display: inline-block; }
+    </style>
+    <div class="row">
+      <div id="plain" class="sample">${plainHtml}</div>
+      <div id="semantic" class="sample">${semanticHtml}</div>
+    </div>
+  `);
+
+  const report = await page.evaluate(() => {
+    const rectSnapshot = (rect) => rect ? {
+      width: rect.width,
+      height: rect.height,
+      top: rect.top,
+      left: rect.left,
+      bottom: rect.bottom,
+      right: rect.right,
+    } : null;
+    const rectOf = (node) => {
+      const rect = node?.getBoundingClientRect?.();
+      return rect ? {
+        width: rect.width,
+        height: rect.height,
+        top: rect.top,
+        left: rect.left,
+        bottom: rect.bottom,
+        right: rect.right,
+      } : null;
+    };
+    const semantic = document.querySelector("#semantic");
+    const semanticTargets = [...semantic.querySelectorAll("[data-semantic-id]")].map((node) => {
+      const rects = [...node.getClientRects()].map(rectSnapshot).filter(Boolean);
+      return {
+        id: node.getAttribute("data-semantic-id"),
+        role: node.getAttribute("data-semantic-role"),
+        kind: node.getAttribute("data-semantic-kind"),
+        text: node.textContent || "",
+        rects,
+        union: rectOf(node),
+      };
+    });
+    return {
+      plainText: document.querySelector("#plain .katex-html")?.textContent || "",
+      semanticText: semantic?.querySelector(".katex-html")?.textContent || "",
+      plainRect: rectOf(document.querySelector("#plain")),
+      semanticRect: rectOf(semantic),
+      semanticTargets,
+    };
+  });
+
+  expect(report.plainText).toBe(report.semanticText);
+  expect(report.semanticRect.width).toBeGreaterThan(report.plainRect.width * 0.85);
+  expect(report.semanticRect.width).toBeLessThan(report.plainRect.width * 1.15);
+  expect(report.semanticRect.height).toBeGreaterThan(report.plainRect.height * 0.85);
+  expect(report.semanticRect.height).toBeLessThan(report.plainRect.height * 1.2);
+
+  const targetByRole = (role) => report.semanticTargets.filter((target) => target.role === role);
+  const numerator = targetByRole("numerator").find((target) => /ln/.test(target.text) && /arctan/.test(target.text));
+  const denominator = targetByRole("denominator").find((target) => target.text.includes("x(1+x2)"));
+  const differential = targetByRole("differential").find((target) => target.text.includes("dx"));
+
+  expect(numerator?.union?.width || 0).toBeGreaterThan(90);
+  expect(numerator?.union?.height || 0).toBeGreaterThan(12);
+  expect(numerator?.union?.height || 0).toBeLessThan(report.semanticRect.height * 0.75);
+  expect(denominator?.union?.width || 0).toBeGreaterThan(45);
+  expect(targetByRole("upperBound").some((target) => target.union?.width > 8 && target.union?.height > 6)).toBe(true);
+  expect(targetByRole("lowerBound").some((target) => target.union?.width > 4 && target.union?.height > 6)).toBe(true);
+  expect(differential?.union?.width || 0).toBeGreaterThan(10);
+
+  const tinyDetachedTargets = report.semanticTargets.filter((target) => {
+    const text = target.text.replace(/\s+/g, "");
+    if (text.length <= 1) return false;
+    const rect = target.union;
+    return !rect || rect.width < 3 || rect.height < 4;
+  });
+  expect(tinyDetachedTargets).toEqual([]);
+});
+
+test("complex improper integral semantic hover regression", async ({ page }) => {
+  const requests = [];
+  const artifactDir = `${ARTIFACT_DIR}/complex-integral-hover`;
+  await mkdir(artifactDir, { recursive: true });
+
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createComplexIntegralHoverInvestigationResponse()),
+    });
+  });
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      requests.push({ endpoint: endpoint.includes("pin") ? "pin" : "hover", body });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          title: `Selected ${body?.selectedLatex || "math"}`,
+          explanation: `${body?.selectedLatex || "This expression"} was selected for complex integral hover diagnostics.`,
+        }),
+      });
+    });
+  }
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Investigate complex improper integral hover behavior.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Step 1 tangent substitution/i })).toBeVisible();
+
+  const findTargetBox = async ({ stepLabel, latex = null, role = null, kind = null, occurrence = 0, contains = false }) => page.evaluate((options) => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(options.stepLabel));
+    if (!step) return { missing: "step", stepLabel: options.stepLabel };
+    const matches = [...step.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+      .filter((node) => {
+        const tokenLatex = node.getAttribute("data-token-latex") || "";
+        const tokenRole = node.getAttribute("data-token-role") || "";
+        const targetKind = node.getAttribute("data-target-kind") || "";
+        if (options.latex && (options.contains ? !tokenLatex.includes(options.latex) : tokenLatex !== options.latex)) return false;
+        if (options.role && tokenRole !== options.role) return false;
+        if (options.kind && targetKind !== options.kind) return false;
+        return true;
+      })
+      .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+      .sort((left, right) => (
+        left.rect.top - right.rect.top
+        || left.rect.left - right.rect.left
+        || (left.rect.width * left.rect.height) - (right.rect.width * right.rect.height)
+      ));
+    const selected = matches[options.occurrence]?.node || null;
+    if (!selected) {
+      return {
+        missing: "target",
+        stepLabel: options.stepLabel,
+        latex: options.latex,
+        role: options.role,
+        kind: options.kind,
+        available: matches.length,
+        availableTargets: [...step.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+          .map((node) => {
+            const rect = node.getBoundingClientRect();
+            return {
+              id: node.getAttribute("data-token-id"),
+              latex: node.getAttribute("data-token-latex"),
+              role: node.getAttribute("data-token-role"),
+              kind: node.getAttribute("data-target-kind"),
+              rectSource: node.getAttribute("data-rect-source"),
+              sourceRange: node.getAttribute("data-source-range"),
+              width: Math.round(rect.width * 100) / 100,
+              height: Math.round(rect.height * 100) / 100,
+            };
+          })
+          .filter((item) => item.width > 0 && item.height > 0)
+          .slice(0, 80),
+      };
+    }
+    selected.scrollIntoView({ block: "center", inline: "center" });
+    const rect = selected.getBoundingClientRect();
+    const stepRect = step.getBoundingClientRect();
+    return {
+      id: selected.getAttribute("data-token-id"),
+      semanticId: selected.getAttribute("data-semantic-id"),
+      latex: selected.getAttribute("data-token-latex"),
+      role: selected.getAttribute("data-token-role"),
+      kind: selected.getAttribute("data-target-kind"),
+      rectSource: selected.getAttribute("data-rect-source"),
+      sourceRange: selected.getAttribute("data-source-range"),
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      stepRect: { x: stepRect.x, y: stepRect.y, width: stepRect.width, height: stepRect.height },
+    };
+  }, { stepLabel, latex, role, kind, occurrence, contains });
+
+  const readTooltip = async () => page.evaluate(() => {
+    const tooltip = document.querySelector(".omni-quick-tooltip");
+    if (!tooltip) return null;
+    const rect = tooltip.getBoundingClientRect();
+    return {
+      text: tooltip.textContent || "",
+      semanticId: tooltip.getAttribute("data-semantic-id"),
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+    };
+  });
+
+  const probeResults = [];
+  const probeHover = async (probe) => {
+    const box = probe.box || await findTargetBox(probe);
+    const result = {
+      label: probe.label,
+      stepLabel: probe.stepLabel,
+      requestedLatex: probe.latex || null,
+      requestedRole: probe.role || null,
+      requestedKind: probe.kind || null,
+      contains: Boolean(probe.contains),
+      targetBox: box,
+    };
+    if (box?.missing) {
+      probeResults.push(result);
+      return result;
+    }
+    const point = probe.point
+      ? probe.point(box)
+      : {
+          x: box.x + box.width * (probe.xRatio ?? 0.5),
+          y: box.y + box.height * (probe.yRatio ?? 0.5),
+        };
+    const previousHoverCount = requests.filter((request) => request.endpoint === "hover").length;
+    if (probe.expectNoTarget) {
+      await page.mouse.move(point.x, point.y + 36, { steps: 1 });
+      await page.evaluate(() => {
+        window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ = null;
+      });
+    } else {
+      await page.mouse.move(4, 4, { steps: 1 });
+    }
+    await moveSemanticPointer(page, point.x, point.y);
+    await page.waitForTimeout(360);
+    const hoverRequests = requests.filter((request) => request.endpoint === "hover");
+    const diagnostic = await page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ || null);
+    const tooltip = await readTooltip();
+    const screenshotPath = `${artifactDir}/${probe.label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.png`;
+    await page.screenshot({ path: screenshotPath, fullPage: false });
+    Object.assign(result, {
+      pointer: point,
+      requestCountBefore: previousHoverCount,
+      requestCountAfter: hoverRequests.length,
+      latestRequest: hoverRequests.at(-1)?.body || null,
+      diagnostic,
+      tooltip,
+      screenshotPath,
+    });
+    probeResults.push(result);
+    return result;
+  };
+
+  const probes = [
+    { label: "step-4-sec2-lhs", stepLabel: "Step 4 secant cancellation", latex: "\\sec^2\\theta", occurrence: 0, xRatio: 0.18 },
+    { label: "step-4-sec2-denominator", stepLabel: "Step 4 secant cancellation", latex: "\\sec^2\\theta", occurrence: 1, xRatio: 0.18 },
+    {
+      label: "step-5-empty-near-lower-bound",
+      stepLabel: "Step 5 bounded auxiliary integral",
+      latex: "0",
+      role: "lowerBound",
+      occurrence: 0,
+      point: (box) => ({ x: box.x + box.width / 2, y: box.y + box.height + 13 }),
+      expectNoTarget: true,
+    },
+    { label: "step-2-rhs-numerator", stepLabel: "Step 2 transformed integral", role: "numerator", kind: "group", occurrence: 1 },
+    { label: "step-5-complex-upper-bound", stepLabel: "Step 5 bounded auxiliary integral", role: "upperBound", occurrence: 1 },
+    { label: "step-6-rhs-expression", stepLabel: "Step 6 right side", role: "rightSide", occurrence: 0 },
+    { label: "step-8-lhs-ln-cos", stepLabel: "Step 8 logarithmic identity", latex: "\\ln", occurrence: 0 },
+    { label: "step-8-rhs-theta", stepLabel: "Step 8 logarithmic identity", latex: "\\theta", occurrence: 1 },
+    { label: "step-8-dtheta", stepLabel: "Step 8 logarithmic identity", latex: "d\\theta", occurrence: 0 },
+    { label: "step-9-left-expression", stepLabel: "Step 9 differential expression", latex: "\\ln", occurrence: 0 },
+    { label: "final-numerator-plus", stepLabel: "Final answer", latex: "+", occurrence: 0 },
+    { label: "final-denominator-plus", stepLabel: "Final answer", latex: "+", occurrence: 1 },
+    { label: "step-7-complex-upper-bound", stepLabel: "Step 7 integration by parts setup", role: "upperBound", kind: "group", occurrence: 1 },
+    {
+      label: "final-empty-below-fraction",
+      stepLabel: "Final answer",
+      latex: "+",
+      occurrence: 1,
+      point: (box) => ({ x: box.x + box.width / 2, y: box.y + box.height + 26 }),
+      expectNoTarget: true,
+    },
+  ];
+
+  for (const probe of probes) {
+    await probeHover(probe);
+  }
+
+  const sourceRenderSnapshot = await page.evaluate(() => [...document.querySelectorAll(".step-card")]
+    .filter((card) => /Step [12456789]|Final answer/.test(card.textContent || ""))
+    .map((card) => ({
+      label: card.querySelector("button")?.textContent || "",
+      visibleText: card.textContent || "",
+      chunks: [...card.querySelectorAll("[data-inspectable='math-token']")].map((chunk) => ({
+        renderedLatex: chunk.getAttribute("data-token-latex"),
+        semanticFallback: chunk.querySelector("[data-semantic-render-fallback]")?.getAttribute("data-semantic-render-fallback") || null,
+        katexText: chunk.querySelector(".katex-html")?.textContent || "",
+        semanticIds: [...chunk.querySelectorAll("[data-semantic-id]")].map((node) => node.getAttribute("data-semantic-id")).filter(Boolean).slice(0, 40),
+        semanticDomSpans: [...chunk.querySelectorAll("[data-semantic-id]")]
+          .map((node) => {
+            const rects = [...node.getClientRects()].map((rect) => ({
+              left: Math.round(rect.left * 100) / 100,
+              top: Math.round(rect.top * 100) / 100,
+              right: Math.round(rect.right * 100) / 100,
+              bottom: Math.round(rect.bottom * 100) / 100,
+              width: Math.round(rect.width * 100) / 100,
+              height: Math.round(rect.height * 100) / 100,
+            }));
+            return {
+              semanticId: node.getAttribute("data-semantic-id"),
+              role: node.getAttribute("data-semantic-role"),
+              type: node.getAttribute("data-semantic-type"),
+              kind: node.getAttribute("data-semantic-kind"),
+              range: node.getAttribute("data-semantic-range"),
+              text: node.textContent || "",
+              className: String(node.className || ""),
+              rectCount: rects.length,
+              rects,
+            };
+          }),
+        semanticHitboxes: [...chunk.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+          .map((node) => {
+            const rect = node.getBoundingClientRect();
+            return {
+              id: node.getAttribute("data-token-id"),
+              semanticId: node.getAttribute("data-semantic-id"),
+              latex: node.getAttribute("data-token-latex"),
+              role: node.getAttribute("data-token-role"),
+              kind: node.getAttribute("data-target-kind"),
+              rectSource: node.getAttribute("data-rect-source"),
+              sourceRange: node.getAttribute("data-source-range"),
+              geometryQuality: node.getAttribute("data-geometry-quality"),
+              width: Math.round(rect.width * 100) / 100,
+              height: Math.round(rect.height * 100) / 100,
+              rect: {
+                left: Math.round(rect.left * 100) / 100,
+                top: Math.round(rect.top * 100) / 100,
+                right: Math.round(rect.right * 100) / 100,
+                bottom: Math.round(rect.bottom * 100) / 100,
+              },
+            };
+          }),
+      })),
+    })));
+  await writeFile(`${artifactDir}/complex-integral-hover-report.json`, JSON.stringify({
+    requests,
+    probes: probeResults,
+    sourceRenderSnapshot,
+  }, null, 2));
+
+  expect(probeResults).toHaveLength(probes.length);
+  expect(sourceRenderSnapshot.length).toBeGreaterThan(0);
+
+  const byLabel = new Map(probeResults.map((probe) => [probe.label, probe]));
+  const winnerLatex = (label) => byLabel.get(label)?.diagnostic?.winningCandidate?.expression || byLabel.get(label)?.targetBox?.latex || null;
+  const winner = (label) => byLabel.get(label)?.diagnostic?.winningCandidate || byLabel.get(label)?.targetBox || null;
+  const finalTarget = (label) => byLabel.get(label)?.diagnostic?.finalTarget || (byLabel.get(label)?.tooltip ? byLabel.get(label)?.targetBox : null);
+  const sourceRange = (value) => {
+    const raw = typeof value === "string" ? value : value?.sourceRange;
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      const [start, end] = raw.split(":").map(Number);
+      return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+    }
+    const start = Number(raw.start);
+    const end = Number(raw.end);
+    return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+  };
+  const isContainedInTargetBox = (label) => {
+    const probe = byLabel.get(label);
+    const child = sourceRange(winner(label));
+    const parent = sourceRange(probe?.targetBox);
+    if (!child || !parent) return true;
+    return child.start >= parent.start && child.end <= parent.end;
+  };
+  const assertResolved = (label, options = {}) => {
+    const probe = byLabel.get(label);
+    expect(probe?.targetBox?.missing).toBeFalsy();
+    expect(probe?.diagnostic?.fallbackUsed).not.toBe(true);
+    expect(finalTarget(label)).toBeTruthy();
+    if (options.notLatex) expect(winnerLatex(label)).not.toBe(options.notLatex);
+    if (options.expectedLatex) {
+      const actualLatex = winnerLatex(label);
+      if (probe?.contains && actualLatex?.includes(options.expectedLatex)) {
+        expect(actualLatex).toContain(options.expectedLatex);
+      } else {
+        expect(actualLatex).toBe(options.expectedLatex);
+      }
+    }
+    if (options.geometry && winner(label)?.geometryQuality) expect(options.geometry).toContain(winner(label)?.geometryQuality);
+    if (options.withinTargetBox) expect(isContainedInTargetBox(label)).toBe(true);
+  };
+  const assertNoTarget = (label) => {
+    const probe = byLabel.get(label);
+    expect(probe?.tooltip).toBeNull();
+  };
+
+  assertResolved("step-2-rhs-numerator", {
+    notLatex: "\\tan^2\\theta",
+    geometry: ["precise_leaf", "precise_group", "fragmented_group", "broad_aggregate"],
+  });
+  assertResolved("step-4-sec2-lhs", {
+    geometry: ["precise_leaf", "precise_group"],
+    withinTargetBox: true,
+  });
+  expect(["\\sec", "2", "\\theta", "\\sec^2\\theta"]).toContain(winnerLatex("step-4-sec2-lhs"));
+  assertResolved("step-4-sec2-denominator", {
+    geometry: ["precise_leaf", "precise_group"],
+    withinTargetBox: true,
+  });
+  expect(["\\sec", "2", "\\theta", "\\sec^2\\theta"]).toContain(winnerLatex("step-4-sec2-denominator"));
+  assertNoTarget("step-5-empty-near-lower-bound");
+  assertResolved("step-5-complex-upper-bound", {
+    expectedLatex: "\\pi/2",
+    geometry: ["precise_group", "precise_leaf"],
+    withinTargetBox: true,
+  });
+  assertResolved("step-6-rhs-expression", {
+    expectedLatex: "-2",
+    geometry: ["precise_leaf"],
+  });
+  expect(winnerLatex("step-6-rhs-expression")).not.toBe("2");
+  assertResolved("step-8-lhs-ln-cos", {
+    expectedLatex: "\\ln",
+    geometry: ["precise_leaf"],
+  });
+  expect(winnerLatex("step-8-lhs-ln-cos")).not.toBe("\\cos");
+  assertResolved("step-8-rhs-theta", {
+    expectedLatex: "\\theta",
+    geometry: ["precise_leaf"],
+    withinTargetBox: true,
+  });
+  assertResolved("step-8-dtheta", {
+    expectedLatex: "d\\theta",
+    geometry: ["precise_group"],
+    withinTargetBox: true,
+  });
+  assertResolved("step-9-left-expression", {
+    expectedLatex: "\\ln",
+    geometry: ["precise_leaf"],
+    withinTargetBox: true,
+  });
+  expect(winnerLatex("step-9-left-expression")).not.toBe("d\\theta");
+  assertResolved("final-numerator-plus", {
+    expectedLatex: "+",
+    geometry: ["precise_leaf"],
+    withinTargetBox: true,
+  });
+  if (winner("final-numerator-plus")?.nodeKind) expect(winner("final-numerator-plus")?.nodeKind).toBe("operator");
+  assertResolved("final-denominator-plus", {
+    expectedLatex: "+",
+    geometry: ["precise_leaf"],
+    withinTargetBox: true,
+  });
+  if (winner("final-denominator-plus")?.nodeKind) expect(winner("final-denominator-plus")?.nodeKind).toBe("operator");
+  assertResolved("step-7-complex-upper-bound", {
+    expectedLatex: "\\pi/2",
+    geometry: ["precise_group", "precise_leaf"],
+    withinTargetBox: true,
+  });
+  assertNoTarget("final-empty-below-fraction");
+
+  const step2Snapshot = sourceRenderSnapshot.find((step) => /Step 2 transformed integral/.test(step.visibleText || step.label));
+  const step2Hitboxes = step2Snapshot?.chunks?.flatMap((chunk) => chunk.semanticHitboxes || []) || [];
+  const numeratorHitboxes = step2Hitboxes.filter((box) => box.role === "numerator");
+  const denominatorHitboxes = step2Hitboxes.filter((box) => box.role === "denominator");
+  const boundHitboxes = step2Hitboxes.filter((box) => box.role === "upperBound" || box.role === "lowerBound");
+  const differentialHitboxes = step2Hitboxes.filter((box) => box.latex === "d\\theta");
+  const complexNumerator = numeratorHitboxes
+    .filter((box) => /\\ln/.test(box.latex || "") && /\\theta/.test(box.latex || ""))
+    .sort((left, right) => right.width - left.width)[0];
+
+  expect(complexNumerator?.width || 0).toBeGreaterThan(80);
+  expect(complexNumerator?.height || 0).toBeGreaterThan(10);
+  expect(complexNumerator?.height || 0).toBeLessThan(70);
+  expect(denominatorHitboxes.some((box) => box.width > 40 && box.height > 10)).toBe(true);
+  expect(boundHitboxes.length).toBeGreaterThanOrEqual(4);
+  expect(differentialHitboxes.some((box) => box.width > 8 && box.height > 10)).toBe(true);
+  expect(sourceRenderSnapshot.flatMap((step) => step.chunks || []).some((chunk) => chunk.semanticFallback)).toBe(false);
+
+  for (const probe of probeResults.filter((item) => item.diagnostic?.winningCandidate?.geometryQuality?.startsWith("precise"))) {
+    const candidate = probe.diagnostic.winningCandidate;
+    expect(candidate.rectangleArea).toBeLessThanOrEqual(Math.max(1, candidate.paintedArea || 0) * 3.5 + 2);
+  }
+});
+
+test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) => {
+  test.slow();
+  const lazyRequests = [];
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Quadratic hitbox regression",
+        problem: "Inspect quadratic hitboxes.",
+        expression: "3x^2+5x-451=0",
+        steps: [{
+          id: "quadratic-source",
+          label: "Quadratic source",
+          math: "3x^2+5x-451=0",
+          summary: "Keep the minus and constant leaves separate.",
+          chunks: [{
+            id: "quadratic-source-chunk",
+            display: "3x^2+5x-451=0",
+            latex: "3x^2+5x-451=0",
+            text: "3x^2+5x-451=0",
+            role: "equation",
+          }],
+        }, {
+          id: "quadratic-region",
+          label: "Quadratic first-line selection",
+          math: "3x^2+5x+6\n3x^2+5x-37=0",
+          summary: "Drag selection should stay on the visible line.",
+          chunks: [{
+            id: "quadratic-region-first",
+            display: "3x^2+5x+6",
+            latex: "3x^2+5x+6",
+            text: "3x^2+5x+6",
+            role: "equation",
+          }, {
+            id: "quadratic-region-second",
+            display: "3x^2+5x-37=0",
+            latex: "3x^2+5x-37=0",
+            text: "3x^2+5x-37=0",
+            role: "equation",
+          }],
+        }, {
+          id: "quadratic-formula",
+          label: "Quadratic formula",
+          math: "x=\\frac{-5\\pm\\sqrt{5^2-4\\cdot3\\cdot(-445)}}{2\\cdot3}",
+          summary: "Keep denominator leaves tight.",
+          chunks: [{
+            id: "quadratic-formula-chunk",
+            display: "x=\\frac{-5\\pm\\sqrt{5^2-4\\cdot3\\cdot(-445)}}{2\\cdot3}",
+            latex: "x=\\frac{-5\\pm\\sqrt{5^2-4\\cdot3\\cdot(-445)}}{2\\cdot3}",
+            text: "x=\\frac{-5\\pm\\sqrt{5^2-4\\cdot3\\cdot(-445)}}{2\\cdot3}",
+            role: "equation",
+          }],
+        }, {
+          id: "quadratic-simplified-chain",
+          label: "Quadratic simplified chain",
+          math: "x=\\frac{-5\\pm\\sqrt{25+216}}{6}=\\frac{-5\\pm\\sqrt{241}}{6}",
+          summary: "Repeated simplified denominators should stay independently targetable.",
+          chunks: [{
+            id: "quadratic-simplified-chain-chunk",
+            display: "x=\\frac{-5\\pm\\sqrt{25+216}}{6}=\\frac{-5\\pm\\sqrt{241}}{6}",
+            latex: "x=\\frac{-5\\pm\\sqrt{25+216}}{6}=\\frac{-5\\pm\\sqrt{241}}{6}",
+            text: "x=\\frac{-5\\pm\\sqrt{25+216}}{6}=\\frac{-5\\pm\\sqrt{241}}{6}",
+            role: "equation",
+          }],
+        }, {
+          id: "quadratic-final-formula",
+          label: "Quadratic final formula",
+          math: "x=\\frac{-5+\\sqrt{241}}{6}\\quad\\text{or}\\quad x=\\frac{-5-\\sqrt{241}}{6}",
+          summary: "Keep repeated final-answer leaves independently selectable.",
+          chunks: [{
+            id: "quadratic-final-formula-chunk",
+            display: "x=\\frac{-5+\\sqrt{241}}{6}\\quad\\text{or}\\quad x=\\frac{-5-\\sqrt{241}}{6}",
+            latex: "x=\\frac{-5+\\sqrt{241}}{6}\\quad\\text{or}\\quad x=\\frac{-5-\\sqrt{241}}{6}",
+            text: "x=\\frac{-5+\\sqrt{241}}{6}\\quad\\text{or}\\quad x=\\frac{-5-\\sqrt{241}}{6}",
+            role: "equation",
+          }],
+        }, {
+          id: "imaginary-root-final",
+          label: "Imaginary root final answer",
+          math: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+          summary: "Imaginary radical leaves should remain independently hoverable and selectable.",
+          chunks: [{
+            id: "imaginary-root-final-chunk",
+            display: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+            latex: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+            text: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+            role: "equation",
+          }],
+        }, {
+          id: "large-quadratic-formula",
+          label: "Large quadratic formula",
+          math: "x=\\frac{-3634\\pm\\sqrt{19671800}}{6}",
+          summary: "Every numerator and denominator descendant should be inspectable in a KaTeX fraction layout.",
+          chunks: [{
+            id: "large-quadratic-formula-chunk",
+            display: "x=\\frac{-3634\\pm\\sqrt{19671800}}{6}",
+            latex: "x=\\frac{-3634\\pm\\sqrt{19671800}}{6}",
+            text: "x=\\frac{-3634\\pm\\sqrt{19671800}}{6}",
+            role: "equation",
+          }],
+        }, {
+          id: "large-discriminant-step",
+          label: "Large discriminant step",
+          math: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
+          summary: "Power bases and large negative grouped constants should remain token-sized hover targets.",
+          chunks: [{
+            id: "large-discriminant-step-chunk",
+            display: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
+            latex: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
+            text: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
+            role: "equation",
+          }],
+        }, {
+          id: "decimal-fraction-layout",
+          label: "Decimal fraction layout",
+          math: "\\frac{5345-5902.71}{6}",
+          summary: "Integer and decimal literals in the same numerator should both be leaf hover targets.",
+          chunks: [{
+            id: "decimal-fraction-layout-chunk",
+            display: "\\frac{5345-5902.71}{6}",
+            latex: "\\frac{5345-5902.71}{6}",
+            text: "\\frac{5345-5902.71}{6}",
+            role: "equation",
+          }],
+        }, {
+          id: "large-root-final-evaluation",
+          label: "Large root final evaluation",
+          math: "x_2=\\frac{-68068-200681.07}{4}=-66937.77",
+          summary: "Signed decimal numerator terms and final evaluated roots should remain independently hoverable.",
+          chunks: [{
+            id: "large-root-final-evaluation-chunk",
+            display: "x_2=\\frac{-68068-200681.07}{4}=-66937.77",
+            latex: "x_2=\\frac{-68068-200681.07}{4}=-66937.77",
+            text: "x_2=\\frac{-68068-200681.07}{4}=-66937.77",
+            role: "equation",
+          }],
+        }, {
+          id: "terminal-numeric-evaluation",
+          label: "Terminal numeric evaluation",
+          math: "x_1\\approx\\frac{-12085.3333+10384.548}{2}=-850.3926",
+          summary: "Terminal evaluated numeric results should remain independently hoverable.",
+          chunks: [{
+            id: "terminal-numeric-evaluation-chunk",
+            display: "x_1\\approx\\frac{-12085.3333+10384.548}{2}=-850.3926",
+            latex: "x_1\\approx\\frac{-12085.3333+10384.548}{2}=-850.3926",
+            text: "x_1\\approx\\frac{-12085.3333+10384.548}{2}=-850.3926",
+            role: "equation",
+          }],
+        }, {
+          id: "decimal-nested-fraction-radical-layout",
+          label: "Decimal nested fraction radical layout",
+          math: "\\frac{\\frac{-92.12}{0.5}}{\\sqrt{\\frac{3.14159}{-0.001}}}",
+          summary: "Decimal literals inside nested fractions and radicals should stay independently hoverable.",
+          chunks: [{
+            id: "decimal-nested-fraction-radical-layout-chunk",
+            display: "\\frac{\\frac{-92.12}{0.5}}{\\sqrt{\\frac{3.14159}{-0.001}}}",
+            latex: "\\frac{\\frac{-92.12}{0.5}}{\\sqrt{\\frac{3.14159}{-0.001}}}",
+            text: "\\frac{\\frac{-92.12}{0.5}}{\\sqrt{\\frac{3.14159}{-0.001}}}",
+            role: "equation",
+          }],
+        }, {
+          id: "nested-fraction-radical-layout",
+          label: "Nested fraction radical layout",
+          math: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}",
+          summary: "Nested fractions, fractions inside radicals, and radicals inside fractions should all expose descendants.",
+          chunks: [{
+            id: "nested-fraction-radical-layout-chunk",
+            display: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}",
+            latex: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}",
+            text: "\\frac{\\frac{1}{2}+\\sqrt{\\frac{9}{4}}}{\\sqrt{\\frac{16}{25}}}",
+            role: "equation",
+          }],
+        }, {
+          id: "decimal-raw-final-answer",
+          label: "Decimal final answer",
+          role: "final",
+          summary: "Final answer blocks must expose decimal number leaves independently.",
+          lines: [{
+            id: "decimal-raw-final-answer-line",
+            kind: "block",
+            latex: "a\\approx5345,\\quad b\\approx5902.71,\\quad c\\approx-0.001",
+          }],
+        }, {
+          id: "quadratic-raw-approximation",
+          label: "Raw approximation line",
+          summary: "Raw rendered lines must use the same semantic pipeline as chunked steps.",
+          lines: [{
+            id: "quadratic-raw-approximation-line",
+            kind: "block",
+            latex: "\\sqrt{41641}\\approx204.07,\\quad x_1\\approx33.51,\\quad x_2\\approx-34.18",
+          }],
+        }, {
+          id: "quadratic-raw-final-answer",
+          label: "Final answer",
+          role: "final",
+          summary: "Final answer blocks must expose the same semantic leaves.",
+          lines: [{
+            id: "quadratic-raw-final-answer-line",
+            kind: "block",
+            latex: "x_1\\approx33.51,\\quad x_2\\approx-34.18",
+          }],
+        }, {
+          id: "approximate-final-answer-layout",
+          label: "Approximate final answer",
+          role: "final",
+          summary: "Final answer alternatives should preserve spacing and wrap points while keeping hover targets.",
+          lines: [{
+            id: "approximate-final-answer-layout-line",
+            kind: "block",
+            latex: "x\\approx-850.39\\quad\\text{or}\\quad x\\approx-11234.94",
+          }],
+        }],
+        finalAnswerLatex: "x=\\frac{-5+\\sqrt{241}}{6}\\quad\\text{or}\\quad x=\\frac{-5-\\sqrt{241}}{6}",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+      }),
+    });
+  });
+
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      lazyRequests.push({ endpoint: endpoint.includes("pin") ? "pin" : "hover", body });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          title: `Selected ${body?.selectedLatex || "math"}`,
+          explanation: `${body?.selectedLatex || "This expression"} was selected.`,
+        }),
+      });
+    });
+  }
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect quadratic hitboxes.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Quadratic source/i })).toBeVisible();
+
+  const tokenBox = async (stepLabel, latex, role = null) => {
+    await page.waitForFunction(({ stepLabel, latex, role }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(stepLabel));
+      return [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .some((candidate) => (
+          candidate.getAttribute("data-token-latex") === latex
+          && (!role || candidate.getAttribute("data-token-role") === role)
+        ));
+    }, { stepLabel, latex, role });
+    return page.evaluate(({ stepLabel, latex, role }) => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(stepLabel));
+    const nodes = [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])];
+    const matches = nodes.filter((candidate) => (
+      candidate.getAttribute("data-token-latex") === latex
+      && (!role || candidate.getAttribute("data-token-role") === role)
+    ));
+    const node = matches
+      .map((candidate) => ({ candidate, rect: candidate.getBoundingClientRect() }))
+      .sort((left, right) => right.rect.top - left.rect.top)[0]?.candidate || null;
+    if (!node) return null;
+    node.scrollIntoView({ block: "center", inline: "center" });
+    const rect = node.getBoundingClientRect();
+    const stepRect = step.getBoundingClientRect();
+    return {
+      id: node.getAttribute("data-token-id"),
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      stepHeight: stepRect.height,
+    };
+    }, { stepLabel, latex, role });
+  };
+
+  const tokenBoxes = async (stepLabel, latex, role = null) => {
+    await page.waitForFunction(({ stepLabel, latex, role }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(stepLabel));
+      return [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .filter((candidate) => (
+          candidate.getAttribute("data-token-latex") === latex
+          && (!role || candidate.getAttribute("data-token-role") === role)
+        )).length >= 2;
+    }, { stepLabel, latex, role });
+    return page.evaluate(({ stepLabel, latex, role }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(stepLabel));
+      step?.scrollIntoView({ block: "center", inline: "center" });
+      return [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .filter((candidate) => (
+          candidate.getAttribute("data-token-latex") === latex
+          && (!role || candidate.getAttribute("data-token-role") === role)
+        ))
+        .map((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return {
+            id: candidate.getAttribute("data-token-id"),
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          };
+        })
+        .sort((left, right) => left.x - right.x || left.y - right.y);
+    }, { stepLabel, latex, role });
+  };
+
+  const tokenBoxInChunk = async (chunkId, latex, role = null) => {
+    await page.waitForFunction(({ chunkId, latex, role }) => {
+      const chunk = document.querySelector(`[data-inspectable='math-token'][data-token-id='${chunkId}']`);
+      return [...(chunk?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .some((candidate) => (
+          candidate.getAttribute("data-token-latex") === latex
+          && (!role || candidate.getAttribute("data-token-role") === role)
+        ));
+    }, { chunkId, latex, role });
+    return page.evaluate(({ chunkId, latex, role }) => {
+    const chunk = document.querySelector(`[data-inspectable='math-token'][data-token-id='${chunkId}']`);
+    const nodes = [...(chunk?.querySelectorAll("[data-inspectable='math-subtoken']") || [])];
+    const node = nodes.find((candidate) => (
+      candidate.getAttribute("data-token-latex") === latex
+      && (!role || candidate.getAttribute("data-token-role") === role)
+    ));
+    if (!node) return null;
+    chunk.scrollIntoView({ block: "center", inline: "center" });
+    const rect = node.getBoundingClientRect();
+    return {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    };
+    }, { chunkId, latex, role });
+  };
+
+  const freshTokenBox = async (box) => {
+    expect(box).not.toBeNull();
+    return box.id ? await page.evaluate((id) => {
+      const escaped = CSS.escape(id);
+      const node = document.querySelector(`[data-token-id='${escaped}']`);
+      if (!node) return null;
+      node.scrollIntoView({ block: "center", inline: "center" });
+      const rect = node.getBoundingClientRect();
+      return {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      };
+    }, box.id) : box;
+  };
+
+  const freshTokenBoxPair = async (startBox, endBox) => {
+    expect(startBox).not.toBeNull();
+    expect(endBox).not.toBeNull();
+    if (!startBox.id || !endBox.id) return [startBox, endBox];
+    return page.evaluate(([startId, endId]) => {
+      const readBox = (id) => {
+        const node = document.querySelector(`[data-token-id='${CSS.escape(id)}']`);
+        if (!node) return null;
+        const rect = node.getBoundingClientRect();
+        return {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+      const startNode = document.querySelector(`[data-token-id='${CSS.escape(startId)}']`);
+      startNode?.scrollIntoView({ block: "center", inline: "center" });
+      return [readBox(startId), readBox(endId)];
+    }, [startBox.id, endBox.id]);
+  };
+
+  const hoverBox = async (box, position = { x: 0.5, y: 0.5 }) => {
+    const currentBox = await freshTokenBox(box);
+    expect(currentBox).not.toBeNull();
+    await page.mouse.move(4, 4);
+    await moveSemanticPointer(page, currentBox.x + currentBox.width * position.x, currentBox.y + currentBox.height * position.y);
+    await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  };
+
+  const hoverFractionGroupGap = async (stepLabel, role, expectedLatexPattern) => {
+    const point = await page.evaluate(({ stepLabel, role }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(stepLabel));
+      const group = [...(step?.querySelectorAll(`.math-semantic-hitbox[data-target-kind='group'][data-token-role='${role}']`) || [])][0];
+      if (!group) return null;
+      group.scrollIntoView({ block: "center", inline: "center" });
+      const groupRect = group.getBoundingClientRect();
+      const leafRects = [...(step?.querySelectorAll(".math-semantic-hitbox[data-target-kind='leaf']") || [])]
+        .map((node) => node.getBoundingClientRect())
+        .filter((rect) => (
+          rect.right > groupRect.left
+          && rect.left < groupRect.right
+          && rect.bottom > groupRect.top
+          && rect.top < groupRect.bottom
+        ));
+      const y = groupRect.top + groupRect.height / 2;
+      for (let x = groupRect.left + 1; x < groupRect.right - 1; x += 2) {
+        if (!leafRects.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)) {
+          return { x, y };
+        }
+      }
+      return { x: groupRect.left + Math.max(1, groupRect.width * 0.08), y };
+    }, { stepLabel, role });
+    expect(point).not.toBeNull();
+    await moveSemanticPointer(page, point.x, point.y);
+    await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex || "")
+      .toMatch(expectedLatexPattern);
+  };
+
+  const hitboxCountForStep = async (stepLabel) => page.evaluate((label) => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(label));
+    return step?.querySelectorAll("[data-inspectable='math-subtoken']").length || 0;
+  }, stepLabel);
+
+  const initialFinalDenominatorSixes = await tokenBoxes("Quadratic final formula", "6", "denominator");
+  expect(initialFinalDenominatorSixes).toHaveLength(2);
+  expect(new Set(initialFinalDenominatorSixes.map((box) => box.id)).size).toBe(2);
+  const finalHitboxCountBeforeHover = await hitboxCountForStep("Quadratic final formula");
+  for (const box of initialFinalDenominatorSixes) {
+    await hoverBox(box);
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("6");
+  }
+  expect(await hitboxCountForStep("Quadratic final formula")).toBeLessThanOrEqual(finalHitboxCountBeforeHover);
+
+  const n451 = await tokenBox("Quadratic source", "-451");
+  await hoverBox(n451);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-451");
+
+  const denominatorTwo = await tokenBox("Quadratic formula", "2");
+  await hoverBox(denominatorTwo);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("2");
+  expect(denominatorTwo.height).toBeLessThan(denominatorTwo.stepHeight * 0.45);
+
+  const negativeFive = await tokenBox("Quadratic formula", "-5");
+  await hoverBox(negativeFive);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-5");
+  await page.mouse.click(negativeFive.x + negativeFive.width / 2, negativeFive.y + negativeFive.height / 2, { button: "right" });
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("-5");
+  await page.getByRole("button", { name: /Close explanation/i }).click();
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
+
+  const denominatorSix = await tokenBox("Quadratic final formula", "6");
+  await hoverBox(denominatorSix);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("6");
+  await contextClickSemanticPointer(page, denominatorSix.x + denominatorSix.width / 2, denominatorSix.y + denominatorSix.height / 2);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("6");
+  await page.getByRole("button", { name: /Close explanation/i }).click();
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
+
+  const denominatorSixes = await tokenBoxes("Quadratic final formula", "6", "denominator");
+  expect(denominatorSixes).toHaveLength(2);
+  expect(new Set(denominatorSixes.map((box) => box.id)).size).toBe(2);
+  for (const box of denominatorSixes) {
+    await hoverBox(box);
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("6");
+  }
+
+  const chainDenominatorSixes = await tokenBoxes("Quadratic simplified chain", "6", "denominator");
+  expect(chainDenominatorSixes).toHaveLength(2);
+  expect(new Set(chainDenominatorSixes.map((box) => box.id)).size).toBe(2);
+  for (const box of chainDenominatorSixes) {
+    await hoverBox(box);
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("6");
+  }
+  const chainNegativeFives = await tokenBoxes("Quadratic simplified chain", "-5");
+  expect(new Set(chainNegativeFives.map((box) => box.id)).size).toBeGreaterThanOrEqual(2);
+
+  await hoverBox(await tokenBox("Imaginary root final answer", "i", "imaginaryUnit"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("i");
+  await hoverBox(await tokenBox("Imaginary root final answer", "\\sqrt", "radical"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\sqrt");
+  const imaginaryRadicand = await tokenBox("Imaginary root final answer", "278471", "radicand");
+  await hoverBox(imaginaryRadicand, { x: 0.97, y: 0.5 });
+  await expect.poll(async () => {
+    const requestLatex = lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex;
+    if (requestLatex === "278471") return requestLatex;
+    return page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__?.chosenLatex || "");
+  }).toBe("278471");
+  await expect.poll(async () => {
+    const requestRole = lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.targetRole;
+    if (requestRole === "radicand") return requestRole;
+    return page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__?.chosenRole || "");
+  }).toBe("radicand");
+
+  await hoverBox(await tokenBox("Large quadratic formula", "-3634"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-3634");
+  await hoverBox(await tokenBox("Large quadratic formula", "\\pm"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\pm");
+  await hoverBox(await tokenBox("Large quadratic formula", "\\sqrt", "radical"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\sqrt");
+  await hoverBox(await tokenBox("Large quadratic formula", "19671800", "radicand"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("19671800");
+  await hoverBox(await tokenBox("Large quadratic formula", "6", "denominator"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("6");
+  await hoverFractionGroupGap("Large quadratic formula", "numerator", /^-3634$/);
+
+  for (const [stepLabel, latex, role] of [
+    ["Decimal fraction layout", "5345", "constant"],
+    ["Decimal fraction layout", "-5902.71", "constant"],
+    ["Decimal fraction layout", "6", "denominator"],
+    ["Large discriminant step", "68068", "base"],
+    ["Large discriminant step", "2", "exponent"],
+    ["Large discriminant step", "-4455969793", "factor"],
+    ["Large root final evaluation", "-68068", "constant"],
+    ["Large root final evaluation", "-200681.07", "constant"],
+    ["Large root final evaluation", "4", "denominator"],
+    ["Large root final evaluation", "-66937.77", null],
+    ["Terminal numeric evaluation", "-12085.3333", "numerator"],
+    ["Terminal numeric evaluation", "10384.548", "numerator"],
+    ["Terminal numeric evaluation", "2", "denominator"],
+    ["Terminal numeric evaluation", "-850.3926", null],
+    ["Decimal nested fraction radical layout", "-92.12", "numerator"],
+    ["Decimal nested fraction radical layout", "0.5", "denominator"],
+    ["Decimal nested fraction radical layout", "3.14159", "numerator"],
+    ["Decimal nested fraction radical layout", "-0.001", "denominator"],
+    ["Decimal final answer", "5345", null],
+    ["Decimal final answer", "5902.71", null],
+    ["Decimal final answer", "-0.001", null],
+  ]) {
+    await hoverBox(await tokenBox(stepLabel, latex, role));
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe(latex);
+  }
+  const rowTightTargets = [
+    await tokenBox("Large discriminant step", "68068", "base"),
+    await tokenBox("Large discriminant step", "-4455969793", "factor"),
+    await tokenBox("Large root final evaluation", "-200681.07", "constant"),
+    await tokenBox("Large root final evaluation", "-66937.77"),
+  ];
+  for (const box of rowTightTargets) {
+    expect(box.width).toBeLessThan(180);
+    expect(box.height).toBeLessThan(box.stepHeight * 0.55);
+  }
+  await hoverBox(await tokenBox("Decimal nested fraction radical layout", "\\sqrt", "radical"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\sqrt");
+
+  for (const [latex, role] of [["1", "numerator"], ["2", "denominator"], ["9", "numerator"], ["4", "denominator"], ["16", "numerator"], ["25", "denominator"]]) {
+    await hoverBox(await tokenBox("Nested fraction radical layout", latex, role));
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe(latex);
+  }
+  const nestedRadicals = await tokenBoxes("Nested fraction radical layout", "\\sqrt", "radical");
+  expect(nestedRadicals.length).toBeGreaterThanOrEqual(2);
+  for (const box of nestedRadicals.slice(0, 2)) {
+    await hoverBox(box);
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\sqrt");
+  }
+  await hoverFractionGroupGap("Nested fraction radical layout", "numerator", /\\frac\{1\}\{2\}|\\sqrt/);
+
+  const imaginaryUnit = await tokenBox("Imaginary root final answer", "i", "imaginaryUnit");
+  const hoverRequestCountBeforeImaginaryDrag = lazyRequests.filter((request) => request.endpoint === "hover").length;
+  await page.mouse.move(imaginaryUnit.x + imaginaryUnit.width / 2, imaginaryUnit.y + imaginaryUnit.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(imaginaryRadicand.x + imaginaryRadicand.width / 2, imaginaryRadicand.y + imaginaryRadicand.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-quick-tooltip")).toContainText(/Selected region/i);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").length)
+    .toBeGreaterThan(hoverRequestCountBeforeImaginaryDrag);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex)
+    .toBe("i\\sqrt{278471}");
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.semanticSelection?.normalizedToNodeId || "")
+    .toContain("isqrt-278471");
+  await page.mouse.click(6, 6);
+  await page.mouse.move(6, 6);
+
+  for (const latex of ["241", "-5", "x"]) {
+    const boxes = await tokenBoxes("Quadratic final formula", latex);
+    expect(boxes.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(boxes.map((box) => box.id)).size).toBeGreaterThanOrEqual(2);
+    for (const box of boxes.slice(0, 2)) {
+      await hoverBox(box);
+      await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe(latex);
+    }
+  }
+
+  const finalNegativeFives = await tokenBoxes("Quadratic final formula", "-5");
+  const finalRadicands = await tokenBoxes("Quadratic final formula", "241");
+  const hoverRequestCountBeforeLeftRootDrag = lazyRequests.filter((request) => request.endpoint === "hover").length;
+  const [firstFinalNegativeFive, firstDenominatorSix] = await freshTokenBoxPair(finalNegativeFives[0], denominatorSixes[0]);
+  expect(firstFinalNegativeFive).not.toBeNull();
+  expect(firstDenominatorSix).not.toBeNull();
+  await page.mouse.move(firstFinalNegativeFive.x + firstFinalNegativeFive.width / 2, firstFinalNegativeFive.y + firstFinalNegativeFive.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(firstDenominatorSix.x + firstDenominatorSix.width / 2, firstDenominatorSix.y + firstDenominatorSix.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-quick-tooltip")).toContainText(/Selected region/i);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").length)
+    .toBeGreaterThan(hoverRequestCountBeforeLeftRootDrag);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex || "")
+    .toContain("-5");
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex || "")
+    .toContain("6");
+  await page.mouse.click(6, 6);
+  await page.mouse.move(6, 6);
+
+  await hoverBox(denominatorSixes[1]);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("6");
+
+  const [firstFinalRadicand, secondFinalRadicand] = await freshTokenBoxPair(finalRadicands[0], finalRadicands[1]);
+  expect(firstFinalRadicand).not.toBeNull();
+  expect(secondFinalRadicand).not.toBeNull();
+  await page.mouse.move(firstFinalRadicand.x + firstFinalRadicand.width / 2, firstFinalRadicand.y + firstFinalRadicand.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(secondFinalRadicand.x + secondFinalRadicand.width / 2, secondFinalRadicand.y + secondFinalRadicand.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-quick-tooltip")).toContainText(/Selected region/i);
+  await expect.poll(() => page.evaluate(() => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes("Quadratic final formula"));
+    return [...(step?.querySelectorAll(".math-semantic-hitbox.omni-token-selected[data-token-latex='241']") || [])].length;
+  })).toBeGreaterThanOrEqual(2);
+  await page.mouse.click(6, 6);
+  await page.mouse.move(6, 6);
+
+  await hoverBox(finalNegativeFives[1]);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-5");
+
+  const firstLineChunk = page.locator("[data-inspectable='math-token'][data-token-id='quadratic-region-first']").first();
+  await firstLineChunk.scrollIntoViewIfNeeded();
+  const firstLineThree = await firstLineChunk.locator("[data-inspectable='math-subtoken'][data-token-latex='3']").first().boundingBox();
+  const firstLineSix = await firstLineChunk.locator("[data-inspectable='math-subtoken'][data-token-latex='6']").first().boundingBox();
+  expect(firstLineThree).not.toBeNull();
+  expect(firstLineSix).not.toBeNull();
+  const hoverRequestCountBeforeDrag = lazyRequests.filter((request) => request.endpoint === "hover").length;
+  await page.mouse.move(firstLineThree.x + firstLineThree.width / 2, firstLineThree.y + firstLineThree.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(firstLineSix.x + firstLineSix.width / 2, firstLineSix.y + firstLineSix.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-quick-tooltip")).toContainText(/Selected region/i);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").length)
+    .toBeGreaterThan(hoverRequestCountBeforeDrag);
+  await expect(firstLineChunk.locator(".math-semantic-hitbox.omni-token-selected")).not.toHaveCount(0);
+
+  await page.mouse.click(6, 6);
+  await page.mouse.move(4, 4);
+  await hoverBox(firstLineThree);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex || "")
+    .toMatch(/^(3|x)$/);
+
+  await hoverBox(await tokenBox("Raw approximation line", "\\sqrt", "radical"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\sqrt");
+  await hoverBox(await tokenBox("Raw approximation line", "204.07"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("204.07");
+  await hoverBox(await tokenBox("Raw approximation line", "x_1"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("x_1");
+  await hoverBox(await tokenBox("Raw approximation line", "x_2"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("x_2");
+  await hoverBox(await tokenBox("Raw approximation line", "33.51"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("33.51");
+  await hoverBox(await tokenBox("Raw approximation line", "-34.18"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-34.18");
+
+  await hoverBox(await tokenBox("Final answer", "33.51"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("33.51");
+  await hoverBox(await tokenBox("Final answer", "-34.18"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-34.18");
+
+  await hoverBox(await tokenBox("Approximate final answer", "-850.39"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-850.39");
+  await hoverBox(await tokenBox("Approximate final answer", "-11234.94"));
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("-11234.94");
+  const finalAnswerLayout = await page.evaluate(() => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes("Approximate final answer"));
+    const segments = [...(step?.querySelectorAll(".omni-equation-chain-segment") || [])]
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        return { text: node.textContent || "", left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+      });
+    const separator = step?.querySelector(".omni-equation-chain-separator");
+    const separatorRect = separator?.getBoundingClientRect();
+    return {
+      text: step?.textContent || "",
+      segmentCount: segments.length,
+      segments,
+      separator: separator ? {
+        text: separator.textContent || "",
+        left: separatorRect.left,
+        right: separatorRect.right,
+        top: separatorRect.top,
+        bottom: separatorRect.bottom,
+        width: separatorRect.width,
+      } : null,
+    };
+  });
+  expect(finalAnswerLayout.segmentCount).toBe(2);
+  expect(finalAnswerLayout.separator?.text).toBe("or");
+  expect(finalAnswerLayout.separator?.width).toBeGreaterThan(12);
+  for (const segment of finalAnswerLayout.segments) {
+    expect(segment.right).toBeGreaterThan(segment.left);
+    expect(segment.bottom).toBeGreaterThan(segment.top);
+  }
+  const [firstFinalSegment, secondFinalSegment] = finalAnswerLayout.segments;
+  const separator = finalAnswerLayout.separator;
+  const sameRow = (left, right) => Math.abs(((left.top + left.bottom) / 2) - ((right.top + right.bottom) / 2)) < 8;
+  if (sameRow(firstFinalSegment, separator)) {
+    expect(separator.left).toBeGreaterThanOrEqual(firstFinalSegment.right - 1);
+  }
+  if (sameRow(separator, secondFinalSegment)) {
+    expect(secondFinalSegment.left).toBeGreaterThanOrEqual(separator.right - 1);
+  }
+
+  await expect.poll(() => page.evaluate(() => [...document.querySelectorAll(".math-semantic-hitbox")]
+    .some((node) => node.hasAttribute("title")))).toBe(false);
+  await expect.poll(() => page.evaluate(() => [...document.querySelectorAll(".math-semantic-hitbox")]
+    .some((node) => node.hasAttribute("data-debug-label")))).toBe(false);
+});
+
+test("fraction result hit-testing exposes leaves and pins fraction only through drag cluster", async ({ page }) => {
   const lazyRequests = [];
   await installHierarchicalTokenApiFixtures(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
@@ -535,31 +2875,20 @@ test("fraction result hit-testing prefers the fraction child over the integral p
   await page.getByRole("button", { name: /Explain/i }).click();
 
   await expect(page.getByRole("button", { name: /Cosine power integral/i })).toBeVisible();
-  const fraction = page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\frac{3\\\\pi}{4}']").first();
-  await expect(fraction).toBeVisible();
-
-  await fraction.scrollIntoViewIfNeeded();
-  const fractionBox = await fraction.boundingBox();
-  expect(fractionBox).not.toBeNull();
-  const hitX = fractionBox.x + fractionBox.width / 2;
-  const hitY = fractionBox.y + fractionBox.height / 2;
-  await page.mouse.move(hitX, hitY);
-  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
-  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("\\frac{3\\pi}{4}");
-  await expect(page.locator(".omni-quick-tooltip")).not.toContainText("Integral of cos4 over");
+  await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\frac{3\\\\pi}{4}']")).toHaveCount(0);
 
   const hoverSemanticTarget = async (locator, expectedLatex) => {
     await locator.scrollIntoViewIfNeeded();
     const box = await locator.boundingBox();
     expect(box).not.toBeNull();
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
     await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe(expectedLatex);
   };
 
-  await hoverSemanticTarget(
-    page.locator("[data-inspectable='math-subtoken'][data-token-role='numerator'][data-token-latex='3\\\\pi']").first(),
-    "3\\pi"
-  );
+  const three = page.locator("[data-inspectable='math-subtoken'][data-token-role='coefficient'][data-token-latex='3']").first();
+  const pi = page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\pi']").first();
+  await hoverSemanticTarget(three, "3");
+  await hoverSemanticTarget(pi, "\\pi");
   await hoverSemanticTarget(
     page.locator("[data-inspectable='math-subtoken'][data-token-role='denominator'][data-token-latex='4']").first(),
     "4"
@@ -573,11 +2902,280 @@ test("fraction result hit-testing prefers the fraction child over the integral p
     "d\\theta"
   );
 
-  await page.mouse.click(hitX, hitY, { button: "right" });
+  const threeBox = await three.boundingBox();
+  const denominatorBox = await page.locator("[data-inspectable='math-subtoken'][data-token-role='denominator'][data-token-latex='4']").first().boundingBox();
+  expect(threeBox).not.toBeNull();
+  expect(denominatorBox).not.toBeNull();
+  await page.mouse.move(threeBox.x + threeBox.width / 2, threeBox.y + threeBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(denominatorBox.x + denominatorBox.width / 2, denominatorBox.y + denominatorBox.height / 2, { steps: 6 });
+  await page.mouse.up();
+  await expect(page.locator(".omni-quick-tooltip")).toContainText(/Selected region/i);
+  await page.mouse.click(denominatorBox.x + denominatorBox.width / 2, denominatorBox.y + denominatorBox.height / 2, { button: "right" });
   await expect(page.locator(".omni-floating-window")).toBeVisible();
-  await expect.poll(() => lazyRequests.find((request) => request.endpoint === "pin")?.body?.selectedLatex).toBe("\\frac{3\\pi}{4}");
-  await expect(page.locator(".omni-floating-window")).toContainText("value");
   await expect(page.locator(".omni-floating-window")).not.toContainText("Integral of cos4 over");
+});
+
+test("radial integral hit-testing resolves visible subexpressions before parent step fallback", async ({ page }) => {
+  const lazyRequests = [];
+  await installHierarchicalTokenApiFixtures(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Evaluate the radial integral.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  await expect(page.getByRole("button", { name: /Radial final integral/i })).toBeVisible();
+
+  const hoverSemanticTarget = async (locator, expectedLatex) => {
+    await locator.scrollIntoViewIfNeeded();
+    const box = await locator.boundingBox();
+    expect(box).not.toBeNull();
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe(expectedLatex);
+  };
+
+  const sixR = page.locator("[data-inspectable='math-subtoken'][data-token-latex='6']").first();
+  await hoverSemanticTarget(sixR, "6");
+  await expect(page.locator(".omni-quick-tooltip")).toContainText("6");
+  await expect(page.locator(".omni-quick-tooltip")).not.toContainText("Radial final integral");
+
+  await hoverSemanticTarget(
+    page.locator("[data-inspectable='math-subtoken'][data-token-latex='12']").first(),
+    "12"
+  );
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex)
+    .not.toBe("\\int_0^1 (6r+12r^2)\\,dr");
+
+  await hoverSemanticTarget(
+    page.locator("[data-inspectable='math-subtoken'][data-token-latex='45']").first(),
+    "45"
+  );
+
+  const sixRBox = await sixR.boundingBox();
+  expect(sixRBox).not.toBeNull();
+  await page.mouse.click(sixRBox.x + sixRBox.width / 2, sixRBox.y + sixRBox.height / 2, { button: "right" });
+  await expect(page.locator(".omni-floating-window")).toBeVisible();
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("6");
+  await expect(page.locator(".omni-floating-window")).toContainText("6");
+  await page.getByRole("button", { name: /Close explanation/i }).click();
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
+
+  const stepCard = page.locator(".step-card", { has: page.getByRole("button", { name: /Radial final integral/i }) });
+  const stepBox = await stepCard.boundingBox();
+  expect(stepBox).not.toBeNull();
+  await page.mouse.move(stepBox.x + stepBox.width - 24, stepBox.y + 24);
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex)
+    .not.toBe("\\int_0^1 (6r+12r^2)\\,dr");
+});
+
+test("tiny leading coefficient before an integral resolves before the wider integral target", async ({ page }) => {
+  const lazyRequests = [];
+  await installHierarchicalTokenApiFixtures(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect the odd-function coefficient.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  const step = page.locator(".step-card", { has: page.getByRole("button", { name: "Select step 5" }) });
+  await expect(step).toBeVisible({ timeout: 20000 });
+  const coefficient = step.locator("[data-inspectable='math-subtoken'][data-token-latex='3']").first();
+
+  const wideTargetBox = async () => page.evaluate(() => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.querySelector("button[aria-label='Select step 5']"));
+    const node = [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+      .find((candidate) => candidate.getAttribute("data-token-latex") === "3");
+    if (!node) return null;
+    node.scrollIntoView({ block: "center", inline: "center" });
+    const rect = node.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  });
+  await expect.poll(() => page.evaluate(() => {
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.querySelector("button[aria-label='Select step 5']"));
+    return [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+      .some((candidate) => candidate.getAttribute("data-token-latex") === "3");
+  }), { timeout: 20000 }).toBe(true);
+  await expect(coefficient).toBeVisible({ timeout: 20000 });
+  const coefficientBox = await wideTargetBox();
+  expect(coefficientBox).not.toBeNull();
+  await moveSemanticPointer(page, coefficientBox.x + Math.min(4, coefficientBox.width * 0.04), coefficientBox.y + coefficientBox.height / 2);
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex)
+    .toBe("3");
+
+  await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='3\\\\int_0^{2\\\\pi}\\\\cos\\\\theta']")).toHaveCount(0);
+});
+
+test("radical operator geometry stays separate from the radicand", async ({ page }) => {
+  const lazyRequests = [];
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Radical hitbox regression",
+        problem: "Inspect radical hitboxes.",
+        expression: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+        steps: [{
+          id: "imaginary-root-final",
+          label: "Imaginary root final answer",
+          math: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+          summary: "Imaginary radical leaves should remain independently hoverable and selectable.",
+          chunks: [{
+            id: "imaginary-root-final-chunk",
+            display: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+            latex: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+            text: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+            role: "equation",
+          }],
+        }],
+        finalAnswerLatex: "x=\\frac{-35\\pm i\\sqrt{278471}}{6}",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+      }),
+    });
+  });
+  await page.route("**/api/explain-token", async (route) => {
+    const body = route.request().postDataJSON();
+    lazyRequests.push(body);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: `Selected ${body?.selectedLatex || "math"}`,
+        explanation: `${body?.selectedLatex || "This expression"} was selected.`,
+      }),
+    });
+  });
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect radical hitboxes.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Imaginary root final answer/i })).toBeVisible();
+
+  const readBox = async (latex, role) => page.evaluate(({ latex, role }) => {
+    const node = [...document.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+      .find((candidate) => (
+        candidate.getAttribute("data-token-latex") === latex
+        && candidate.getAttribute("data-token-role") === role
+        && candidate.getAttribute("data-target-kind") === "leaf"
+      ));
+    if (!node) return null;
+    node.scrollIntoView({ block: "center", inline: "center" });
+    const rect = node.getBoundingClientRect();
+    return {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      quality: node.getAttribute("data-geometry-quality"),
+    };
+  }, { latex, role });
+
+  await page.waitForFunction(() => [...document.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
+    .some((candidate) => candidate.getAttribute("data-token-latex") === "\\sqrt"
+      && candidate.getAttribute("data-token-role") === "radical"
+      && candidate.getAttribute("data-target-kind") === "leaf"));
+  const radical = await readBox("\\sqrt", "radical");
+  const radicand = await readBox("278471", "radicand");
+  expect(radical).not.toBeNull();
+  expect(radicand).not.toBeNull();
+  expect(radical.quality).toBe("precise_leaf");
+  expect(radicand.quality).toBe("precise_leaf");
+  expect(radical.width).toBeLessThan(radicand.width * 0.6);
+
+  await moveSemanticPointer(page, radical.x + radical.width / 2, radical.y + radical.height / 2);
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await expect.poll(() => lazyRequests.at(-1)?.selectedLatex || "").toBe("\\sqrt");
+
+  await moveSemanticPointer(page, radicand.x + radicand.width * 0.97, radicand.y + radicand.height / 2);
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await expect.poll(() => lazyRequests.at(-1)?.selectedLatex || "").toBe("278471");
+  await expect.poll(() => lazyRequests.at(-1)?.targetRole || "").toBe("radicand");
+  await expect.poll(() => page.evaluate(() => (
+    window.__OMNIMATH_HOVER_PERF__?.last?.pointerResolveComplete?.layoutReadCount ?? null
+  ))).toBe(0);
+});
+
+test("compound function hover targets stay leaf-sized", async ({ page }) => {
+  const lazyRequests = [];
+  await installHierarchicalTokenApiFixtures(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect zero-product simplifications.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const hoverExactLatex = async (latex, expectedLatex, xRatio = 0.5) => {
+    const stepLabel = "Zero product simplification";
+    await expect.poll(() => page.evaluate(({ targetLatex, stepLabel: label }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(label));
+      return [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .some((candidate) => candidate.getAttribute("data-token-latex") === targetLatex);
+    }, { targetLatex: latex, stepLabel })).toBe(true);
+    const targetHandle = await page.evaluateHandle(({ targetLatex, stepLabel: label }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(label));
+      return [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .find((candidate) => candidate.getAttribute("data-token-latex") === targetLatex);
+    }, { targetLatex: latex, stepLabel });
+    const target = targetHandle.asElement();
+    expect(target).not.toBeNull();
+    const box = await page.evaluate(({ targetLatex, stepLabel: label }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(label));
+      const node = [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+        .find((candidate) => candidate.getAttribute("data-token-latex") === targetLatex);
+      if (!node) return null;
+      node.scrollIntoView({ block: "center", inline: "center" });
+      const rect = node.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    }, { targetLatex: latex, stepLabel });
+    expect(box).not.toBeNull();
+    const previousHoverCount = lazyRequests.filter((request) => request.endpoint === "hover").length;
+    await moveSemanticPointer(page, box.x + Math.max(1, box.width * xRatio), box.y + Math.max(1, box.height / 2));
+    await expect.poll(async () => {
+      const hoverRequests = lazyRequests.filter((request) => request.endpoint === "hover");
+      if (hoverRequests.length > previousHoverCount) return hoverRequests.at(-1)?.body?.selectedLatex;
+      return page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__?.chosenLatex || "");
+    })
+      .toBe(expectedLatex);
+  };
+
+  await hoverExactLatex("\\sin", "\\sin", 0.5);
+  await hoverExactLatex("0", "0", 0.82);
+  await hoverExactLatex("\\cos", "\\cos", 0.5);
+  await hoverExactLatex("2", "2", 0.84);
+  await hoverExactLatex("\\theta", "\\theta", 0.5);
+  await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='e^{4\\\\cos^2\\\\theta}\\\\sin(0)']")).toHaveCount(0);
+  await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='(0)(-2\\\\sin\\\\theta)']")).toHaveCount(0);
+});
+
+test("small product hover prefers coefficient, function name, exponent, and variable leaves", async ({ page }) => {
+  const lazyRequests = [];
+  await installHierarchicalTokenApiFixtures(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect 4r squared cosine squared theta.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  await expect(page.getByRole("button", { name: /Small token product/i })).toBeVisible();
+  const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Small token product/i }) });
+
+  const hoverInStep = async (latex, expectedLatex = latex) => {
+    const target = step.locator(`[data-inspectable='math-subtoken'][data-token-latex='${latex}']`).first();
+    await expect(target).toBeVisible();
+    const box = await target.boundingBox();
+    expect(box).not.toBeNull();
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex)
+      .toBe(expectedLatex);
+    return target;
+  };
+
+  await hoverInStep("4");
+  await expect(page.locator(".omni-quick-tooltip")).not.toContainText(/^Base$/);
+  await hoverInStep("\\\\sin", "\\sin");
+  await hoverInStep("2");
+  await hoverInStep("\\\\theta", "\\theta");
+  await expect(step.locator("[data-inspectable='math-subtoken'][data-token-latex='4r^2\\\\cos^2\\\\theta']")).toHaveCount(0);
 });
 
 test("long vector-field equations scroll inside math containers without page overflow", async ({ page }) => {
@@ -694,10 +3292,12 @@ test("long vector-field equations scroll inside math containers without page ove
   expect(layout.hasInternalMathScroll).toBe(true);
 
   await expect(page.locator(".omni-solution-flow .math-token-defer-subtokens .math-interaction-layer")).toHaveCount(0);
-  const xCubedToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='x^3']").first();
+  const substitutionStep = page.locator(".step-card").filter({ hasText: "Substitute parametric variables into the integrand" });
+  await expect(substitutionStep).toBeVisible();
+  const xCubedToken = substitutionStep.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
   await expect(xCubedToken).toBeVisible();
-  const cosineToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='\\\\cos(xy)']").first();
-  const arctanToken = page.locator(".omni-solution-flow [data-inspectable='math-subtoken'][data-token-latex='\\\\arctan(x-y)']").first();
+  const cosineToken = substitutionStep.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\cos']").first();
+  const arctanToken = substitutionStep.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\arctan']").first();
   await expect(cosineToken).toBeVisible();
   await expect(arctanToken).toBeVisible();
   const tokenTarget = await xCubedToken.evaluate((node) => {
@@ -716,7 +3316,7 @@ test("long vector-field equations scroll inside math containers without page ove
     await locator.scrollIntoViewIfNeeded();
     const box = await locator.boundingBox();
     expect(box).not.toBeNull();
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
   };
 
   await moveToToken(xCubedToken);
@@ -751,6 +3351,10 @@ test("long vector-field equations scroll inside math containers without page ove
   await hoverTarget.focus();
   await expect(hoverTarget).toBeFocused();
   await hoverTarget.click();
+  for (let attempt = 0; attempt < 4 && await page.locator(".omni-floating-window").count(); attempt += 1) {
+    await page.getByRole("button", { name: /Close explanation/i }).first().click({ force: true, timeout: 2000 }).catch(() => {});
+  }
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
 
   await assertLayoutIntegrity(page);
 });
@@ -844,4 +3448,62 @@ test("low-confidence image review can continue with canonical extracted text", a
   await continueButton.click();
   await expect(page.getByText(/Explanation ready/i)).toBeVisible();
   expect(solveRequestBody).not.toBeNull();
+});
+
+test("typed solve status only becomes ready when rendered solution steps exist", async ({ page }) => {
+  const requests = [];
+  await page.route("**/api/explain", async (route) => {
+    const body = route.request().postDataJSON();
+    requests.push(body);
+    const isQuadratic = String(body.problem || "").includes("x^2");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Math Problem",
+        expression: body.problem,
+        problem: body.problem,
+        steps: isQuadratic
+          ? [{ id: "q1", label: "Step 1", math: "x=\\frac{-5\\pm\\sqrt{109}}{6}", summary: "Use the quadratic formula." }]
+          : [
+              { id: "l1", label: "Step 1", math: "3x+45=67", summary: "Start with the equation." },
+              { id: "l2", label: "Step 2", math: "x=\\frac{22}{3}", summary: "Solve for x." },
+            ],
+        finalAnswerLatex: isQuadratic ? "x=\\frac{-5\\pm\\sqrt{109}}{6}" : "x=\\frac{22}{3}",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+      }),
+    });
+  });
+
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(createLazyExplanationResponse()),
+      });
+    });
+  }
+
+  await page.goto("/?mockAuth=1");
+
+  const solveAndAssert = async (input, expectedStepText) => {
+    await page.getByRole("textbox").fill(input);
+    await page.getByRole("button", { name: /Explain|Send/i }).click();
+    await expect(page.getByText(/Explanation ready/i)).toBeVisible();
+    await expect(page.getByText(expectedStepText)).toBeVisible();
+    await expect(page.getByText(/Enter a problem or upload an image/i)).not.toBeVisible();
+    await expect(page.getByText(/No solution steps are available yet/i)).not.toBeVisible();
+    const renderedStepCount = await page.locator(".omni-solution-flow .step-card").count();
+    const statusText = await page.locator("[role='status']").innerText();
+    expect(renderedStepCount).toBeGreaterThan(0);
+    expect(statusText).toContain(`${renderedStepCount} step${renderedStepCount === 1 ? "" : "s"} generated`);
+  };
+
+  await solveAndAssert("3x+45=67", "Start with the equation.");
+  await solveAndAssert("3x^2 + 5x - 7 = 0", "Use the quadratic formula.");
+  expect(requests.map((request) => request.problem)).toEqual([
+    "3x+45=67",
+    "3x^2 + 5x - 7 = 0",
+  ]);
 });

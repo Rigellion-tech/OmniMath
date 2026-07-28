@@ -35,6 +35,16 @@ test("generic junk solution is rejected for Stokes curl problem", () => {
   }, { problem }), /Solution failed quality validation/);
 });
 
+test("typed exponent equations do not trigger the derivative power-rule fallback", () => {
+  assert.equal(createLocalRuleExplanation("3x^2 + 5x - 7 = 0", { source: "text" }), null);
+  assert.equal(createLocalRuleExplanation("x^2 + y^2 = z^2", { source: "text" }), null);
+
+  const derivativeRule = createLocalRuleExplanation("Differentiate x^2 using the power rule.", { source: "text" });
+  assert.ok(derivativeRule);
+  assert.equal(derivativeRule.expression, "x^n");
+  assert.match(derivativeRule.finalAnswer, /d\/dx x\^n/);
+});
+
 test("plain equations reject derivative-only rule responses as wrong-problem output", () => {
   assert.throws(() => validateSolutionQuality({
     title: "Power rule",

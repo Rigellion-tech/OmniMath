@@ -1,6 +1,7 @@
 {
   "name": "omnimath",
   "private": true,
+  "description": "AI math tutor web app with typed and image-based problem solving.",
   "version": "0.0.0",
   "type": "module",
   "engines": {
@@ -32,7 +33,7 @@
     "pg": "^8.20.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.26.0",
+    "react-router-dom": "^6.30.4",
     "tailwind-merge": "^3.0.2",
     "undici": "^6.27.0"
   },

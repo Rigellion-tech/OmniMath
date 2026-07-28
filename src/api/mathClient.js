@@ -1,3 +1,4 @@
+import { getSolutionSteps } from "../lib/solutionSteps.js";
 import {
   canonicalProblemFromExtraction,
   createCanonicalProblemPayload,
@@ -19,6 +20,13 @@ async function parseResponse(response) {
     const friendlyMessage = typeof body === "object" && body?.code === "AI_SERVICE_UNAVAILABLE"
       ? "AI service timed out or connection dropped. Try again."
       : message;
+    logSolutionDebug("api error response", {
+      requestId: typeof body === "object" && body !== null ? body.requestId || null : null,
+      status: response.status,
+      code: typeof body === "object" && body !== null ? body.code || null : null,
+      message: friendlyMessage,
+      body,
+    });
     throw Object.assign(
       new Error(friendlyMessage || `Request failed with status ${response.status}`),
       { status: response.status, body }
@@ -52,34 +60,98 @@ function summarizeToken(token) {
   };
 }
 
-function createClientRequestId(prefix = "client") {
-  const random = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${Date.now().toString(36)}-${random}`;
-}
-
-function objectOrEmpty(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-
 function logAuthDebug(endpoint, details) {
-  if (!import.meta.env.DEV) return;
+  if (!import.meta.env?.DEV) return;
   console.info("[omnimath:frontend-auth]", {
     endpoint,
     ...details,
   });
 }
 
-async function getAuthHeaders(getToken, endpoint) {
+function isSolutionDebugEnabled() {
+  return import.meta.env?.DEV && (
+    import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true"
+    || import.meta.env.OMNIMATH_DEBUG_SOLVE === "true"
+  );
+}
+
+function logSolutionDebug(event, details = {}) {
+  if (!isSolutionDebugEnabled()) return;
+  console.info("[omnimath:solution-state]", {
+    event,
+    ...details,
+  });
+}
+
+function createClientRequestId(prefix = "client") {
+  const random = Math.random().toString(36).slice(2, 8);
+  return `${prefix}-${Date.now().toString(36)}-${random}`;
+}
+
+function firstArray(...values) {
+  return values.find(Array.isArray) || [];
+}
+
+function firstValue(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== "");
+}
+
+/** @returns {Record<string, any>} */
+function objectOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+/** @returns {Record<string, any>} */
+export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {}) {
+  const raw = objectOrEmpty(rawResponse);
+  const explanation = objectOrEmpty(raw.explanation);
+  const result = objectOrEmpty(raw.result);
+  const solution = objectOrEmpty(raw.solution);
+  const problem = objectOrEmpty(raw.problem);
+  const source = [raw, explanation, result, solution, problem].find((item) => Array.isArray(item.steps)) || raw;
+  const steps = getSolutionSteps(raw);
+  const saveWarning = raw.runtime?.saveWarning || explanation.runtime?.saveWarning || result.runtime?.saveWarning || raw.saveWarning || "";
+  const warnings = [
+    ...firstArray(raw.warnings, explanation.warnings, result.warnings, solution.warnings),
+    ...(saveWarning ? [saveWarning] : []),
+  ];
+  const metadata = {
+    ...(raw.metadata || {}),
+    endpoint,
+    runtime: raw.runtime || explanation.runtime || result.runtime || null,
+    usage: raw.usage || explanation.usage || result.usage || null,
+    savedExplanationId: raw.savedExplanationId || explanation.savedExplanationId || result.savedExplanationId || null,
+    saveStatus: saveWarning ? "not_saved" : raw.savedExplanationId ? "saved" : raw.saved === false ? "not_saved" : "unknown",
+    rawKeys: Object.keys(raw),
+  };
+  const normalized = {
+    ...raw,
+    ...source,
+    steps,
+    finalAnswer: firstValue(raw.finalAnswer, raw.finalAnswerLatex, explanation.finalAnswer, explanation.finalAnswerLatex, result.finalAnswer, result.finalAnswerLatex, solution.finalAnswer, solution.finalAnswerLatex, source.finalAnswer, source.finalAnswerLatex) || "",
+    concepts: firstArray(raw.concepts, explanation.concepts, result.concepts, solution.concepts, source.concepts),
+    warnings,
+    metadata,
+    runtime: {
+      ...(raw.runtime || {}),
+      saveWarning: saveWarning || raw.runtime?.saveWarning || null,
+    },
+  };
+  return normalized;
+}
+
+async function getAuthHeaders(getToken, endpoint, { fresh = false } = {}) {
   if (typeof getToken !== "function") {
     logAuthDebug(endpoint, { getTokenAvailable: false, authorizationHeaderSent: false });
     return {};
   }
 
   try {
-    const token = await getToken();
+    const token = await getToken(fresh ? { skipCache: true } : undefined);
     logAuthDebug(endpoint, {
       getTokenAvailable: true,
       authorizationHeaderSent: Boolean(token),
+      fresh,
       token: summarizeToken(token),
     });
     return token ? { Authorization: `Bearer ${token}` } : {};
@@ -100,7 +172,13 @@ export async function explainProblem({ problem, history, getToken }) {
     source: "typed",
   });
   logCanonicalProblem("solve request", canonicalProblem, { endpoint: "/api/explain" });
-  const authHeaders = await getAuthHeaders(getToken, "/api/explain");
+  logSolutionDebug("api explain payload", {
+    requestId: debugRequestId,
+    rawProblem: problem,
+    payloadProblem: canonicalProblem.canonicalText,
+    historyCount: Array.isArray(history) ? history.length : 0,
+  });
+  const authHeaders = await getAuthHeaders(getToken, "/api/explain", { fresh: true });
   const response = await fetch("/api/explain", {
     method: "POST",
     headers: {
@@ -115,43 +193,71 @@ export async function explainProblem({ problem, history, getToken }) {
     }),
   });
 
-  return parseResponse(response);
+  const parsed = await parseResponse(response);
+  logSolutionDebug("api explain response", {
+    requestId: parsed?.requestId || debugRequestId,
+    status: response.status,
+    ok: response.ok,
+    code: parsed?.code,
+    message: parsed?.message,
+  });
+  return normalizeSolveResponse(parsed, { endpoint: "/api/explain" });
 }
 
 export async function explainImageProblem({ file, prompt, getToken, quality }) {
+  const debugRequestId = createClientRequestId("image-solve");
   const formData = new FormData();
   formData.append("file", file);
   formData.append("prompt", prompt);
+  formData.append("debugRequestId", debugRequestId);
   if (Number.isFinite(quality?.metrics?.ocrConfidence)) {
     formData.append("ocrConfidence", String(quality.metrics.ocrConfidence));
   }
 
-  const authHeaders = await getAuthHeaders(getToken, "/api/explain-image");
+  const authHeaders = await getAuthHeaders(getToken, "/api/explain-image", { fresh: true });
   const response = await fetch("/api/explain-image", {
     method: "POST",
     headers: authHeaders,
     body: formData,
   });
 
-  return parseResponse(response);
+  const parsed = await parseResponse(response);
+  logSolutionDebug("api explain-image response", {
+    requestId: parsed?.requestId || debugRequestId,
+    status: response.status,
+    ok: response.ok,
+    code: parsed?.code,
+    message: parsed?.message,
+  });
+  return normalizeSolveResponse(parsed, { endpoint: "/api/explain-image" });
 }
 
 export async function extractImageProblem({ file, prompt, getToken, quality }) {
+  const debugRequestId = createClientRequestId("image-extract");
   const formData = new FormData();
   formData.append("file", file);
   formData.append("prompt", prompt);
+  formData.append("debugRequestId", debugRequestId);
   if (Number.isFinite(quality?.metrics?.ocrConfidence)) {
     formData.append("ocrConfidence", String(quality.metrics.ocrConfidence));
   }
 
-  const authHeaders = await getAuthHeaders(getToken, "/api/extract-image-problem");
+  const authHeaders = await getAuthHeaders(getToken, "/api/extract-image-problem", { fresh: true });
   const response = await fetch("/api/extract-image-problem", {
     method: "POST",
     headers: authHeaders,
     body: formData,
   });
 
-  return parseResponse(response);
+  const parsed = await parseResponse(response);
+  logSolutionDebug("api extract-image response", {
+    requestId: parsed?.requestId || debugRequestId,
+    status: response.status,
+    ok: response.ok,
+    code: parsed?.code,
+    message: parsed?.message,
+  });
+  return parsed;
 }
 
 function normalizeLineBreaks(value = "") {
@@ -289,7 +395,13 @@ export async function solveExtractedProblem({
   });
   const canonicalInput = getCanonicalSolverInput(frozenCanonicalProblem, problem);
   logCanonicalProblem("solve request", frozenCanonicalProblem, { endpoint: "/api/solve-extracted-problem" });
-  const authHeaders = await getAuthHeaders(getToken, "/api/solve-extracted-problem");
+  logSolutionDebug("api solve-extracted payload", {
+    requestId: debugRequestId,
+    normalizedExtractedProblem: canonicalInput,
+    canonicalInputHash: frozenCanonicalProblem.hash,
+    solveDecision,
+  });
+  const authHeaders = await getAuthHeaders(getToken, "/api/solve-extracted-problem", { fresh: true });
   const response = await fetch("/api/solve-extracted-problem", {
     method: "POST",
     headers: {
@@ -310,7 +422,15 @@ export async function solveExtractedProblem({
     }),
   });
 
-  return parseResponse(response);
+  const parsed = await parseResponse(response);
+  logSolutionDebug("api solve-extracted response", {
+    requestId: parsed?.requestId || debugRequestId,
+    status: response.status,
+    ok: response.ok,
+    code: parsed?.code,
+    message: parsed?.message,
+  });
+  return normalizeSolveResponse(parsed, { endpoint: "/api/solve-extracted-problem" });
 }
 
 export async function explainFollowup({ payload, getToken }) {

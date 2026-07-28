@@ -194,6 +194,13 @@ export default function SettingsPanel({ open, onClose }) {
                 label="Toggle sticky lens positions"
               />
             </SettingRow>
+            <SettingRow label="Debug token overlay" description="Visualize leaf tokens, semantic groups, hover targets, and selected clusters.">
+              <Toggle
+                checked={settings.interaction.debugSemanticHitboxes}
+                onChange={(value) => updateSetting("interaction", "debugSemanticHitboxes", value)}
+                label="Toggle debug token overlay"
+              />
+            </SettingRow>
           </Section>
         );
       case "learning":

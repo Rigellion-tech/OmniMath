@@ -19,25 +19,9 @@ The frontend is a Vite + React app. The backend is a minimal local Node HTTP ser
 
 ## Existing Environment Variables
 
-Backend-only variables currently expected by the app:
+See `.env.example` for the maintained configuration template. It covers OpenAI keys and model routing, Clerk auth, optional Postgres persistence, usage-counter storage, local development ports, and diagnostic flags.
 
-- `OPENAI_API_KEY`: required for OpenAI API calls.
-- `OPENAI_MODEL`: optional model override.
-- `VITE_CLERK_PUBLISHABLE_KEY`: Clerk frontend publishable key.
-- `CLERK_SECRET_KEY`: Clerk backend secret key for session-token verification.
-- `CLERK_JWT_KEY`: optional Clerk JWT public key for networkless verification.
-- `CLERK_AUTHORIZED_PARTIES`: optional comma-separated frontend origins allowed to send Clerk tokens.
-- `CLERK_TIER_CLAIM`: optional Clerk session claim used to identify pro users.
-- `DATABASE_URL`: optional Postgres connection string for persistent user profiles and saved explanation history.
-- `DATABASE_SSL`: optional Postgres SSL override, usually `true` in production and `false` for local Postgres.
-- `DATABASE_POOL_MAX`: optional Postgres pool size.
-- `PORT`: optional backend server port.
-- `DEV_API_TARGET`: optional Vite dev proxy target for local development only.
-- `USAGE_KV_REST_API_URL`: production usage-counter REST store URL.
-- `USAGE_KV_REST_API_TOKEN`: production usage-counter REST store token.
-- `USAGE_IDENTITY_HMAC_SECRET`: verifies signed logged-in user tier headers and salts anonymous usage identities.
-
-Do not read these values directly from browser code.
+Do not read server-only values directly from browser code.
 
 ## Project Structure
 

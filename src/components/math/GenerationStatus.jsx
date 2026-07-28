@@ -29,6 +29,12 @@ const statusConfig = {
     className: "border-amber-300/[0.22] bg-amber-300/[0.075] text-amber-100/90",
     iconClassName: "text-amber-200",
   },
+  warning: {
+    icon: AlertTriangle,
+    label: "Solved with warning",
+    className: "border-amber-300/[0.22] bg-amber-300/[0.075] text-amber-100/90",
+    iconClassName: "text-amber-200",
+  },
   success: {
     icon: CheckCircle2,
     label: "Explanation ready",

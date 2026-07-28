@@ -17,7 +17,12 @@ dist
 dist-ssr
 *.local
 test-artifacts/
+playwright-report/
+coverage/
 .cache/
+.vercel/
+.tmp-*
+*.tsbuildinfo
 
 # Editor directories and files
 .vscode/*

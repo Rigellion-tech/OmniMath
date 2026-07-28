@@ -96,10 +96,68 @@ function replaceLatexFractions(value = "") {
 }
 
 function normalizeFunctionPowers(value = "") {
-  return safeString(value)
-    .replace(/\\?(ln|log|sin|cos|tan|cot|sec|arctan|atan)\s*\^\s*\{?([0-9]+)\}?\s*\(((?:\\?(?:ln|log|sin|cos|tan|cot|sec|arctan|atan)\([^()]+\)))\)/giu, "($1($3))^$2")
-    .replace(/\\?(ln|log|sin|cos|tan|cot|sec|arctan|atan)\s*\^\s*\{?2\}?\s*\(([^()]+)\)/giu, "($1($2))^2")
-    .replace(/\\?(ln|log|sin|cos|tan|cot|sec|arctan|atan)\s*\^\s*\{?2\}?\s+([A-Za-z0-9\\]+(?:\([^)]*\))?)/giu, "($1($2))^2");
+  const text = safeString(value);
+  let output = "";
+  let index = 0;
+
+  function findMatchingDelimiter(openIndex, open, close) {
+    let depth = 0;
+    for (let cursor = openIndex; cursor < text.length; cursor += 1) {
+      if (text[cursor] === open) depth += 1;
+      else if (text[cursor] === close) {
+        depth -= 1;
+        if (depth === 0) return cursor;
+      }
+    }
+    return -1;
+  }
+
+  function readPoweredFunction(startIndex) {
+    const prefix = text.slice(startIndex);
+    const match = prefix.match(/^\\?(ln|log|sin|cos|tan|cot|sec|arctan|atan)\s*\^\s*/iu);
+    if (!match) return null;
+    const name = match[1].toLowerCase();
+    let cursor = startIndex + match[0].length;
+    let exponent = "";
+
+    if (text[cursor] === "{" || text[cursor] === "(") {
+      const open = text[cursor];
+      const close = open === "{" ? "}" : ")";
+      const end = findMatchingDelimiter(cursor, open, close);
+      if (end < 0) return null;
+      exponent = text.slice(cursor + 1, end).trim();
+      cursor = end + 1;
+    } else {
+      const exponentMatch = text.slice(cursor).match(/^[0-9]+/u);
+      if (!exponentMatch) return null;
+      exponent = exponentMatch[0];
+      cursor += exponent.length;
+    }
+
+    if (!/^[0-9]+$/u.test(exponent)) return null;
+    while (cursor < text.length && /\s/u.test(text[cursor])) cursor += 1;
+    if (text[cursor] !== "(") return null;
+    const argumentEnd = findMatchingDelimiter(cursor, "(", ")");
+    if (argumentEnd < 0) return null;
+    const argument = text.slice(cursor + 1, argumentEnd).trim();
+    if (!argument) return null;
+    return {
+      end: argumentEnd + 1,
+      replacement: `(${name}(${argument}))^${exponent}`,
+    };
+  }
+
+  while (index < text.length) {
+    const poweredFunction = readPoweredFunction(index);
+    if (poweredFunction) {
+      output += poweredFunction.replacement;
+      index = poweredFunction.end;
+    } else {
+      output += text[index];
+      index += 1;
+    }
+  }
+  return output;
 }
 
 function normalizeLatexExpression(value = "") {
@@ -166,6 +224,34 @@ function splitTopLevelEquality(value = "") {
   return parts.map((part) => part.trim()).filter(Boolean);
 }
 
+function topLevelApproximationTail(value = "") {
+  const text = safeString(value);
+  let depth = 0;
+  let tail = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\") {
+      const approx = text.slice(index).match(/^\\approx(?![A-Za-z])/u);
+      if (approx && depth === 0) {
+        tail = text.slice(index + approx[0].length).trim();
+        index += approx[0].length - 1;
+        continue;
+      }
+      const command = text.slice(index).match(/^\\[A-Za-z]+/u);
+      if (command) {
+        index += command[0].length - 1;
+      }
+      continue;
+    }
+    if (char === "{" || char === "(" || char === "[") depth += 1;
+    else if (char === "}" || char === ")" || char === "]") depth = Math.max(0, depth - 1);
+    else if (char === "≈" && depth === 0) {
+      tail = text.slice(index + 1).trim();
+    }
+  }
+  return tail;
+}
+
 function splitTopLevelCommas(value = "") {
   const text = safeString(value);
   const parts = [];
@@ -192,6 +278,24 @@ export function finalValueExpression(value = "") {
   const source = stripBox(value);
   const parts = splitTopLevelEquality(source);
   return parts.length > 1 ? parts[parts.length - 1] : source;
+}
+
+function numericExpressionCandidate(value = "") {
+  const equalityValue = finalValueExpression(value);
+  const approximationTail = topLevelApproximationTail(equalityValue);
+  if (!approximationTail) {
+    return {
+      expression: equalityValue,
+      extractedNumericApproximation: null,
+      symbolicPrefixNumericAnalysis: null,
+    };
+  }
+  const prefix = equalityValue.slice(0, equalityValue.length - approximationTail.length).replace(/(?:\\approx(?![A-Za-z])|≈)\s*$/u, "").trim();
+  return {
+    expression: approximationTail,
+    extractedNumericApproximation: approximationTail,
+    symbolicPrefixNumericAnalysis: prefix ? analyzeNumericExpression(prefix) : null,
+  };
 }
 
 function tokenizeExpression(value = "") {
@@ -676,7 +780,11 @@ export function analyzeNumericExpression(value = "", variables = {}) {
       malformedSetValued: true,
     };
   }
-  const expression = finalValueExpression(value);
+  const {
+    expression,
+    extractedNumericApproximation,
+    symbolicPrefixNumericAnalysis,
+  } = numericExpressionCandidate(value);
   let normalized = "";
   const numericIntent = looksLikeNumericConstantExpression(expression);
   try {
@@ -694,6 +802,8 @@ export function analyzeNumericExpression(value = "", variables = {}) {
         reason: `unresolved variable(s): ${missingVariables.join(", ")}`,
         numericIntent: false,
         variables: missingVariables,
+        extractedNumericApproximation,
+        symbolicPrefixNumericAnalysis,
       };
     }
     const result = evaluateAst(ast, normalizedVariables);
@@ -704,6 +814,8 @@ export function analyzeNumericExpression(value = "", variables = {}) {
         normalized,
         reason: "expression did not evaluate to a finite real number",
         numericIntent,
+        extractedNumericApproximation,
+        symbolicPrefixNumericAnalysis,
       };
     }
     return {
@@ -712,6 +824,8 @@ export function analyzeNumericExpression(value = "", variables = {}) {
       normalized,
       reason: "",
       numericIntent,
+      extractedNumericApproximation,
+      symbolicPrefixNumericAnalysis,
     };
   } catch (error) {
     if (error?.code === "VALIDATION_RESOURCE_LIMIT") {
@@ -721,6 +835,8 @@ export function analyzeNumericExpression(value = "", variables = {}) {
         normalized,
         reason: error.message,
         numericIntent,
+        extractedNumericApproximation,
+        symbolicPrefixNumericAnalysis,
         resourceLimit: error.resourceLimit || {
           limitType: "numeric_expression",
           configuredLimit: null,
@@ -735,6 +851,8 @@ export function analyzeNumericExpression(value = "", variables = {}) {
       normalized,
       reason: error.message,
       numericIntent,
+      extractedNumericApproximation,
+      symbolicPrefixNumericAnalysis,
     };
   }
 }

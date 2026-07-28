@@ -4,9 +4,22 @@ import { explainProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
+const DEBUG_SOLUTION_STATE = import.meta.env.DEV
+  && import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true";
+
+function logSolutionState(event, details = {}) {
+  if (!DEBUG_SOLUTION_STATE) return;
+  console.info("[omnimath:solution-state]", {
+    event,
+    ...details,
+  });
+}
+
 export default function ProblemInput({
+  activeSessionId = "",
   history: controlledHistory,
   onHistoryChange,
+  onReset,
   onProblemGenerated,
   onGenerationStart,
   onGenerationError,
@@ -36,16 +49,25 @@ export default function ProblemInput({
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    if (!input.trim()) return;
+    const rawInputValue = input;
+    if (!rawInputValue.trim()) return;
 
-    const userMessage = input.trim();
+    const userMessage = rawInputValue.trim();
+    const requestSessionId = activeSessionId;
+    logSolutionState("typed submit", {
+      rawInputValue,
+      trimmedSubmittedValue: userMessage,
+      activeSessionIdBeforeRequest: requestSessionId,
+      selectedTokenContext: null,
+      hoveredTokenContext: null,
+    });
     setInput("");
     setLoading(true);
 
     const newHistory = [...history, { role: "user", text: userMessage }];
     setHistory(newHistory);
     if (!expanded && newHistory.length > 1) setExpanded(true);
-    onGenerationStart?.({ source: "text" });
+    onGenerationStart?.({ source: "text", problem: userMessage, requestSessionId });
 
     try {
       const result = await explainProblem({
@@ -55,7 +77,10 @@ export default function ProblemInput({
       });
 
       setHistory([...newHistory, { role: "tutor", text: result.title || "Updated explanation" }]);
-      onProblemGenerated(result);
+      onProblemGenerated({
+        ...result,
+        _requestSessionId: requestSessionId,
+      });
     } catch (error) {
       console.error("Problem generation failed:", error);
       onGenerationError?.({
@@ -77,6 +102,7 @@ export default function ProblemInput({
     setHistory([]);
     setExpanded(false);
     setInput("");
+    onReset?.();
     inputRef.current?.focus();
   };
 

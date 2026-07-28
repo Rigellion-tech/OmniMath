@@ -1,5 +1,5 @@
 export const DEFAULT_FLOATING_LENS_SIZE = { width: 320, height: 260 };
-export const DEFAULT_QUICK_TOOLTIP_SIZE = { width: 260, height: 120 };
+export const DEFAULT_QUICK_TOOLTIP_SIZE = { width: 360, height: 120 };
 export const DEFAULT_TOOLTIP_GAP = 10;
 
 export function clampTooltipPosition(x, y, size = DEFAULT_FLOATING_LENS_SIZE, viewport = null, padding = 12) {

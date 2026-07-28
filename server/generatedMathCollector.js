@@ -19,24 +19,8 @@ function normalizeUnicodeMath(value = "") {
     .replace(/∞/g, "\\infty");
 }
 
-function normalizePlainGreekWords(value = "") {
-  return String(value || "")
-    .replace(/(?<!\\)\btheta\b/giu, "\\theta")
-    .replace(/(?<!\\)\bphi\b/giu, "\\phi")
-    .replace(/(?<!\\)\brho\b/giu, "\\rho")
-    .replace(/(?<!\\)\bdelta\b/giu, "\\delta")
-    .replace(/(?<!\\)\balpha\b/giu, "\\alpha")
-    .replace(/(?<!\\)\bbeta\b/giu, "\\beta")
-    .replace(/(?<!\\)\bgamma\b/giu, "\\gamma")
-    .replace(/(?<!\\)\blambda\b/giu, "\\lambda")
-    .replace(/(?<!\\)\bmu\b/giu, "\\mu")
-    .replace(/(?<!\\)\bsigma\b/giu, "\\sigma")
-    .replace(/(?<!\\)\bomega\b/giu, "\\omega")
-    .replace(/(?<!\\)\bpi\b/giu, "\\pi");
-}
-
 export function normalizeGeneratedMathSource(value = "") {
-  let text = normalizePlainGreekWords(normalizeUnicodeMath(value))
+  let text = normalizeUnicodeMath(value)
     .replace(/\s+/g, " ")
     .trim();
   let changed = true;
@@ -60,15 +44,24 @@ function inlineMathFragments(value = "") {
   const text = normalizeUnicodeMath(value);
   const fragments = [];
   const patterns = [
-    /\\\(([\s\S]*?)\\\)/gu,
-    /\\\[([\s\S]*?)\\\]/gu,
-    /\$\$([\s\S]*?)\$\$/gu,
-    /(^|[^$])\$([^$\n]+?)\$/gu,
+    { pattern: /\\\(([\s\S]*?)\\\)/gu, contentGroup: 1, reason: "inline_math_parentheses" },
+    { pattern: /\\\[([\s\S]*?)\\\]/gu, contentGroup: 1, reason: "display_math_brackets" },
+    { pattern: /\$\$([\s\S]*?)\$\$/gu, contentGroup: 1, reason: "display_math_dollars" },
+    { pattern: /(^|[^$])\$([^$\n]+?)\$/gu, contentGroup: 2, reason: "inline_math_dollars" },
   ];
-  for (const pattern of patterns) {
+  for (const { pattern, contentGroup, reason } of patterns) {
     for (const match of text.matchAll(pattern)) {
-      const fragment = normalizeGeneratedMathSource(match[2] || match[1]);
-      if (fragment) fragments.push(fragment);
+      const rawFragment = match[contentGroup] || "";
+      const fragment = normalizeGeneratedMathSource(rawFragment);
+      if (!fragment) continue;
+      const offsetInMatch = match[0].indexOf(rawFragment);
+      const start = (match.index ?? 0) + Math.max(0, offsetInMatch);
+      fragments.push({
+        value: fragment,
+        start,
+        end: start + rawFragment.length,
+        reason,
+      });
     }
   }
   return fragments;
@@ -82,10 +75,18 @@ function equationLikeFragments(value = "") {
   if (!text || inlineMathFragments(text).length > 0) return [];
   const fragments = [];
   const variable = String.raw`(?:\\?(?:alpha|beta|gamma|delta|epsilon|theta|phi|rho|lambda|mu|sigma|omega)|[A-Za-z])`;
-  const equationPattern = new RegExp(String.raw`(${variable}\s*(?::=|=)\s*[^,.;\n]+)`, "giu");
+  const equationPattern = new RegExp(String.raw`(^|[\s,;:])(${variable}\s*(?::=|=)\s*[^,.;\n]+)`, "giu");
   for (const match of text.matchAll(equationPattern)) {
-    const fragment = normalizeGeneratedMathSource(match[1]);
-    if (fragment && /(?:=|:=)/u.test(fragment)) fragments.push(fragment);
+    const fragment = normalizeGeneratedMathSource(match[2]);
+    if (fragment && /(?:=|:=)/u.test(fragment)) {
+      const start = (match.index ?? 0) + (match[0].lastIndexOf(match[2]) || 0);
+      fragments.push({
+        value: fragment,
+        start,
+        end: start + match[2].length,
+        reason: "equation_like_prose_fragment",
+      });
+    }
   }
   return fragments;
 }
@@ -98,15 +99,15 @@ function addField(fields, {
   fieldPath,
   value,
   rawValue = value,
-  rawText = rawValue,
   sourceType = "math",
-  sourceKind = "math",
-  mathFragments = null,
-  fragmentIndex = null,
   stepIndex = null,
   lineIndex = null,
   anchorIndex = null,
   finalAnswer = false,
+  fragmentIndex = null,
+  fragmentStart = null,
+  fragmentEnd = null,
+  extractionReason = null,
 } = {}) {
   const normalized = normalizeGeneratedMathSource(value);
   if (!normalized) return;
@@ -115,34 +116,32 @@ function addField(fields, {
     value: normalized,
     normalized,
     rawValue,
-    rawText,
     sourceType,
-    sourceKind,
-    mathFragments: Array.isArray(mathFragments) ? mathFragments : [normalized],
-    fragmentIndex,
     stepIndex,
     lineIndex,
     anchorIndex,
     finalAnswer,
+    fragmentIndex,
+    fragmentStart,
+    fragmentEnd,
+    extractionReason,
   });
 }
 
 function addProseFields(fields, { basePath, value, sourceType, stepIndex = null } = {}) {
   const rawValue = safeString(value);
   if (!rawValue) return;
-  const fragments = proseMathFragments(rawValue);
-  const normalizedFragments = fragments.map((fragment) => normalizeGeneratedMathSource(fragment)).filter(Boolean);
-  normalizedFragments.forEach((fragment, index) => {
+  proseMathFragments(rawValue).forEach((fragment, index) => {
     addField(fields, {
       fieldPath: `${basePath}${index > 0 ? `#math[${index}]` : ""}`,
-      value: fragment,
+      value: fragment.value,
       rawValue,
-      rawText: rawValue,
       sourceType,
-      sourceKind: "prose",
-      mathFragments: normalizedFragments,
-      fragmentIndex: index,
       stepIndex,
+      fragmentIndex: index,
+      fragmentStart: fragment.start,
+      fragmentEnd: fragment.end,
+      extractionReason: fragment.reason,
     });
   });
 }

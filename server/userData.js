@@ -4,6 +4,30 @@ import { requireClerkIdentity, resolveClerkIdentity } from "./usageIdentity.js";
 const HISTORY_LIMIT = 50;
 const SESSION_LIMIT = 100;
 
+function isProductionRuntime() {
+  return process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+}
+
+function isMissingUserSchemaError(error) {
+  const message = String(error?.message || error?.cause?.message || "");
+  return error?.pgCode === "42P01"
+    || error?.cause?.code === "42P01"
+    || /relation\s+"?(app_users|user_explanations|user_sessions)"?\s+does not exist/i.test(message);
+}
+
+function canUseDevUserDataFallback(error) {
+  return !isProductionRuntime() && (error?.code === "DATABASE_UNAVAILABLE" || isMissingUserSchemaError(error));
+}
+
+function logDevUserDataFallback(operation, error) {
+  console.warn("[omnimath:user-data-fallback]", {
+    operation,
+    reason: "missing local user data schema",
+    code: error?.pgCode || error?.cause?.code || error?.code,
+    message: error?.message,
+  });
+}
+
 function cleanString(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -99,7 +123,28 @@ function getSessionTitle(session = {}) {
 }
 
 async function requireCurrentUser(req, profile = {}) {
-  const identity = await requireClerkIdentity(req);
+  let identity;
+  try {
+    identity = await requireClerkIdentity(req);
+  } catch (error) {
+    if (!isProductionRuntime()) {
+      console.warn("[omnimath:user-data-fallback]", {
+        operation: "auth",
+        reason: "using local dev user identity",
+        code: error.code,
+        message: error.message,
+      });
+      identity = {
+        key: "local-dev-user-data",
+        tier: "local",
+        subject: "local-dev",
+        clerkUserId: "local-dev-user-data",
+        profile: {},
+      };
+    } else {
+      throw error;
+    }
+  }
   return upsertUserRecord(identity, profile);
 }
 
@@ -140,96 +185,154 @@ export async function upsertUserRecord(identity, profile = {}) {
 }
 
 export async function getCurrentUserData(req, profile = {}) {
-  const user = await requireCurrentUser(req, profile);
-  return { user, databaseConfigured: true };
+  try {
+    const user = await requireCurrentUser(req, profile);
+    return { user, databaseConfigured: true };
+  } catch (error) {
+    if (canUseDevUserDataFallback(error)) {
+      logDevUserDataFallback("current-user", error);
+      return { user: null, databaseConfigured: false, fallback: "missing_local_schema" };
+    }
+    throw error;
+  }
 }
 
 export async function getCurrentUserHistory(req) {
-  const user = await requireCurrentUser(req);
-  const result = await query(
-    `
-      select id, source, title, original_problem, expression, final_answer, payload, created_at
-      from user_explanations
-      where user_id = $1
-      order by created_at desc
-      limit $2
-    `,
-    [user.id, HISTORY_LIMIT]
-  );
+  try {
+    const user = await requireCurrentUser(req);
+    const result = await query(
+      `
+        select id, source, title, original_problem, expression, final_answer, payload, created_at
+        from user_explanations
+        where user_id = $1
+        order by created_at desc
+        limit $2
+      `,
+      [user.id, HISTORY_LIMIT]
+    );
 
-  return {
-    user,
-    items: result.rows.map(serializeExplanation),
-  };
+    return {
+      user,
+      items: result.rows.map(serializeExplanation),
+    };
+  } catch (error) {
+    if (canUseDevUserDataFallback(error)) {
+      logDevUserDataFallback("history", error);
+      return { user: null, items: [], databaseConfigured: false, fallback: "missing_local_schema" };
+    }
+    throw error;
+  }
 }
 
 export async function getCurrentUserSessions(req) {
-  const user = await requireCurrentUser(req);
-  const result = await query(
-    `
-      select id, title, payload, created_at, updated_at
-      from user_sessions
-      where user_id = $1
-      order by updated_at desc
-      limit $2
-    `,
-    [user.id, SESSION_LIMIT]
-  );
+  try {
+    const user = await requireCurrentUser(req);
+    const result = await query(
+      `
+        select id, title, payload, created_at, updated_at
+        from user_sessions
+        where user_id = $1
+        order by updated_at desc
+        limit $2
+      `,
+      [user.id, SESSION_LIMIT]
+    );
 
-  return {
-    user,
-    sessions: result.rows.map(serializeSession),
-  };
+    return {
+      user,
+      sessions: result.rows.map(serializeSession),
+    };
+  } catch (error) {
+    if (canUseDevUserDataFallback(error)) {
+      logDevUserDataFallback("sessions:list", error);
+      return { user: null, sessions: [], databaseConfigured: false, fallback: "missing_local_schema" };
+    }
+    throw error;
+  }
 }
 
 export async function createUserSessionForRequest(req, session) {
-  const user = await requireCurrentUser(req);
   const payload = normalizeSessionPayload(session);
   const title = getSessionTitle(session);
-  const result = await query(
-    `
-      insert into user_sessions (user_id, title, payload)
-      values ($1, $2, $3)
-      returning id, title, payload, created_at, updated_at
-    `,
-    [user.id, title, payload]
-  );
+  try {
+    const user = await requireCurrentUser(req);
+    const result = await query(
+      `
+        insert into user_sessions (user_id, title, payload)
+        values ($1, $2, $3)
+        returning id, title, payload, created_at, updated_at
+      `,
+      [user.id, title, payload]
+    );
 
-  return {
-    user,
-    session: serializeSession(result.rows[0]),
-  };
+    return {
+      user,
+      session: serializeSession(result.rows[0]),
+    };
+  } catch (error) {
+    if (canUseDevUserDataFallback(error)) {
+      logDevUserDataFallback("sessions:create", error);
+      const now = new Date().toISOString();
+      return {
+        user: null,
+        databaseConfigured: false,
+        fallback: "missing_local_schema",
+        session: {
+          id: session.id || `local-${Date.now()}`,
+          title,
+          createdAt: now,
+          updatedAt: now,
+          ...serializeSession({ id: session.id || `local-${Date.now()}`, title, payload, created_at: now, updated_at: now }),
+        },
+      };
+    }
+    throw error;
+  }
 }
 
 export async function updateUserSessionForRequest(req, sessionId, session) {
-  const user = await requireCurrentUser(req);
   const payload = normalizeSessionPayload(session);
   const title = getSessionTitle(session);
-  const result = await query(
-    `
-      update user_sessions
-      set title = $3,
-        payload = $4,
-        updated_at = now()
-      where id = $2
-        and user_id = $1
-      returning id, title, payload, created_at, updated_at
-    `,
-    [user.id, sessionId, title, payload]
-  );
+  try {
+    const user = await requireCurrentUser(req);
+    const result = await query(
+      `
+        update user_sessions
+        set title = $3,
+          payload = $4,
+          updated_at = now()
+        where id = $2
+          and user_id = $1
+        returning id, title, payload, created_at, updated_at
+      `,
+      [user.id, sessionId, title, payload]
+    );
 
-  if (result.rows.length === 0) {
-    throw Object.assign(new Error("Session not found."), {
-      statusCode: 404,
-      code: "NOT_FOUND",
-      publicMessage: "That session could not be found.",
-    });
+    if (result.rows.length === 0) {
+      throw Object.assign(new Error("Session not found."), {
+        statusCode: 404,
+        code: "NOT_FOUND",
+        publicMessage: "That session could not be found.",
+      });
+    }
+
+    return {
+      user,
+      session: serializeSession(result.rows[0]),
+    };
+  } catch (error) {
+    if (canUseDevUserDataFallback(error)) {
+      logDevUserDataFallback("sessions:update", error);
+      const now = new Date().toISOString();
+      return {
+        user: null,
+        databaseConfigured: false,
+        fallback: "missing_local_schema",
+        session: serializeSession({ id: sessionId, title, payload, created_at: session.createdAt || now, updated_at: now }),
+      };
+    }
+    throw error;
   }
-
-  return {
-    user,
-    session: serializeSession(result.rows[0]),
-  };
 }
 
 export async function saveExplanationForRequest(req, { source, problem, result }) {

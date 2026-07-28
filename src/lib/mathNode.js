@@ -215,6 +215,16 @@ export function createLatexValidationResult(value = "") {
   };
 }
 
+function mathPipelineDebugEnabled() {
+  const nodeEnv = globalThis?.["process"]?.["env"] || {};
+  const viteEnv = import.meta?.["env"] || {};
+  return nodeEnv["OMNIMATH_DEBUG_SOLVE"] === "1"
+    || nodeEnv["OMNIMATH_DEBUG_MATH_PIPELINE"] === "1"
+    || nodeEnv["DEBUG_MATH_PIPELINE"] === "1"
+    || viteEnv["VITE_DEBUG_MATH_PIPELINE"] === "1"
+    || viteEnv["VITE_DEBUG_MATH_HOVER"] === "1";
+}
+
 export function traceMathStage(stage, input, output, transformation = "none", extra = {}) {
   const inputString = safeMathString(input);
   const outputString = safeMathString(output);
@@ -227,7 +237,7 @@ export function traceMathStage(stage, input, output, transformation = "none", ex
     ...extra,
   };
 
-  if (typeof console !== "undefined") {
+  if (mathPipelineDebugEnabled() && typeof console !== "undefined") {
     console.info("[omnimath:math-pipeline]", details);
   }
 

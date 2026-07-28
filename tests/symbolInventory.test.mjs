@@ -18,6 +18,158 @@ function solution(finalAnswerLatex, steps = []) {
 }
 
 describe("symbol origin diagnostics", () => {
+  it("treats summation indices as locally bound only within generated math fields", () => {
+    const result = solution("\\sum_{n=1}^{\\infty}\\frac{1}{n^2}", [
+      { math: "\\sum_{n=1}^{\\infty}\\frac{1}{n^2}", summary: "Use a convergent series." },
+    ]);
+    const analysis = analyzeSymbolOrigins("Evaluate the series.", result);
+
+    assert.equal(analysis.unexplainedSymbols.includes("n"), false);
+    assert.ok(analysis.boundSymbolProvenance.some((binding) => (
+      binding.command === "sum" && binding.symbol === "n" && binding.fieldPath === "steps[0].math"
+    )));
+  });
+
+  it("binds product indices without accepting free upper-limit or coefficient symbols", () => {
+    const analysis = analyzeSymbolOrigins("Evaluate the product.", solution("P", [
+      { math: "\\prod_{k=1}^{m} a_k", summary: "Use indexed product notation." },
+    ]));
+
+    assert.equal(analysis.unexplainedSymbols.includes("k"), false);
+    assert.ok(analysis.unexplainedSymbols.includes("m"));
+    assert.ok(analysis.unexplainedSymbols.includes("a"));
+  });
+
+  it("accepts product notation when non-index symbols are already part of the problem", () => {
+    const analysis = analyzeSymbolOrigins("a,m", solution("P", [
+      { math: "\\prod_{k=1}^{m} a_k", summary: "Use indexed product notation." },
+    ]));
+
+    assert.equal(analysis.unexplainedSymbols.includes("k"), false);
+    assert.equal(analysis.unexplainedSymbols.includes("m"), false);
+    assert.equal(analysis.unexplainedSymbols.includes("a"), false);
+  });
+
+  it("handles nested summations with different locally bound indices", () => {
+    const nested = "\\sum_{n=1}^{\\infty}\\sum_{k=1}^{n} f(n,k)";
+    const analysis = analyzeSymbolOrigins("f", solution(nested, [
+      { math: nested, summary: "Use nested sums." },
+    ]));
+
+    assert.equal(analysis.unexplainedSymbols.includes("n"), false);
+    assert.equal(analysis.unexplainedSymbols.includes("k"), false);
+    assert.equal(analysis.boundSymbolProvenance.filter((binding) => binding.symbol === "n").length > 0, true);
+    assert.equal(analysis.boundSymbolProvenance.filter((binding) => binding.symbol === "k").length > 0, true);
+  });
+
+  it("still rejects the same index symbol when it is reused outside a bound field", () => {
+    const analysis = analyzeSymbolOrigins("Evaluate the series.", solution("0", [
+      { math: "\\sum_{n=1}^{\\infty}\\frac{1}{n^2}", summary: "Use a bound summation index." },
+      { math: "2n+1=3", summary: "Reuse the index as a free later equation." },
+    ]));
+
+    assert.ok(analysis.fieldReports.some((field) => (
+      field.fieldPath === "steps[1].math" && field.unexplainedSymbols.includes("n")
+    )));
+    assert.ok(analysis.unexplainedSymbols.includes("n"));
+  });
+
+  it("does not tokenize ordinary English prose as generated math symbols", () => {
+    const result = solution("1", [
+      {
+        label: "Now simplify",
+        title: "No new notation",
+        summary: "An ordinary sentence contains the letter n many times.",
+        plainExplanation: "Nothing in this prose is an inline math fragment.",
+        math: "1",
+      },
+    ]);
+    const collected = collectGeneratedMath(result);
+    const analysis = analyzeSymbolOrigins("Evaluate 1.", result);
+
+    assert.equal(collected.some((field) => /label|title|summary|plainExplanation/u.test(field.fieldPath)), false);
+    assert.equal(analysis.unexplainedSymbols.includes("n"), false);
+  });
+
+  it("collects prose fields only when they contain confident inline math fragments", () => {
+    const result = solution("1", [
+      {
+        label: "Use \\(\\sum_{n=1}^{\\infty}\\frac{1}{n^2}\\)",
+        title: "Series step",
+        summary: "The inline math \\(\\sum_{n=1}^{\\infty}\\frac{1}{n^2}\\) binds n.",
+        plainExplanation: "Ordinary prose after the math does not add variables.",
+        math: "1",
+      },
+    ]);
+    const collected = collectGeneratedMath(result);
+    const analysis = analyzeSymbolOrigins("Evaluate 1.", result);
+
+    assert.ok(collected.some((field) => field.fieldPath === "steps[0].label"));
+    assert.ok(collected.some((field) => field.fieldPath === "steps[0].summary"));
+    assert.equal(analysis.unexplainedSymbols.includes("n"), false);
+  });
+
+  it("lets presentation fragments inherit same-step summation bindings without defining coefficients", () => {
+    const result = solution("0.754693", [
+      {
+        math: "\\ln(\\cos \\theta)=-\\sum_{n=1}^{\\infty}\\frac{(2^{2n}-1)|B_{2n}|}{2n(2n)!}(2\\theta)^{2n}",
+        summary: "Use Bernoulli numbers \\(B_{2n}\\) in the displayed series.",
+        lines: [
+          { latex: "\\ln(\\cos \\theta)=-\\sum_{n=1}^{\\infty}" },
+          { latex: "\\frac{(2^{2n}-1)|B_{2n}|}{2n(2n)!}(2\\theta)^{2n}" },
+        ],
+      },
+    ]);
+    const analysis = analyzeSymbolOrigins(regressionIntegralProblem, result);
+
+    assert.equal(analysis.unexplainedSymbols.includes("n"), false);
+    assert.equal(analysis.unexplainedSymbols.includes("B"), true);
+    assert.ok(analysis.fieldReports.some((field) => (
+      field.fieldPath === "steps[0].summary"
+      && field.symbols.some((item) => item.symbol === "n" && item.classification === "bound_by_step_math_context")
+    )));
+    assert.ok(analysis.fieldReports.some((field) => (
+      field.fieldPath === "steps[0].lines[1].latex"
+      && field.symbols.some((item) => item.symbol === "n" && item.classification === "bound_by_step_math_context")
+    )));
+  });
+
+  it("does not let a previous summation binding explain a later isolated subscript", () => {
+    const result = solution("0", [
+      {
+        math: "\\sum_{n=1}^{\\infty}\\frac{1}{n^2}",
+        summary: "Use a bound index.",
+      },
+      {
+        summary: "Later mention \\(B_{2n}\\) without a local summation context.",
+        math: "1",
+      },
+    ]);
+    const analysis = analyzeSymbolOrigins("Evaluate a series.", result);
+
+    assert.equal(analysis.unexplainedSymbols.includes("n"), true);
+    assert.equal(analysis.unexplainedSymbols.includes("B"), true);
+  });
+
+  it("still accepts a plain integration constant C", () => {
+    const finalAnswerLatex = "\\int x\\,dx=\\frac{x^2}{2}+C";
+    const analysis = analyzeSymbolOrigins("\\int x\\,dx", solution(finalAnswerLatex, [
+      { math: finalAnswerLatex, summary: "State the antiderivative." },
+    ]));
+
+    assert.equal(analysis.unexplainedSymbols.includes("C"), false);
+  });
+
+  it("rejects indexed coefficient families that use C without introduction", () => {
+    const result = solution("\\sum_{k=1}^{\\infty} C_k", [
+      { math: "\\sum_{k=1}^{\\infty} C_k", summary: "Use an unspecified coefficient family." },
+    ]);
+    const analysis = analyzeSymbolOrigins("Evaluate a series.", result);
+
+    assert.equal(analysis.unexplainedSymbols.includes("k"), false);
+    assert.equal(analysis.unexplainedSymbols.includes("C"), true);
+  });
+
   it("classifies legitimate dummy variables as locally bound", () => {
     const result = solution("\\int_0^1 t^2\\,dt", [
       { math: "\\int_0^1 t^2\\,dt", summary: "Use a dummy variable." },
@@ -94,68 +246,6 @@ describe("symbol origin diagnostics", () => {
     assert.ok(analysis.explicitDefinitions.includes("\\theta"));
   });
 
-  it("does not tokenize ordinary prose fields as generated symbols", () => {
-    const result = solution("\\frac{1}{2}", [
-      {
-        label: "Start the computation",
-        title: "Set up the result",
-        summary: "This step starts with the text of the problem and keeps the explanation short.",
-        plainExplanation: "The tangent idea turns the interval into a finite interval.",
-      },
-      {
-        summary: "The next sentence contains multiple t letters but no displayed equation.",
-        plainExplanation: "It is just ordinary text, not generated mathematics.",
-      },
-    ]);
-    const collected = collectGeneratedMath(result);
-    const analysis = analyzeSymbolOrigins("1", result);
-
-    assert.equal(collected.some((field) => field.sourceKind === "prose"), false);
-    assert.equal(analysis.unexplainedSymbols.includes("t"), false);
-    assert.equal(analysis.fieldReports.some((field) => /steps\[\d+\]\.(?:label|title|summary|plainExplanation)/u.test(field.fieldPath)), false);
-  });
-
-  it("introduces theta from a prose heading equation without tokenizing surrounding words", () => {
-    const result = solution("\\frac{\\pi}{2}\\ln^2 2", [
-      {
-        heading: "Let x = tan(theta).",
-        math: "I=\\int_0^{\\pi/2}\\frac{\\theta\\ln(\\sec^2\\theta)}{\\tan\\theta}\\,d\\theta",
-        summary: "The sentence explains the substitution in words.",
-      },
-    ]);
-    const collected = collectGeneratedMath(result);
-    const headingField = collected.find((field) => field.fieldPath === "steps[0].heading");
-    const analysis = analyzeSymbolOrigins(regressionIntegralProblem, result);
-
-    assert.equal(headingField?.sourceKind, "prose");
-    assert.equal(headingField?.rawText, "Let x = tan(theta).");
-    assert.deepEqual(headingField?.mathFragments, ["x = tan(\\theta)"]);
-    assert.equal(analysis.unexplainedSymbols.includes("\\theta"), false);
-    assert.ok(analysis.explicitDefinitions.includes("\\theta"));
-    assert.equal(analysis.fieldReports.find((field) => field.fieldPath === "steps[0].heading")?.sourceKind, "prose");
-  });
-
-  it("extracts only inline math symbols from prose fields", () => {
-    const result = solution("u+1", [
-      {
-        summary: "This text contains t letters, while $u=\\sin x$ is the only inline math.",
-      },
-      {
-        math: "u+1",
-      },
-    ]);
-    const collected = collectGeneratedMath(result);
-    const summaryField = collected.find((field) => field.fieldPath === "steps[0].summary");
-    const analysis = analyzeSymbolOrigins("\\sin x", result);
-
-    assert.equal(summaryField?.sourceKind, "prose");
-    assert.equal(summaryField?.normalized, "u=\\sin x");
-    assert.equal(analysis.unexplainedSymbols.includes("t"), false);
-    assert.equal(analysis.unexplainedSymbols.includes("u"), false);
-    assert.ok(analysis.explicitDefinitions.includes("u"));
-    assert.equal(analysis.generatedSymbols.includes("t"), false);
-  });
-
   it("rejects theta when it is used before the substitution introduces it", () => {
     const result = solution("\\frac{\\pi}{2}\\ln^2 2", [
       { math: "I=\\theta+1", summary: "Use theta too early." },
@@ -182,7 +272,6 @@ describe("symbol origin diagnostics", () => {
     const substitutionAnalysis = analyzeSubstitutionConsistency(result, regressionIntegralProblem);
 
     assert.ok(collected.some((field) => field.fieldPath === "steps[0].heading" && field.normalized === "x = tan\\theta"));
-    assert.equal(collected.find((field) => field.fieldPath === "steps[0].heading")?.sourceKind, "prose");
     assert.equal(symbolAnalysis.unexplainedSymbols.includes("\\theta"), false);
     assert.equal(substitutionAnalysis.issue, null);
     assert.equal(substitutionAnalysis.verificationStatus, "supported");
@@ -204,7 +293,6 @@ describe("symbol origin diagnostics", () => {
     const substitutionAnalysis = analyzeSubstitutionConsistency(result, regressionIntegralProblem);
 
     assert.ok(collected.some((field) => field.fieldPath === "steps[0].math" && field.normalized.includes("x=\\tan\\theta")));
-    assert.equal(collected.find((field) => field.fieldPath === "steps[0].math")?.sourceKind, "math");
     assert.equal(symbolAnalysis.unexplainedSymbols.includes("\\theta"), false);
     assert.equal(substitutionAnalysis.issue, null);
     assert.equal(substitutionAnalysis.verificationStatus, "supported");
@@ -216,25 +304,6 @@ describe("symbol origin diagnostics", () => {
     assert.throws(() => validateSolutionQuality(solution("x+\\delta", [
       { math: "x+\\delta", summary: "Introduce an unexplained symbol." },
     ]), { problem: "x+1" }), /Solution failed quality validation/);
-  });
-
-  it("continues to reject a genuinely unexplained t in mathematical equations", () => {
-    const result = solution("x+t", [
-      {
-        label: "This prose label should not matter",
-        math: "x+t",
-        lines: [{ latex: "x+t" }],
-      },
-    ]);
-    const analysis = analyzeSymbolOrigins("x", result);
-
-    assert.ok(analysis.unexplainedSymbols.includes("t"));
-    assert.ok(analysis.fieldReports.some((field) => (
-      field.fieldPath === "steps[0].math"
-      && field.sourceKind === "math"
-      && field.unexplainedSymbols.includes("t")
-    )));
-    assert.throws(() => validateSolutionQuality(result, { problem: "x" }), /Solution failed quality validation/);
   });
 
   it("treats derivative and differential notation as operators, not unexplained d symbols", () => {

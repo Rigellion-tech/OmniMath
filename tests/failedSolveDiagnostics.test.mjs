@@ -10,6 +10,8 @@ const appUrl = pathToFileURL(join(repoRoot, "server", "app.js")).href;
 const problem = "x + 35^2 = 0";
 const reviewedOcrText = "Evaluate x + 35^2 = 0.";
 const regressionIntegralProblem = "Evaluate the integral from 0 to infinity of (ln(1 + x^2) times arctan x) divided by (x times (1 + x^2)) with respect to x.";
+const regressionIntegralPlainOcrProblem = "Evaluate the integral from 0 to infinity of the quantity ln(1 + x^2) times arctan x divided by x times (1 + x^2) dx.";
+const regressionIntegralLatex = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
 
 function createJsonResponseRecorder() {
   return {
@@ -187,6 +189,172 @@ function concisePassingIntegralOutput() {
   });
 }
 
+function fullEqualityPoweredLogIntegralOutput() {
+  const finalAnswerLatex = "\\int_{0}^{\\infty}\\frac{\\ln(1+x^{2})\\arctan x}{x(1+x^{2})}\\,dx=\\frac{\\pi}{2}\\ln^{2}(2)";
+  return JSON.stringify({
+    title: "Integral value",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Final answer",
+        latex: finalAnswerLatex,
+        reasoning: "State the evaluated integral as an equality.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex,
+    numericCheck: "0.7546938294602481",
+  });
+}
+
+function negativeIntegralOutput() {
+  return JSON.stringify({
+    title: "Integral with negative value",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Final answer",
+        latex: "I=\\pi\\ln 2-\\pi",
+        reasoning: "This gives a negative value for a positive integrand.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\pi\\ln 2-\\pi",
+    numericCheck: "-0.9640065632861909",
+  });
+}
+
+function wrongPiCubedIntegralOutput() {
+  return JSON.stringify({
+    title: "Integral with wrong pi cubed value",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi^3}{12}",
+        reasoning: "This is a structurally valid but numerically wrong value.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi^3}{12}",
+    numericCheck: "2.5838563900249847",
+  });
+}
+
+function approximateSeriesMismatchOutput() {
+  return JSON.stringify({
+    title: "Integral with wrong approximate series value",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Series evaluation",
+        latex: "I=\\pi\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\approx 1.2913",
+        reasoning: "Use a proposed series expression and state a decimal approximation.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\pi\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\approx 1.2913",
+    numericCheck: "1.2913",
+  });
+}
+
+function bernoulliCoefficientIntegralOutput() {
+  return JSON.stringify({
+    title: "Integral with undefined Bernoulli and coefficient notation",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Use the tangent substitution",
+        latex: "x=\\tan\\theta, I=-2\\int_0^{\\pi/2}\\theta\\cot\\theta\\ln(\\cos\\theta)\\,d\\theta",
+        reasoning: "This introduces the substitution variable before using it.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Expand both factors",
+        latex: "\\ln(\\cos \\theta)=-\\sum_{n=1}^{\\infty}\\frac{(2^{2n}-1)|B_{2n}|}{2n(2n)!}(2\\theta)^{2n},\\quad \\cot\\theta=\\frac{1}{\\theta}-\\sum_{m=1}^{\\infty}\\frac{2^{2m}|B_{2m}|}{(2m)!}\\theta^{2m-1}",
+        reasoning: "Use Bernoulli numbers \\(B_{2n}\\) and \\(B_{2m}\\) in the displayed series.",
+        anchors: [],
+        lines: [
+          { latex: "\\ln(\\cos \\theta)=-\\sum_{n=1}^{\\infty}" },
+          { latex: "\\frac{(2^{2n}-1)|B_{2n}|}{2n(2n)!}(2\\theta)^{2n}" },
+        ],
+      },
+      {
+        id: "s3",
+        heading: "Collect coefficients",
+        latex: "I=\\sum_{k=1}^{\\infty} C_k\\frac{(\\pi/2)^{2k+1}}{2k+1}",
+        reasoning: "The coefficients \\(C_k\\) are not defined in rendered math.",
+        anchors: [],
+      },
+      {
+        id: "s4",
+        heading: "Final answer",
+        latex: "I\\approx 0.754693",
+        reasoning: "State the numerical value.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2\\approx 0.754693",
+    numericCheck: "0.754693",
+  });
+}
+
+function tSubstitutionUndefinedCatalanOutput() {
+  return JSON.stringify({
+    title: "Integral with t substitution and undefined Catalan notation",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Use the substitution \\(t=\\arctan x\\)",
+        latex: "t=\\arctan x,\\quad x=\\tan t,\\quad dx=\\sec^2 t\\,dt",
+        reasoning: "The rendered substitution defines \\(t\\) before it is used.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Introduce a constant",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2+G",
+        reasoning: "The extra inline symbol \\(G\\) is described only in prose as Catalan's constant.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2+G",
+    numericCheck: "",
+  });
+}
+
+function unexplainedSymbolsIntegralOutput() {
+  return JSON.stringify({
+    title: "Integral with unexplained generated symbols",
+    problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    steps: [
+      {
+        id: "s1",
+        heading: "Introduce unbound notation",
+        latex: "I=B+\\theta+\\sum_n \\frac{1}{n^2}+\\sum_m \\frac{1}{m^2}",
+        reasoning: "This uses symbols without defining or binding them in rendered math.",
+        anchors: [],
+      },
+      {
+        id: "s2",
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: "The final value is numerically correct, but earlier notation was not defined.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+  });
+}
+
 function structurallyInvalidThetaIntegralOutput() {
   return JSON.stringify({
     title: "Integral with correct value and missing theta introduction",
@@ -237,39 +405,53 @@ function structurallyRepairedThetaIntegralOutput() {
   });
 }
 
-function negativeIntegralOutput() {
+function intervalSyntaxWrongIntegralOutput() {
   return JSON.stringify({
-    title: "Integral with negative value",
+    title: "Integral with half-open interval notation",
     problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
     steps: [
       {
         id: "s1",
+        heading: "Use tangent substitution",
+        latex: "x=\\tan t,\\quad t=\\arctan x,\\quad dx=\\sec^2 t\\,dt,\\quad t \\in [0,\\frac{\\pi}{2})",
+        reasoning: "The substitution maps x from zero to infinity onto the half-open interval for t.",
+        anchors: [],
+      },
+      {
+        id: "s2",
         heading: "Final answer",
-        latex: "I=\\pi\\ln 2-\\pi",
-        reasoning: "This gives a negative value for a positive integrand.",
+        latex: "I=0",
+        reasoning: "This intentionally wrong value should fail numerical validation, not syntax validation.",
         anchors: [],
       },
     ],
-    finalAnswerLatex: "\\pi\\ln 2-\\pi",
-    numericCheck: "-0.9640065632861909",
+    finalAnswerLatex: "0",
+    numericCheck: "0",
   });
 }
 
-function wrongPiCubedIntegralOutput() {
+function specialFunctionHallucinationIntegralOutput() {
   return JSON.stringify({
-    title: "Integral with wrong pi cubed value",
+    title: "Integral with unsupported polylogarithm jump",
     problemLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
     steps: [
       {
         id: "s1",
+        heading: "Introduce a special function",
+        latex: "I=\\operatorname{Li}_3\\left(\\frac{1}{2}\\right)+\\frac{\\pi^2}{6}\\ln 2",
+        reasoning: "Introduce a polylogarithm expression without deriving it from the integral.",
+        anchors: [],
+      },
+      {
+        id: "s2",
         heading: "Final answer",
-        latex: "I=\\frac{\\pi^3}{12}",
-        reasoning: "This is a structurally valid but numerically wrong value.",
+        latex: "I=2.0466220244727404",
+        reasoning: "Use the unsupported special-function value.",
         anchors: [],
       },
     ],
-    finalAnswerLatex: "\\frac{\\pi^3}{12}",
-    numericCheck: "2.5838563900249847",
+    finalAnswerLatex: "2.0466220244727404",
+    numericCheck: "2.0466220244727404",
   });
 }
 
@@ -445,6 +627,7 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     OPENAI_MODEL: process.env.OPENAI_MODEL,
     OPENAI_SOLVER_MODEL: process.env.OPENAI_SOLVER_MODEL,
+    OPENAI_ESCALATION_MODEL: process.env.OPENAI_ESCALATION_MODEL,
     OMNIMATH_CAPTURE_FAILED_SOLVES: process.env.OMNIMATH_CAPTURE_FAILED_SOLVES,
     DATABASE_URL: process.env.DATABASE_URL,
     POSTGRES_URL: process.env.POSTGRES_URL,
@@ -471,6 +654,7 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
   process.env.OPENAI_API_KEY = "test-key";
   process.env.OPENAI_MODEL = "test-solver-model";
   process.env.OPENAI_SOLVER_MODEL = "test-solver-model";
+  process.env.OPENAI_ESCALATION_MODEL = "test-escalation-model";
   process.env.OMNIMATH_CAPTURE_FAILED_SOLVES = capture ? "1" : "";
   process.env.DATABASE_URL = "";
   process.env.POSTGRES_URL = "";
@@ -505,6 +689,9 @@ async function invokeSolve(handler, {
   requestId = "diag-test-request",
   problemValue = problem,
   reviewedTextValue = reviewedOcrText,
+  problemLatexValue = "",
+  canonicalTextValue = problemValue,
+  canonicalLatexValue = "",
 } = {}) {
   const req = {
     method: "POST",
@@ -520,9 +707,10 @@ async function invokeSolve(handler, {
     body: {
       problem: problemValue,
       problemText: reviewedTextValue,
+      problemLatex: problemLatexValue,
       canonicalProblem: {
-        canonicalText: problemValue,
-        canonicalLatex: "",
+        canonicalText: canonicalTextValue,
+        canonicalLatex: canonicalLatexValue,
         source: "ocr-reviewed",
         extractionWarnings: [],
         extractionConfidence: 91,
@@ -531,6 +719,8 @@ async function invokeSolve(handler, {
       extraction: {
         normalizedText: problemValue,
         validationText: problemValue,
+        extractedProblemLatex: canonicalLatexValue,
+        rawExtractedLatex: canonicalLatexValue,
         confidence: 91,
         ocrConfidence: 88,
         mathIntegrityScore: 91,
@@ -577,12 +767,14 @@ describe("failed solve diagnostics", () => {
 
       assert.equal(response.statusCode, 200);
       assert.equal(artifacts.length, 1);
+      assert.deepEqual((await readdir(join(cwd, "logs"))).includes("failed-solves"), true);
       assert.match(artifacts[0].name, /_initial\.json$/);
       assert.equal(artifacts[0].body.metadata.requestId, "diag-initial-success");
       assert.deepEqual(artifacts[0].body.metadata.usageSettlement, {
         providerCalls: 1,
         actualInputTokens: 10,
         actualOutputTokens: 20,
+        actualReasoningTokens: 0,
         actualTotalTokens: 30,
         settlementReason: "failure",
       });
@@ -646,6 +838,7 @@ describe("failed solve diagnostics", () => {
       assert.equal(requests.length, 2);
       assert.equal(requests[0].text.format.name, "math_fast_solve");
       assert.equal(requests[1].text.format.name, "math_fast_solve");
+      assert.ok(requests.every((request) => request.model !== "test-escalation-model"));
       assert.doesNotMatch(JSON.stringify(requests), /math_compact_solve/);
       assert.equal(artifacts.length, 1);
       assert.equal(artifacts[0].body.validation.exactFailedRule, "unsupported_integration_by_parts_setup");
@@ -658,106 +851,6 @@ describe("failed solve diagnostics", () => {
       assert.match(repairPrompt, /dv=\\cot\\theta\\ln\(\\cos\\theta\)/);
       assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
       assert.equal(body.runtime.source, "live AI repair call");
-    });
-  });
-
-  it("uses narrow structural repair and preserves the correct improper-integral final answer", async () => {
-    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
-      const outputs = [
-        structurallyInvalidThetaIntegralOutput(),
-        structurallyRepairedThetaIntegralOutput(),
-      ];
-      const requests = [];
-      globalThis.fetch = async (_url, options) => {
-        const payload = JSON.parse(options.body);
-        requests.push(payload);
-        return jsonResponse(openAiBody(outputs.shift()));
-      };
-
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
-        requestId: "diag-integral-structural-repair-preserves-answer",
-        problemValue: regressionIntegralProblem,
-        reviewedTextValue: regressionIntegralProblem,
-      });
-      const body = response.json();
-      const artifacts = await readArtifacts(cwd);
-      const repairPrompt = requests[1]?.input?.[0]?.content?.[0]?.text || "";
-
-      assert.equal(response.statusCode, 200);
-      assert.equal(requests.length, 2);
-      assert.equal(requests[0].text.format.name, "math_fast_solve");
-      assert.equal(requests[1].text.format.name, "math_fast_solve");
-      assert.equal(body.runtime.source, "live AI repair call");
-      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
-      assert.equal(body.numericCheck, "0.7546938294602481");
-
-      assert.equal(artifacts.length, 1);
-      assert.ok(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
-      assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.issue, null);
-      assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.proposedValue, 0.7546938294602481);
-      assert.equal(artifacts[0].body.validation.repairFeedback.repairCategory, "structural");
-
-      assert.match(repairPrompt, /Structural repair task:/);
-      assert.match(repairPrompt, /Preserve derivation/);
-      assert.match(repairPrompt, /Preserve mathematics/);
-      assert.match(repairPrompt, /Preserve final answer/);
-      assert.match(repairPrompt, /Only repair symbol introduction/);
-      assert.match(repairPrompt, /Do not recompute/);
-      assert.match(repairPrompt, /\\frac\{\\pi\}\{2\}\\ln\^2 2/);
-      assert.doesNotMatch(repairPrompt, /Quality repair context/);
-      assert.doesNotMatch(repairPrompt, /Reconstruct the solution from scratch/);
-      assert.doesNotMatch(repairPrompt, /Assume the previous derivation is mathematically unreliable/);
-    });
-  });
-
-  it("rejects a weaker pi-cubed repair and keeps the numerically validated improper-integral candidate", async () => {
-    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
-      const outputs = [
-        structurallyInvalidThetaIntegralOutput(),
-        wrongPiCubedIntegralOutput(),
-      ];
-      const requests = [];
-      globalThis.fetch = async (_url, options) => {
-        const payload = JSON.parse(options.body);
-        requests.push(payload);
-        return jsonResponse(openAiBody(outputs.shift()));
-      };
-
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
-        requestId: "diag-integral-reject-weaker-repair",
-        problemValue: regressionIntegralProblem,
-        reviewedTextValue: regressionIntegralProblem,
-      });
-      const body = response.json();
-      const artifacts = await readArtifacts(cwd);
-      const initialArtifact = artifacts.find((artifact) => artifact.body.metadata.failureStage === "initial");
-      const repairArtifact = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
-      const comparison = repairArtifact?.body.validation.repairFeedback.candidateComparison;
-      const repairPrompt = requests[1]?.input?.[0]?.content?.[0]?.text || "";
-
-      assert.equal(response.statusCode, 200);
-      assert.equal(requests.length, 2);
-      assert.equal(body.runtime.source, "live AI call (repair rejected)");
-      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
-      assert.equal(body.numericCheck, "0.7546938294602481");
-
-      assert.ok(initialArtifact);
-      assert.ok(repairArtifact);
-      assert.ok(initialArtifact.body.validation.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
-      assert.equal(initialArtifact.body.validation.numericalCrossCheckResult.issue, null);
-      assert.equal(repairArtifact.body.validation.numericalCrossCheckResult.issue, "numerical_final_answer_mismatch");
-
-      assert.equal(comparison.selectedCandidate, "initial");
-      assert.equal(comparison.repairAccepted, false);
-      assert.equal(comparison.reason, "initial_numeric_validated_repair_numerical_failure");
-      assert.equal(comparison.finalAnswerChanged, true);
-      assert.equal(comparison.derivationAgreement, false);
-      assert.deepEqual(comparison.structuralFailures.initial, ["unexplained_generated_symbol:\\theta"]);
-      assert.deepEqual(comparison.mathematicalFailures.repair, ["numerical_final_answer_mismatch"]);
-
-      assert.match(repairPrompt, /Structural repair task:/);
-      assert.match(repairPrompt, /Preserve final answer/);
-      assert.match(repairPrompt, /Do not recompute/);
     });
   });
 
@@ -821,9 +914,558 @@ describe("failed solve diagnostics", () => {
     });
   });
 
+  it("captures explicit numeric approximations after unsupported symbolic prefixes", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [approximateSeriesMismatchOutput(), concisePassingIntegralOutput()];
+      globalThis.fetch = async () => jsonResponse(openAiBody(outputs.shift()));
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-approx-series-mismatch",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralProblem,
+        canonicalTextValue: regressionIntegralProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const artifacts = await readArtifacts(cwd);
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(artifacts.length, 1);
+      assert.equal(artifacts[0].body.validation.exactFailedRule, "numerical_final_answer_mismatch");
+      assert.equal(artifacts[0].body.validation.finalAnswerLatex, "\\pi\\sum_{n=1}^{\\infty}\\frac{1}{n(2n+1)^2}\\approx 1.2913");
+      assert.equal(artifacts[0].body.validation.numericParserStatus, "evaluable");
+      assert.equal(artifacts[0].body.validation.extractedNumericApproximation, "1.2913");
+      assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.proposedValue, 1.2913);
+      assert.ok(artifacts[0].body.validation.summationBindingProvenance.some((binding) => binding.symbol === "n"));
+      assert.equal(artifacts[0].body.validation.firstFailedMathematicalRule, "numerical_final_answer_mismatch");
+    });
+  });
+
+  it("replays the exact improper integral through symbol, numerical, and escalation validation", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        tSubstitutionUndefinedCatalanOutput(),
+        approximateSeriesMismatchOutput(),
+        concisePassingIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-exact-integral-autonomous-loop",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const initial = artifacts.find((artifact) => artifact.body.metadata.failureStage === "initial");
+      const repair = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
+      const repairPrompt = requests[1]?.input?.[0]?.content?.[0]?.text || "";
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[0].text.format.name, "math_fast_solve");
+      assert.equal(requests[1].text.format.name, "math_fast_solve");
+      assert.equal(requests[2].text.format.name, "math_fast_solve");
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.doesNotMatch(JSON.stringify(requests), /math_compact_solve/);
+      assert.equal(body.runtime.source, "live AI escalation call");
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(body.usage.settlement.providerCalls, 3);
+
+      assert.ok(initial);
+      assert.ok(initial.body.validation.solutionIssues.includes("unexplained_generated_symbol:G"));
+      assert.equal(initial.body.validation.solutionIssues.includes("unexplained_generated_symbol:t"), false);
+      assert.equal(initial.body.validation.firstFailedMathematicalRule, null);
+      assert.equal(initial.body.validation.symbolOriginDiagnostics.explicitDefinitions.includes("t"), true);
+      assert.ok(initial.body.validation.symbolOriginDiagnostics.fieldReports.some((field) => (
+        /^steps\[0\]\.(?:heading|label|title)$/u.test(field.fieldPath)
+        && field.value === "t=\\arctan x"
+        && field.extractionReason === "inline_math_parentheses"
+        && field.fragmentStart >= 0
+        && field.fragmentEnd > field.fragmentStart
+      )));
+      assert.ok(initial.body.validation.symbolOriginDiagnostics.fieldReports.some((field) => (
+        /^steps\[1\]\.(?:reasoning|summary|plainExplanation)$/u.test(field.fieldPath)
+        && field.value === "G"
+        && field.unexplainedSymbols.includes("G")
+        && field.extractionReason === "inline_math_parentheses"
+      )));
+      assert.match(repairPrompt, /"symbol":"G"/);
+      assert.match(repairPrompt, /"fieldPath":"steps\[1\]\.math"/);
+      assert.match(repairPrompt, /"classification":"undefined_free_symbol"/);
+      assert.match(repairPrompt, /define it explicitly in rendered LaTeX before first use/);
+
+      assert.ok(repair);
+      assert.equal(repair.body.validation.exactFailedRule, "numerical_final_answer_mismatch");
+      assert.equal(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:n"), false);
+      assert.equal(repair.body.validation.numericParserStatus, "evaluable");
+      assert.equal(repair.body.validation.extractedNumericApproximation, "1.2913");
+      assert.equal(repair.body.validation.numericalCrossCheckResult.proposedValue, 1.2913);
+      assert.equal(repair.body.validation.firstFailedMathematicalRule, "numerical_final_answer_mismatch");
+      assert.ok(repair.body.validation.summationBindingProvenance.some((binding) => binding.symbol === "n"));
+      assert.equal(repair.body.validation.repairFeedback.escalation.reason, "affirmative_mathematical_validator_failure");
+    });
+  });
+
+  it("records undefined Bernoulli and coefficient notation without summation-index false positives", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        wrongPiCubedIntegralOutput(),
+        bernoulliCoefficientIntegralOutput(),
+        concisePassingIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-exact-integral-bernoulli-coefficients",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const repair = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(body.code, "AI_SOLUTION_QUALITY_INVALID");
+      assert.equal(requests.length, 2);
+      assert.ok(repair);
+      assert.ok(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:B"));
+      assert.ok(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:C"));
+      assert.equal(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:n"), false);
+      assert.equal(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:m"), false);
+      assert.equal(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:k"), false);
+      assert.equal(repair.body.validation.numericParserStatus, "evaluable");
+      assert.equal(repair.body.validation.extractedNumericApproximation, "0.754693");
+      assert.equal(repair.body.validation.numericalCrossCheckResult.issue, null);
+      assert.ok(repair.body.validation.summationBindingProvenance.some((binding) => (
+        binding.command === "sum" && binding.symbol === "n"
+      )));
+      assert.ok(repair.body.validation.summationBindingProvenance.some((binding) => (
+        binding.command === "sum" && binding.symbol === "k"
+      )));
+      assert.ok(repair.body.validation.symbolOriginDiagnostics.fieldReports.some((field) => (
+        field.fieldPath.startsWith("steps[1].")
+        && field.symbols.some((item) => item.symbol === "n" && item.classification === "bound_by_step_math_context")
+      )));
+      assert.ok(repair.body.validation.symbolOriginDiagnostics.fieldReports.some((field) => (
+        field.fieldPath.startsWith("steps[2].")
+        && field.value.includes("C_k")
+        && field.unexplainedSymbols.includes("C")
+      )));
+    });
+  });
+
+  it("does not display a numerically failing pi-cubed repair over a numerically verified initial candidate", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        unexplainedSymbolsIntegralOutput(),
+        wrongPiCubedIntegralOutput(),
+        concisePassingIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-symbol-repair-pi-cubed",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+        canonicalTextValue: regressionIntegralProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const initialArtifact = artifacts.find((artifact) => artifact.body.metadata.failureStage === "initial");
+      const repairArtifact = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[0].model, "test-solver-model");
+      assert.equal(requests[1].model, "test-solver-model");
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.equal(body.runtime.source, "live AI escalation call");
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.notEqual(body.finalAnswerLatex, "\\frac{\\pi^3}{12}");
+
+      assert.ok(initialArtifact);
+      assert.ok(initialArtifact.body.validation.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
+      assert.equal(initialArtifact.body.validation.numericalCrossCheckResult.issue, null);
+      assert.equal(initialArtifact.body.validation.numericalCrossCheckResult.proposedValue, 0.7546938294602481);
+      assert.equal(initialArtifact.body.validation.numericalCrossCheckResult.confidence, "agreement");
+
+      assert.ok(repairArtifact);
+      assert.equal(repairArtifact.body.validation.exactFailedRule, "numerical_final_answer_mismatch");
+      assert.equal(repairArtifact.body.validation.numericalCrossCheckResult.issue, "numerical_final_answer_mismatch");
+      assert.equal(repairArtifact.body.validation.numericalCrossCheckResult.proposedValue, 2.5838563900249847);
+      assert.equal(repairArtifact.body.validation.repairFeedback.escalation.reason, "affirmative_mathematical_validator_failure");
+    });
+  });
+
+  it("sends unexplained generated symbol binding guidance to repair for the regression integral", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [unexplainedSymbolsIntegralOutput(), concisePassingIntegralOutput()];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-integral-symbol-repair",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+        canonicalTextValue: regressionIntegralProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const artifacts = await readArtifacts(cwd);
+      const repairPrompt = requests[1]?.input?.[0]?.content?.[0]?.text || "";
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 2);
+      assert.equal(requests[0].text.format.name, "math_fast_solve");
+      assert.equal(requests[1].text.format.name, "math_fast_solve");
+      assert.equal(artifacts.length, 1);
+      assert.ok(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
+      assert.ok(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:B"));
+      assert.ok(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:n"));
+      assert.ok(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:m"));
+      assert.match(repairPrompt, /Undefined generated symbols detected:/);
+      assert.match(repairPrompt, /- \\theta/);
+      assert.match(repairPrompt, /- B/);
+      assert.match(repairPrompt, /- n/);
+      assert.match(repairPrompt, /- m/);
+      assert.match(repairPrompt, /Every substitution variable must be explicitly defined in rendered LaTeX before first use/);
+      assert.match(repairPrompt, /Every summation or product index must be bound in the summation\/product notation/);
+      assert.match(repairPrompt, /A symbol mentioned only in prose is not considered defined/);
+      assert.match(repairPrompt, /Do not introduce additional symbols while repairing the listed ones/);
+    });
+  });
+
+  it("uses narrow structural repair and preserves the correct improper-integral final answer", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        structurallyInvalidThetaIntegralOutput(),
+        structurallyRepairedThetaIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-integral-structural-repair-preserves-answer",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+        canonicalTextValue: regressionIntegralProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const repairPrompt = requests[1]?.input?.[0]?.content?.[0]?.text || "";
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 2);
+      assert.equal(requests[0].text.format.name, "math_fast_solve");
+      assert.equal(requests[1].text.format.name, "math_fast_solve");
+      assert.equal(body.runtime.source, "live AI repair call");
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(body.numericCheck, "0.7546938294602481");
+
+      assert.equal(artifacts.length, 1);
+      assert.ok(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
+      assert.equal(artifacts[0].body.validation.solutionIssues.includes("unexplained_generated_symbol:n"), false);
+      assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.issue, null);
+      assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.proposedValue, 0.7546938294602481);
+      assert.equal(artifacts[0].body.validation.repairFeedback.repairCategory, "structural");
+
+      assert.match(repairPrompt, /Structural repair task:/);
+      assert.match(repairPrompt, /Preserve derivation/);
+      assert.match(repairPrompt, /Preserve mathematics/);
+      assert.match(repairPrompt, /Preserve final answer/);
+      assert.match(repairPrompt, /Only repair symbol introduction/);
+      assert.match(repairPrompt, /Do not recompute/);
+      assert.match(repairPrompt, /\\frac\{\\pi\}\{2\}\\ln\^2 2/);
+      assert.doesNotMatch(repairPrompt, /Reconstruct the solution from scratch/);
+      assert.doesNotMatch(repairPrompt, /Assume the previous derivation is mathematically unreliable/);
+    });
+  });
+
+  it("does not reject half-open interval notation as latex syntax before numerical validation", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        intervalSyntaxWrongIntegralOutput(),
+        intervalSyntaxWrongIntegralOutput(),
+        intervalSyntaxWrongIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-interval-syntax-numerical-failure",
+        problemValue: regressionIntegralPlainOcrProblem,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const serializedArtifacts = JSON.stringify(artifacts);
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(requests.length, 3);
+      assert.equal(body.code, "AI_SOLUTION_QUALITY_INVALID");
+      assert.ok(body.solutionIssues.includes("numerical_final_answer_mismatch"));
+      assert.equal(body.solutionIssues.some((issue) => issue.includes("invalid_latex")), false);
+      assert.doesNotMatch(serializedArtifacts, /latex_syntax|unmatched_delimiters/);
+      assert.match(serializedArtifacts, /numerical_final_answer_mismatch/);
+      assert.match(serializedArtifacts, /t \\\\in \[0,\\\\frac\{\\\\pi\}\{2\}\)/);
+    });
+  });
+
+  it("uses canonical LaTeX for exact OCR integral validation while keeping readable text in the prompt", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(concisePassingIntegralOutput()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-canonical-latex-success",
+        problemValue: regressionIntegralPlainOcrProblem,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const promptText = requests[0]?.input?.[0]?.content?.[0]?.text || "";
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 1);
+      assert.match(promptText, /Human-readable problem:/);
+      assert.match(promptText, new RegExp(regressionIntegralPlainOcrProblem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.match(promptText, /Canonical mathematical form:/);
+      assert.match(promptText, /\\int_0\^\\infty/);
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(body.imageSource.finalProblemText, regressionIntegralPlainOcrProblem);
+      assert.equal(body.imageSource.finalProblemLatex, regressionIntegralLatex);
+    });
+  });
+
+  it("rejects pi cubed for exact OCR integral when canonical LaTeX is present", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        wrongPiCubedIntegralOutput(),
+        wrongPiCubedIntegralOutput(),
+        wrongPiCubedIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-canonical-latex-rejects-pi-cubed",
+        problemValue: regressionIntegralPlainOcrProblem,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const stages = artifacts.map((artifact) => artifact.body.metadata.failureStage).sort();
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[0].model, "test-solver-model");
+      assert.equal(requests[1].model, "test-solver-model");
+      assert.equal(requests[2].model, "test-escalation-model");
+      for (const request of requests) {
+        const promptText = request.input?.[0]?.content?.[0]?.text || "";
+        assert.match(promptText, /\\int_0\^\\infty/);
+      }
+      assert.ok(body.solutionIssues.includes("numerical_final_answer_mismatch"));
+      assert.deepEqual(stages, ["escalation", "initial", "repair"]);
+      for (const artifact of artifacts) {
+        assert.equal(artifact.body.input.canonicalText, regressionIntegralPlainOcrProblem);
+        assert.equal(artifact.body.input.canonicalLatex, regressionIntegralLatex);
+        assert.equal(artifact.body.input.canonicalMathInput, regressionIntegralLatex);
+        assert.equal(artifact.body.input.canonicalMathInputSource, "canonicalLatex");
+        assert.equal(artifact.body.input.canonicalDisplayText, regressionIntegralPlainOcrProblem);
+        assert.equal(artifact.body.input.canonicalDisplaySource, "canonicalText");
+        assert.equal(artifact.body.validation.numericalCrossCheckResult.issue, "numerical_final_answer_mismatch");
+      }
+    });
+  });
+
+  it("accepts canonical LaTeX-only OCR solve payloads", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(concisePassingIntegralOutput()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-canonical-latex-only",
+        problemValue: "",
+        reviewedTextValue: "",
+        canonicalTextValue: "",
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const promptText = requests[0]?.input?.[0]?.content?.[0]?.text || "";
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 1);
+      assert.doesNotMatch(promptText, /Human-readable problem:/);
+      assert.match(promptText, /\\int_0\^\\infty/);
+    });
+  });
+
+  it("accepts full equality powered-log final answers without repair", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(fullEqualityPoweredLogIntegralOutput()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-powered-log-final-answer",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+        problemLatexValue: regressionIntegralLatex,
+        canonicalTextValue: regressionIntegralProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, "test-solver-model");
+      assert.equal(body.runtime.source, "live AI call");
+      assert.match(body.finalAnswerLatex, /\\frac\{\\pi\}\{2\}\\ln\^\{2\}\(2\)$/);
+    });
+  });
+
+  it("escalates after repair repeats a numerical final-answer mismatch", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        wrongPiCubedIntegralOutput(),
+        wrongPiCubedIntegralOutput(),
+        concisePassingIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-escalate-numeric",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[0].model, "test-solver-model");
+      assert.equal(requests[1].model, "test-solver-model");
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.equal(requests[2].text.format.name, "math_fast_solve");
+      assert.equal(body.runtime.source, "live AI escalation call");
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair").body.validation.repairFeedback.escalation.reason, "affirmative_mathematical_validator_failure");
+    });
+  });
+
+  it("escalates after repair repeats unsupported integration by parts", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        invalidIntegrationByPartsIntegralOutput(),
+        invalidIntegrationByPartsIntegralOutput(),
+        concisePassingIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-escalate-ibp",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.equal(response.json().runtime.source, "live AI escalation call");
+    });
+  });
+
+  it("escalates after repair repeats abrupt special-function introduction", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        specialFunctionHallucinationIntegralOutput(),
+        specialFunctionHallucinationIntegralOutput(),
+        concisePassingIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-escalate-special-function",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralLatex,
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.equal(response.json().runtime.source, "live AI escalation call");
+    });
+  });
+
   it("persists repair feedback and repeated-method diagnostics", async () => {
     await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       const outputs = [
+        invalidIntegrationByPartsIntegralOutput(),
         invalidIntegrationByPartsIntegralOutput(),
         invalidIntegrationByPartsIntegralOutput(),
       ];
@@ -837,22 +1479,31 @@ describe("failed solve diagnostics", () => {
       const artifacts = await readArtifacts(cwd);
       const initial = artifacts.find((artifact) => artifact.body.metadata.failureStage === "initial");
       const repair = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
+      const escalation = artifacts.find((artifact) => artifact.body.metadata.failureStage === "escalation");
 
       assert.equal(response.statusCode, 502);
       assert.ok(initial);
       assert.ok(repair);
+      assert.ok(escalation);
       assert.equal(initial.body.metadata.requestId, "diag-repeated-method");
       assert.equal(repair.body.metadata.requestId, "diag-repeated-method");
+      assert.equal(escalation.body.metadata.requestId, "diag-repeated-method");
       assert.equal(initial.body.validation.exactFailedRule, "unsupported_integration_by_parts_setup");
       assert.equal(repair.body.validation.exactFailedRule, "unsupported_integration_by_parts_setup");
+      assert.equal(escalation.body.validation.exactFailedRule, "unsupported_integration_by_parts_setup");
       assert.equal(repair.body.metadata.usageSettlement.providerCalls, 2);
       assert.equal(repair.body.metadata.usageSettlement.actualTotalTokens, 60);
+      assert.equal(escalation.body.metadata.usageSettlement.providerCalls, 3);
+      assert.equal(escalation.body.metadata.usageSettlement.actualTotalTokens, 90);
       assert.ok(initial.body.validation.repairFeedback);
       assert.ok(initial.body.validation.issueCodes.includes("unsupported_integration_by_parts_setup"));
       assert.match(initial.body.validation.requestedCorrectionStrategy, /explicitly provide u, dv, du/);
       assert.ok(repair.body.validation.previousMethodFingerprint);
       assert.ok(repair.body.validation.currentMethodFingerprint);
       assert.equal(repair.body.validation.repeatedMethodDetected, true);
+      assert.equal(repair.body.validation.repairFeedback.escalation.attempted, true);
+      assert.equal(repair.body.validation.repairFeedback.escalation.model, "test-escalation-model");
+      assert.equal(escalation.body.validation.repairFeedback.escalation.success, false);
       assert.doesNotMatch(JSON.stringify(repair.body), /should-not-be-captured|test-key/);
     });
   });
@@ -886,6 +1537,7 @@ describe("failed solve diagnostics", () => {
       assert.doesNotMatch(serializedResponse, /invalid LaTeX/);
       assert.deepEqual(stages, ["initial-compact", "initial-full", "repair-compact", "repair-full"]);
       assert.equal(requests.length, 4);
+      assert.ok(requests.every((request) => request.model !== "test-escalation-model"));
       assert.equal(requests[1].text.format.name, "math_compact_solve");
       assert.equal(requests[3].text.format.name, "math_compact_solve");
 
@@ -1068,8 +1720,12 @@ describe("failed solve diagnostics", () => {
 
   it("settles actual provider usage when repair also fails quality validation", async () => {
     await withRuntime({ capture: false }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
-      const outputs = [wrongPiCubedIntegralOutput(), wrongPiCubedIntegralOutput()];
-      globalThis.fetch = async () => jsonResponse(openAiBody(outputs.shift()));
+      const outputs = [wrongPiCubedIntegralOutput(), wrongPiCubedIntegralOutput(), wrongPiCubedIntegralOutput()];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
 
       const response = await invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "usage-repair-fails",
@@ -1080,14 +1736,24 @@ describe("failed solve diagnostics", () => {
       const counts = await readSolveUsageCounts(cwd);
 
       assert.equal(response.statusCode, 502);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[2].model, "test-escalation-model");
       assert.equal(body.code, "AI_SOLUTION_QUALITY_INVALID");
+      assert.ok(body.solutionIssues.includes("numerical_final_answer_mismatch"));
+      assert.equal(body.retryable, true);
+      assert.equal(body.retryType, "reviewed_problem");
+      assert.match(body.validationSummary, /numerical check/i);
+      assert.equal(body.solutionRuleEvaluations, undefined);
+      assert.equal(body.solutionValidationContext, undefined);
+      assert.equal(body.omniDebugContext, undefined);
+      assert.equal(body.stack, undefined);
       assert.deepEqual(counts, {
-        requests: 2,
-        tokens: 60,
-        globalTokens: 60,
-        globalCostMicros: 1301,
+        requests: 3,
+        tokens: 90,
+        globalTokens: 90,
+        globalCostMicros: 1951,
       });
-      assertUsageSettlement(body, { providerCalls: 2, totalTokens: 60, reason: "failure" });
+      assertUsageSettlement(body, { providerCalls: 3, totalTokens: 90, reason: "failure" });
     });
   });
 
@@ -1123,14 +1789,18 @@ describe("failed solve diagnostics", () => {
 
   it("counts a provider transport failure as a request without inventing token usage", async () => {
     await withRuntime({ capture: false }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
-      globalThis.fetch = async () => ({
-        ok: false,
-        status: 400,
-        statusText: "Bad Request",
-        async text() {
-          return JSON.stringify({ error: { type: "invalid_request_error", code: "bad_request", message: "bad request" } });
-        },
-      });
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return {
+          ok: false,
+          status: 400,
+          statusText: "Bad Request",
+          async text() {
+            return JSON.stringify({ error: { type: "invalid_request_error", code: "bad_request", message: "bad request" } });
+          },
+        };
+      };
 
       const response = await invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "usage-provider-transport",
@@ -1142,6 +1812,8 @@ describe("failed solve diagnostics", () => {
 
       assert.equal(response.statusCode, 502);
       assert.equal(body.code, "AI_SERVICE_ERROR");
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, "test-solver-model");
       assert.deepEqual(counts, {
         requests: 1,
         tokens: 0,
@@ -1241,6 +1913,10 @@ describe("failed solve diagnostics", () => {
       assert.equal(response.statusCode, 502);
       assert.equal(body.code, "AI_SOLUTION_QUALITY_INVALID");
       assert.equal(body.message, "Solution failed quality validation.");
+      assert.deepEqual(body.solutionIssues, ["incorrect_simple_power_equation_final"]);
+      assert.equal(body.retryable, true);
+      assert.equal(body.solutionRuleEvaluations, undefined);
+      assert.equal(body.solutionValidationContext, undefined);
       assert.equal(artifacts.length, 0);
     });
   });

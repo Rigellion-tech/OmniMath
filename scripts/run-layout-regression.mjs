@@ -3,9 +3,8 @@ import { fileURLToPath } from "node:url";
 
 const playwrightCli = fileURLToPath(new URL("../node_modules/playwright/cli.js", import.meta.url));
 const config = fileURLToPath(new URL("../playwright.config.mjs", import.meta.url));
-const spec = fileURLToPath(new URL("../tests/layoutRegression.spec.mjs", import.meta.url));
 
-const child = spawn(process.execPath, [playwrightCli, "test", spec, "--config", config], {
+const child = spawn(process.execPath, [playwrightCli, "test", "--config", config], {
   stdio: "inherit",
   env: {
     ...process.env,

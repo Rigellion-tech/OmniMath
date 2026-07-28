@@ -200,11 +200,13 @@ The layout test requires a Playwright Chromium browser. Set `OMNIMATH_E2E_BROWSE
 - Production quota enforcement requires a configured durable usage store.
 - Profile and history persistence require Postgres; without `DATABASE_URL`, those endpoints report unavailable storage.
 - No screenshots or hosted demo URL are included in this repository yet.
-- No open-source license file has been selected yet.
 
 ## Future Work
 
 - Add release screenshots or an animated demo.
-- Choose and add an explicit license before encouraging external reuse.
 - Add CI that runs install, tests, lint, typecheck, build, and layout regression checks.
 - Document deployment steps for providers beyond Vercel if the project needs them.
+
+## License
+
+OmniMath is licensed under the [MIT License](LICENSE).

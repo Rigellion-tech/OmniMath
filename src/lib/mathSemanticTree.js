@@ -694,48 +694,60 @@ function createBuilder(stepId, displayLatex) {
 
 function parseIntegralScripts(integralLatex = "") {
   const operator = integralLatex.match(/^\\(?:iiint|iint|oint|int)/)?.[0] || integralLatex;
-  const scriptsText = integralLatex.slice(operator.length);
-  const scripts = [];
-  let index = 0;
+  const scriptInfo = readScriptsAfter(integralLatex, operator.length);
+  const scripts = scriptInfo.scripts.map((script) => ({
+    role: script.marker === "_" ? "lowerBound" : "upperBound",
+    latex: script.value,
+    start: script.start,
+    end: script.end,
+    markerStart: script.markerStart,
+  }));
 
-  while (index < scriptsText.length) {
-    const marker = scriptsText[index];
-    if (marker !== "_" && marker !== "^") {
-      index += 1;
-      continue;
-    }
-    const role = marker === "_" ? "lowerBound" : "upperBound";
-    const absoluteMarkerIndex = operator.length + index;
-    index += 1;
-    if (scriptsText[index] === "{") {
-      const group = readGroup(scriptsText, index);
-      if (group) {
-        scripts.push({
-          role,
-          latex: group.value,
-          start: operator.length + group.start + 1,
-          end: operator.length + group.end - 1,
-          markerStart: absoluteMarkerIndex,
-        });
-        index = group.end;
-        continue;
-      }
-    }
-    const command = scriptsText.slice(index).match(/^\\[a-zA-Z]+/)?.[0];
-    const atom = command || scriptsText[index] || "";
-    if (atom) {
-      scripts.push({
-        role,
-        latex: atom,
-        start: operator.length + index,
-        end: operator.length + index + atom.length,
-        markerStart: absoluteMarkerIndex,
-      });
-      index += atom.length;
-    }
+  return { operator, scripts, endIndex: scriptInfo.endIndex };
+}
+
+const INTEGRAL_COMMANDS = ["\\iiint", "\\iint", "\\oint", "\\int"];
+
+function findTopLevelIntegralOperator(text = "") {
+  const source = String(text || "");
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const command = braceDepth === 0 && parenDepth === 0 && bracketDepth === 0
+      ? INTEGRAL_COMMANDS.find((candidate) => source.startsWith(candidate, index))
+      : null;
+    if (command) return { index, operator: command };
+
+    const char = source[index];
+    if (char === "{") braceDepth += 1;
+    else if (char === "}") braceDepth -= 1;
+    else if (char === "(") parenDepth += 1;
+    else if (char === ")") parenDepth -= 1;
+    else if (char === "[") bracketDepth += 1;
+    else if (char === "]") bracketDepth -= 1;
   }
+  return null;
+}
 
-  return { operator, scripts };
+function readIntegralHead(text = "") {
+  const source = String(text || "");
+  const operatorMatch = findTopLevelIntegralOperator(source);
+  if (!operatorMatch) return null;
+  const { index, operator } = operatorMatch;
+  const leading = source.slice(0, index);
+  const scriptInfo = readScriptsAfter(source, index + operator.length);
+  const integralLatex = source.slice(index, scriptInfo.endIndex);
+  const scripts = parseIntegralScripts(integralLatex).scripts;
+  return {
+    leading,
+    operator,
+    operatorIndex: index,
+    integralLatex,
+    scripts,
+    endIndex: scriptInfo.endIndex,
+    tail: source.slice(scriptInfo.endIndex),
+  };
 }
 
 function createDifferentialNode(builder, rawLatex, parentId, depth, start, end, role = "differential") {
@@ -975,37 +987,35 @@ function parseLargeOperator(builder, text, parentId, depth, start, role) {
 
 function parseIntegralExpression(builder, text, parentId, depth, start, role) {
   const differentialMatches = findDifferentials(text);
-  const integralMatch = text.match(/^([\s\S]*?)(\\(?:iiint|iint|oint|int)(?:_(?:\{[^}]*\}|\\[a-zA-Z]+|[^{}\\s^_]))?(?:\^(?:\{[^}]*\}|\\[a-zA-Z]+|[^{}\\s^_]))?)([\s\S]*)$/);
-  if (!integralMatch) return null;
+  const integralHead = readIntegralHead(text);
+  if (!integralHead) return null;
 
-  const [, leading, integralSymbol, tail] = integralMatch;
-  const integralScripts = parseIntegralScripts(integralSymbol);
-  const firstDifferential = differentialMatches.find((match) => match.index >= leading.length + integralSymbol.length);
+  const firstDifferential = differentialMatches.find((match) => match.index >= integralHead.endIndex);
   const integrand = firstDifferential
-    ? text.slice(leading.length + integralSymbol.length, firstDifferential.index)
-    : tail;
+    ? text.slice(integralHead.endIndex, firstDifferential.index)
+    : integralHead.tail;
   const node = builder.createNode({ type: "integral", role: role === "expression" || role === "term" || role === "numerator" ? "integral" : role, latex: text, parentId, depth, start, end: start + text.length });
   const childIds = [];
-  if (leading) {
-    const coefficient = parseExpression(builder, leading, node.id, depth + 1, start, "coefficient");
+  if (integralHead.leading) {
+    const coefficient = parseExpression(builder, integralHead.leading, node.id, depth + 1, start, "coefficient");
     if (coefficient) childIds.push(coefficient.id);
   }
   childIds.push(builder.createNode({
     type: "operator",
     role: "integralSymbol",
-    latex: integralScripts.operator,
+    latex: integralHead.operator,
     parentId: node.id,
     depth: depth + 1,
-    start: start + leading.length,
-    end: start + leading.length + integralScripts.operator.length,
+    start: start + integralHead.operatorIndex,
+    end: start + integralHead.operatorIndex + integralHead.operator.length,
   }).id);
-  for (const script of integralScripts.scripts) {
+  for (const script of integralHead.scripts) {
     const bound = parseExpression(
       builder,
       script.latex,
       node.id,
       depth + 1,
-      start + leading.length + script.start,
+      start + integralHead.operatorIndex + script.start,
       script.role
     );
     if (bound) {
@@ -1013,12 +1023,12 @@ function parseIntegralExpression(builder, text, parentId, depth, start, role) {
       childIds.push(bound.id);
     }
   }
-  const integrandStart = start + leading.length + integralSymbol.length;
+  const integrandStart = start + integralHead.endIndex;
   const integrandNode = integrand
     ? parseExpression(builder, integrand, node.id, depth + 1, integrandStart, "integrand")
     : null;
   if (integrandNode) childIds.push(integrandNode.id);
-  for (const differential of differentialMatches.filter((match) => match.index >= leading.length + integralSymbol.length)) {
+  for (const differential of differentialMatches.filter((match) => match.index >= integralHead.endIndex)) {
     childIds.push(createDifferentialNode(
       builder,
       differential.latex,
@@ -1313,28 +1323,26 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
   }
 
   const differentialMatches = findDifferentials(text);
-  const integralMatch = text.match(/^([\s\S]*?)(\\(?:iiint|iint|oint|int)(?:_(?:\{[^}]*\}|\\[a-zA-Z]+|[^{}\\s^_]))?(?:\^(?:\{[^}]*\}|\\[a-zA-Z]+|[^{}\\s^_]))?)([\s\S]*)$/);
-  if (integralMatch) {
-    const [, leading, integralSymbol, tail] = integralMatch;
-    const integralScripts = parseIntegralScripts(integralSymbol);
-    const firstDifferential = differentialMatches.find((match) => match.index >= leading.length + integralSymbol.length);
+  const integralHead = readIntegralHead(text);
+  if (integralHead) {
+    const firstDifferential = differentialMatches.find((match) => match.index >= integralHead.endIndex);
     const integrand = firstDifferential
-      ? text.slice(leading.length + integralSymbol.length, firstDifferential.index)
-      : tail;
+      ? text.slice(integralHead.endIndex, firstDifferential.index)
+      : integralHead.tail;
     const node = builder.createNode({ type: "integral", role: role === "expression" ? "integral" : role, latex: text, parentId, depth, start, end: start + text.length });
     const childIds = [];
-    if (leading) {
-      const coefficient = parseExpression(builder, leading, node.id, depth + 1, start, "coefficient");
+    if (integralHead.leading) {
+      const coefficient = parseExpression(builder, integralHead.leading, node.id, depth + 1, start, "coefficient");
       if (coefficient) childIds.push(coefficient.id);
     }
-    childIds.push(builder.createNode({ type: "operator", role: "integralSymbol", latex: integralScripts.operator, parentId: node.id, depth: depth + 1, start: start + leading.length, end: start + leading.length + integralScripts.operator.length }).id);
-    for (const script of integralScripts.scripts) {
+    childIds.push(builder.createNode({ type: "operator", role: "integralSymbol", latex: integralHead.operator, parentId: node.id, depth: depth + 1, start: start + integralHead.operatorIndex, end: start + integralHead.operatorIndex + integralHead.operator.length }).id);
+    for (const script of integralHead.scripts) {
       const bound = parseExpression(
         builder,
         script.latex,
         node.id,
         depth + 1,
-        start + leading.length + script.start,
+        start + integralHead.operatorIndex + script.start,
         script.role
       );
       if (bound) {
@@ -1343,10 +1351,10 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
       }
     }
     const integrandNode = integrand
-      ? parseExpression(builder, integrand, node.id, depth + 1, start + leading.length + integralSymbol.length, "integrand")
+      ? parseExpression(builder, integrand, node.id, depth + 1, start + integralHead.endIndex, "integrand")
       : null;
     if (integrandNode) childIds.push(integrandNode.id);
-    for (const differential of differentialMatches.filter((match) => match.index >= leading.length + integralSymbol.length)) {
+    for (const differential of differentialMatches.filter((match) => match.index >= integralHead.endIndex)) {
       childIds.push(createDifferentialNode(
         builder,
         differential.latex,

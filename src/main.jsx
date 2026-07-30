@@ -18,6 +18,12 @@ import {
 } from '@/lib/auth'
 import '@/index.css'
 
+if (import.meta.env.DEV) {
+  void import('@/lib/performanceDiagnostics').then(({ initOmniPerformanceObserver }) => {
+    initOmniPerformanceObserver()
+  })
+}
+
 function AuthProviderWithRouter({ children }) {
   const navigate = useNavigate()
   const publishableKey = getClerkPublishableKey()

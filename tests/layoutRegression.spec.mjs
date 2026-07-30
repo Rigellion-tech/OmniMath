@@ -1760,6 +1760,265 @@ test("complex improper integral semantic rendering matches plain KaTeX geometry"
   expect(tinyDetachedTargets).toEqual([]);
 });
 
+test("complex integral upper-bound hover reaches visible nested bound ink", async ({ page }) => {
+  const requests = [];
+  const artifactDir = `${ARTIFACT_DIR}/complex-upper-bound-hover`;
+  const exactIntegral = "\\int_{0}^{\\infty} \\frac{\\ln(1+x^{2}) \\arctan x}{x(1+x^{2})}\\,dx";
+  const complexUpperBound = "\\int_{0}^{2^{\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}}} f(x)\\,dx";
+  await mkdir(artifactDir, { recursive: true });
+
+  await page.route("**/api/explain", async (route) => {
+    const requestBody = route.request().postDataJSON();
+    expect(requestBody.problem).toBe(exactIntegral);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Complex upper bound hover investigation",
+        problem: exactIntegral,
+        expression: exactIntegral,
+        steps: [{
+          id: "reported-integral-step",
+          label: "Reported integral",
+          math: exactIntegral,
+          summary: "The exact reported integral should keep the infinity upper bound hoverable.",
+          chunks: [{ id: "reported-integral-chunk", display: exactIntegral, latex: exactIntegral, text: exactIntegral, role: "equation" }],
+        }, {
+          id: "complex-upper-bound-step",
+          label: "Complex upper bound fixture",
+          math: complexUpperBound,
+          summary: "The nested upper bound should stay one semantic upper-bound target over all visible ink.",
+          chunks: [{ id: "complex-upper-bound-chunk", display: complexUpperBound, latex: complexUpperBound, text: complexUpperBound, role: "equation" }],
+        }],
+        finalAnswerLatex: exactIntegral,
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+        saved: false,
+        demoMode: true,
+      }),
+    });
+  });
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      requests.push({ endpoint: endpoint.includes("pin") ? "pin" : "hover", body });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          title: `Selected ${body?.selectedLatex || "math"}`,
+          explanation: `${body?.selectedLatex || "This expression"} was selected.`,
+        }),
+      });
+    });
+  }
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill(exactIntegral);
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Complex upper bound fixture/i })).toBeVisible();
+  await expect(page.locator(".step-card").filter({ hasText: "Reported integral" }).locator(".math-semantic-hitbox[data-token-role='upperBound']").first()).toBeVisible();
+  await expect(page.locator(".step-card").filter({ hasText: "Complex upper bound fixture" }).locator(".math-semantic-hitbox[data-token-role='upperBound']").first()).toBeVisible();
+
+  const readUpperBoundTrace = async (stepLabel) => page.evaluate((label) => {
+    const roundRect = (rect) => rect ? {
+      left: Math.round(rect.left * 100) / 100,
+      top: Math.round(rect.top * 100) / 100,
+      right: Math.round(rect.right * 100) / 100,
+      bottom: Math.round(rect.bottom * 100) / 100,
+      width: Math.round(rect.width * 100) / 100,
+      height: Math.round(rect.height * 100) / 100,
+    } : null;
+    const rectCenter = (rect) => ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+    const step = [...document.querySelectorAll(".step-card")]
+      .find((card) => card.textContent?.includes(label));
+    const chunk = step?.querySelector("[data-inspectable='math-token']");
+    const upperHitboxes = [...(step?.querySelectorAll(".math-semantic-hitbox[data-token-role='upperBound']") || [])]
+      .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+      .sort((left, right) => (right.rect.width * right.rect.height) - (left.rect.width * left.rect.height));
+    const upper = upperHitboxes[0]?.node || null;
+    const upperId = upper?.getAttribute("data-semantic-id") || "";
+    const ownerElements = upperId
+      ? [...(chunk?.querySelectorAll(`[data-semantic-id='${CSS.escape(upperId)}']`) || [])]
+      : [];
+    const ownerDescendants = ownerElements.flatMap((owner) => [
+      owner,
+      ...owner.querySelectorAll("[data-semantic-id], .mfrac, .mord, .mop, .mopen, .mclose, .frac-line, .msupsub"),
+    ]);
+    const descendantRects = ownerDescendants
+      .flatMap((node) => [...node.getClientRects()].map((rect) => ({ node, rect })))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0);
+    const semanticDescendants = ownerElements.flatMap((owner) => [...owner.querySelectorAll("[data-semantic-id]")])
+      .map((node) => ({
+        id: node.getAttribute("data-semantic-id"),
+        role: node.getAttribute("data-semantic-role"),
+        type: node.getAttribute("data-semantic-type"),
+        range: node.getAttribute("data-semantic-range"),
+        text: node.textContent || "",
+        rects: [...node.getClientRects()].map(roundRect).filter(Boolean),
+      }));
+    const byRole = (role, predicate = () => true) => semanticDescendants
+      .filter((item) => item.role === role && item.rects.length > 0 && predicate(item))
+      .sort((left, right) => (left.rects[0].top - right.rects[0].top) || (left.rects[0].left - right.rects[0].left))[0] || null;
+    const topmost = descendantRects
+      .sort((left, right) => left.rect.top - right.rect.top || left.rect.left - right.rect.left)[0]?.rect || null;
+    const upperFractionLine = descendantRects
+      .filter(({ node }) => /\bfrac-line\b/.test(String(node.className || "")))
+      .sort((left, right) => (right.rect.width - left.rect.width) || (left.rect.top - right.rect.top))[0]?.rect || null;
+    const numerator = byRole("numerator", (item) => /ln|sec/.test(item.text));
+    const denominator = byRole("denominator", (item) => /tan/.test(item.text)) || byRole("denominator");
+    const pointFromRect = (rect, xRatio = 0.5, yRatio = 0.5) => rect ? ({
+      x: rect.left + rect.width * xRatio,
+      y: rect.top + rect.height * yRatio,
+    }) : null;
+    const points = [
+      { label: "highest-visible-ink", point: pointFromRect(topmost), sourceRect: roundRect(topmost) },
+      { label: "nested-numerator", point: pointFromRect(numerator?.rects?.[0]), sourceRect: numerator?.rects?.[0] || null },
+      { label: "nested-denominator", point: pointFromRect(denominator?.rects?.[0]), sourceRect: denominator?.rects?.[0] || null },
+      { label: "left-visible-edge", point: pointFromRect(upperFractionLine, 0.04, 0.5), sourceRect: roundRect(upperFractionLine) },
+      { label: "right-visible-edge", point: pointFromRect(upperFractionLine, 0.96, 0.5), sourceRect: roundRect(upperFractionLine) },
+    ].filter((item) => item.point);
+
+    return {
+      stepLabel: label,
+      renderedLatex: chunk?.getAttribute("data-token-latex") || "",
+      upperHitbox: upper ? {
+        id: upper.getAttribute("data-token-id"),
+        semanticId: upperId,
+        latex: upper.getAttribute("data-token-latex"),
+        role: upper.getAttribute("data-token-role"),
+        kind: upper.getAttribute("data-target-kind"),
+        sourceRange: upper.getAttribute("data-source-range"),
+        rectSource: upper.getAttribute("data-rect-source"),
+        geometryQuality: upper.getAttribute("data-geometry-quality"),
+        rects: upperHitboxes.map(({ rect }) => roundRect(rect)),
+      } : null,
+      ownerElements: ownerElements.map((node) => ({
+        tag: node.tagName.toLowerCase(),
+        className: String(node.className || ""),
+        id: node.getAttribute("data-semantic-id"),
+        role: node.getAttribute("data-semantic-role"),
+        type: node.getAttribute("data-semantic-type"),
+        range: node.getAttribute("data-semantic-range"),
+        text: node.textContent || "",
+        rects: [...node.getClientRects()].map(roundRect).filter(Boolean),
+      })),
+      semanticDescendants,
+      descendantInkRects: descendantRects.map(({ node, rect }) => ({
+        tag: node.tagName?.toLowerCase?.() || "",
+        className: String(node.className || ""),
+        semanticId: node.getAttribute?.("data-semantic-id") || null,
+        role: node.getAttribute?.("data-semantic-role") || null,
+        text: node.textContent || "",
+        rect: roundRect(rect),
+      })),
+      points,
+    };
+  }, stepLabel);
+
+  const trace = {
+    exactIntegral,
+    complexUpperBound,
+    reported: await readUpperBoundTrace("Reported integral"),
+    complex: await readUpperBoundTrace("Complex upper bound fixture"),
+    reportedProbes: [],
+    probes: [],
+  };
+
+  expect(trace.reported.upperHitbox?.latex).toBe("\\infty");
+  expect(trace.complex.upperHitbox?.latex).toBe("2^{\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}}");
+  expect(trace.complex.upperHitbox?.sourceRange).toBe("10:54");
+  expect(trace.complex.semanticDescendants.some((node) => node.role === "numerator" && /π|pi/.test(node.text))).toBe(true);
+  expect(trace.complex.semanticDescendants.some((node) => node.role === "denominator" && /tan/.test(node.text))).toBe(true);
+
+  const reportedRect = trace.reported.upperHitbox?.rects?.[0];
+  expect(reportedRect).toBeTruthy();
+  const reportedPoint = {
+    label: "reported-infinity-upper-bound",
+    point: {
+      x: reportedRect.left + reportedRect.width / 2,
+      y: reportedRect.top + reportedRect.height / 2,
+    },
+  };
+  await page.mouse.move(4, 4, { steps: 1 });
+  await page.waitForTimeout(180);
+  await page.evaluate(() => {
+    window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ = null;
+  });
+  const previousReportedHoverCount = requests.filter((request) => request.endpoint === "hover").length;
+  await moveSemanticPointer(page, reportedPoint.point.x, reportedPoint.point.y);
+  await page.waitForTimeout(520);
+  const reportedTooltipVisible = await page.locator(".omni-quick-tooltip").isVisible().catch(() => false);
+  const reportedDiagnostic = await page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ || null);
+  const reportedSnapshot = await page.evaluate(() => window.__OMNIMATH_LAST_GEOMETRY_SNAPSHOT__ || null);
+  const reportedHoverState = await page.evaluate(() => window.__OMNIMATH_HOVER_STATE__ || null);
+  const reportedHoverRequests = requests.filter((request) => request.endpoint === "hover");
+  trace.reportedProbes.push({
+    ...reportedPoint,
+    requestDelta: reportedHoverRequests.length - previousReportedHoverCount,
+    latestRequest: reportedHoverRequests.at(-1)?.body || null,
+    tooltipVisible: reportedTooltipVisible,
+    diagnostic: reportedDiagnostic,
+    cachedGeometry: reportedSnapshot,
+    hoverState: reportedHoverState,
+  });
+
+  for (const probe of trace.complex.points) {
+    let collected = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await page.mouse.move(4, 4, { steps: 1 });
+      await page.waitForTimeout(180);
+      await page.evaluate(() => {
+        window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ = null;
+      });
+      const previousHoverCount = requests.filter((request) => request.endpoint === "hover").length;
+      await moveSemanticPointer(page, probe.point.x, probe.point.y);
+      await page.waitForTimeout(520);
+      const tooltipVisible = await page.locator(".omni-quick-tooltip").isVisible().catch(() => false);
+      const diagnostic = await page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ || null);
+      const snapshot = await page.evaluate(() => window.__OMNIMATH_LAST_GEOMETRY_SNAPSHOT__ || null);
+      const hoverState = await page.evaluate(() => window.__OMNIMATH_HOVER_STATE__ || null);
+      const hoverRequests = requests.filter((request) => request.endpoint === "hover");
+      collected = {
+        ...probe,
+        attempt,
+        requestDelta: hoverRequests.length - previousHoverCount,
+        latestRequest: hoverRequests.at(-1)?.body || null,
+        tooltipVisible,
+        diagnostic,
+        cachedGeometry: snapshot,
+        hoverState,
+      };
+      if (
+        diagnostic?.chosenRole === "upperBound"
+        && hoverState?.hoverState?.semanticId === trace.complex.upperHitbox.semanticId
+      ) {
+        break;
+      }
+    }
+    trace.probes.push(collected);
+  }
+
+  await writeFile(`${artifactDir}/complex-upper-bound-hover-report.json`, JSON.stringify(trace, null, 2));
+
+  expect(trace.probes).toHaveLength(5);
+  expect(trace.reportedProbes).toHaveLength(1);
+  expect(trace.reportedProbes[0].tooltipVisible).toBe(true);
+  expect(trace.reportedProbes[0].diagnostic?.chosenRole).toBe("upperBound");
+  expect(trace.reportedProbes[0].diagnostic?.chosenLatex).toBe("\\infty");
+  expect(trace.reportedProbes[0].hoverState?.hoverState?.semanticId).toBe(trace.reported.upperHitbox.semanticId);
+  expect(requests.some((request) => request.endpoint === "hover" && request.body?.selectedNode?.role === "upperBound")).toBe(true);
+  for (const probe of trace.probes) {
+    expect(probe.tooltipVisible).toBe(true);
+    expect(probe.diagnostic?.chosenRole).toBe("upperBound");
+    expect(probe.diagnostic?.chosenLatex).toBe(trace.complex.upperHitbox.latex);
+    expect(probe.diagnostic?.candidateRectCount || 0).toBeGreaterThan(0);
+    expect(probe.diagnostic?.resolverReason).toMatch(/deterministic/);
+    expect(probe.hoverState?.hoverState?.semanticId).toBe(trace.complex.upperHitbox.semanticId);
+    expect(probe.diagnostic?.candidateScores?.some((candidate) => candidate.role === "upperBound" && candidate.pointerInsideRect)).toBe(true);
+  }
+});
+
 test("complex improper integral semantic hover regression", async ({ page }) => {
   const requests = [];
   const artifactDir = `${ARTIFACT_DIR}/complex-integral-hover`;

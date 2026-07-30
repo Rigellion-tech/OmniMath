@@ -29,6 +29,8 @@ import {
 } from "@/api/userClient";
 import { normalizeSolveResponse } from "@/api/mathClient";
 import { createCanonicalProblemPayload, logCanonicalProblem } from "@/lib/canonicalProblem";
+import { measureOmniSync } from "@/lib/performanceDiagnostics";
+import { createOperationId, logSessionOperation } from "@/lib/sessionOperations";
 import ProblemBlock from "@/components/math/ProblemBlock";
 import ExplanationPanel from "@/components/math/ExplanationPanel";
 import ProblemInput from "@/components/math/ProblemInput";
@@ -56,9 +58,11 @@ function logSolutionState(event, details = {}) {
 
 function createSession(overrides = {}) {
   const now = new Date().toISOString();
+  const id = globalThis.crypto?.randomUUID?.()
+    || `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   return {
-    id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id,
     demoKey: null,
     title: "New math session",
     createdAt: now,
@@ -150,6 +154,28 @@ function getUsageUsed(usage) {
     : Math.max(0, Number(usage?.limit || 0) - Number(usage?.remaining || 0));
 }
 
+function getSessionGenerationStatus(session = null) {
+  const steps = getSolutionSteps(session);
+  if (steps.length > 0) {
+    return {
+      type: "success",
+      label: "Explanation ready",
+      detail: getStatusStepText(steps),
+      meta: "",
+    };
+  }
+  return {
+    type: "empty",
+    label: session ? "Session ready" : "Ready",
+    detail: session ? getSessionLabel(session, "Ready for a problem.") : "Enter a problem or upload an image to begin.",
+    meta: "",
+  };
+}
+
+function isPersistingWorkflow(status = {}) {
+  return status.type === "loading" || status.workflowActive;
+}
+
 function IssueCard({ status }) {
   if (status.type !== "error" && status.type !== "limit") return null;
   const hints = Array.isArray(status.hints) ? status.hints : [];
@@ -204,21 +230,20 @@ export default function Home() {
   const [sessionError, setSessionError] = useState("");
   const [syncStatus, setSyncStatus] = useState("");
   const [usageByKind, setUsageByKind] = useState({ ai: null, explanation: null, image: null });
-  const [generationStatus, setGenerationStatus] = useState({
-    type: "empty",
-    label: "Ready",
-    detail: "Enter a problem or upload an image to begin.",
-    meta: "",
-  });
+  const [generationStatusBySession, setGenerationStatusBySession] = useState({});
   const boardRef = useRef(null);
   const saveTimerRef = useRef(null);
   const sessionsRef = useRef(sessions);
   const activeSessionIdRef = useRef(activeSessionId);
+  const operationRevisionsRef = useRef({});
+  const activeOperationsRef = useRef({});
+  const generationStatusBySessionRef = useRef({});
   const sessionRestoreAttemptedRef = useRef(false);
   const { getToken, isLoaded, isSignedIn, isMock } = useAuthToken();
   const { settings } = useSettings();
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
+  const generationStatus = generationStatusBySession[activeSession?.id] || getSessionGenerationStatus(activeSession);
   const problem = useMemo(() => {
     const renderedProblem = getActiveRenderedProblem(activeSession, emptyProblem);
     return {
@@ -232,7 +257,8 @@ export default function Home() {
   useEffect(() => {
     sessionsRef.current = sessions;
     activeSessionIdRef.current = activeSessionId;
-  }, [activeSessionId, sessions]);
+    generationStatusBySessionRef.current = generationStatusBySession;
+  }, [activeSessionId, generationStatusBySession, sessions]);
 
   const updateActiveSession = useCallback((updater, { markDirty = true } = {}) => {
     setSessions((prev) => {
@@ -250,6 +276,75 @@ export default function Home() {
       return nextSessions;
     });
   }, [activeSessionId]);
+
+  const setSessionGenerationStatus = useCallback((sessionId, status, operationContext = null) => {
+    if (!sessionId) return;
+    setGenerationStatusBySession((prev) => {
+      const next = {
+        ...prev,
+        [sessionId]: status,
+      };
+      generationStatusBySessionRef.current = next;
+      return next;
+    });
+    logSessionOperation("operation-status-updated", {
+      operationContext,
+      originSessionId: sessionId,
+      activeSessionId: activeSessionIdRef.current,
+      reason: status?.label || status?.type || "",
+      applied: true,
+    });
+  }, []);
+
+  const createOperationContext = useCallback(({
+    originSessionId = "",
+    workflowType = "solve",
+    problemHash = "",
+    imageHash = "",
+    source = "",
+  } = {}) => {
+    const targetSessionId = originSessionId || activeSessionIdRef.current;
+    const revision = (operationRevisionsRef.current[targetSessionId] || 0) + 1;
+    operationRevisionsRef.current[targetSessionId] = revision;
+    const operationContext = {
+      operationId: createOperationId(source || workflowType),
+      originSessionId: targetSessionId,
+      workflowType,
+      revision,
+      problemHash,
+      imageHash,
+      createdAt: new Date().toISOString(),
+    };
+    activeOperationsRef.current[targetSessionId] = operationContext;
+    logSessionOperation("operation-created", {
+      operationContext,
+      activeSessionId: activeSessionIdRef.current,
+      reason: "new-session-operation",
+    });
+    return operationContext;
+  }, []);
+
+  const getOperationApplyDecision = useCallback((operationContext = null) => {
+    const originSessionId = operationContext?.originSessionId || "";
+    if (!originSessionId) {
+      return { apply: false, targetSessionId: "", reason: "missing-origin-session" };
+    }
+    if (!sessionsRef.current.some((session) => session.id === originSessionId)) {
+      return { apply: false, targetSessionId: originSessionId, reason: "origin-session-missing" };
+    }
+    const activeOperation = activeOperationsRef.current[originSessionId];
+    if (operationContext?.operationId && activeOperation?.operationId !== operationContext.operationId) {
+      return { apply: false, targetSessionId: originSessionId, reason: "stale-operation" };
+    }
+    if (operationContext?.revision && activeOperation?.revision !== operationContext.revision) {
+      return { apply: false, targetSessionId: originSessionId, reason: "stale-revision" };
+    }
+    return { apply: true, targetSessionId: originSessionId, reason: "current-operation" };
+  }, []);
+
+  const canApplyOperation = useCallback((operationContext = null) => (
+    getOperationApplyDecision(operationContext).apply
+  ), [getOperationApplyDecision]);
 
   useEffect(() => {
     if (!isLoaded) return undefined;
@@ -303,7 +398,7 @@ export default function Home() {
           setActiveSessionId(nextActive.id);
           sessionsRef.current = merged.sessions;
           activeSessionIdRef.current = nextActive.id;
-          setGenerationStatus({
+          setSessionGenerationStatus(nextActive.id, {
             type: restoredSteps.length ? "success" : "empty",
             label: restoredSteps.length
               ? merged.preservedActive ? "Explanation ready" : "Session restored"
@@ -332,56 +427,112 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [getToken, isLoaded, isMock, isSignedIn]);
+  }, [getToken, isLoaded, isMock, isSignedIn, setSessionGenerationStatus]);
 
   useEffect(() => {
-    if (
-      !activeSession?.dirty
-      || !hasPersistableSessionContent(activeSession)
-      || !isSignedIn
-      || isMock
-      || !settings.productivity.autosave
-    ) return undefined;
+    if (!isSignedIn || isMock || !settings.productivity.autosave) return undefined;
+    const sessionsToSave = sessions.filter((session) => (
+      session?.dirty
+      && hasPersistableSessionContent(session)
+      && !isPersistingWorkflow(generationStatusBySessionRef.current[session.id])
+    ));
+    if (sessionsToSave.length === 0) return undefined;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
 
     saveTimerRef.current = setTimeout(async () => {
-      setSyncStatus("Saving session...");
+      setSyncStatus(sessionsToSave.length > 1 ? "Saving sessions..." : "Saving session...");
       setSessionError("");
 
-      try {
-        const data = activeSession.persisted
-          ? await updateUserSession({ getToken, session: activeSession })
-          : await createUserSession({ getToken, session: activeSession });
-        const savedSession = normalizeSession({
-          ...data.session,
-          persisted: true,
-          dirty: false,
+      for (const sessionSnapshot of sessionsToSave) {
+        const saveRevision = sessionSnapshot.updatedAt || "";
+        logSessionOperation("session-save-started", {
+          originSessionId: sessionSnapshot.id,
+          activeSessionId: activeSessionIdRef.current,
+          revision: saveRevision,
+          reason: sessionSnapshot.persisted ? "update" : "create",
         });
-        const mergedSession = normalizeSession(mergeSessionPreservingSolutionSteps(activeSession, savedSession));
-
-        setSessions((prev) => {
-          const nextSessions = prev.map((session) => (
-            session.id === activeSession.id ? mergedSession : session
-          ));
-          sessionsRef.current = nextSessions;
-          return nextSessions;
-        });
-        if (activeSessionId === activeSession.id) {
-          setActiveSessionId(mergedSession.id);
-          activeSessionIdRef.current = mergedSession.id;
+        try {
+          const data = sessionSnapshot.persisted
+            ? await updateUserSession({ getToken, session: sessionSnapshot })
+            : await createUserSession({ getToken, session: sessionSnapshot });
+          const savedSession = import.meta.env.DEV
+            ? measureOmniSync("session.save-response.normalize", () => normalizeSession({
+              ...data.session,
+              persisted: true,
+              dirty: false,
+            }))
+            : normalizeSession({
+              ...data.session,
+              persisted: true,
+              dirty: false,
+            });
+          let applied = false;
+          const scheduleSessionSaveUpdate = () => setSessions((prev) => {
+            const current = prev.find((session) => session.id === sessionSnapshot.id);
+            if (!current) {
+              logSessionOperation("session-save-discarded", {
+                originSessionId: sessionSnapshot.id,
+                activeSessionId: activeSessionIdRef.current,
+                revision: saveRevision,
+                reason: "session-missing",
+                applied: false,
+              });
+              return prev;
+            }
+            if ((current.updatedAt || "") !== saveRevision && current.dirty) {
+              logSessionOperation("session-save-discarded", {
+                originSessionId: sessionSnapshot.id,
+                activeSessionId: activeSessionIdRef.current,
+                revision: saveRevision,
+                reason: "newer-local-revision",
+                applied: false,
+              });
+              return prev;
+            }
+            const mergedSession = import.meta.env.DEV
+              ? measureOmniSync("session.save-response.merge-live-steps", () => (
+                normalizeSession(mergeSessionPreservingSolutionSteps(current, savedSession))
+              ))
+              : normalizeSession(mergeSessionPreservingSolutionSteps(current, savedSession));
+            const nextSessions = prev.map((session) => (
+              session.id === sessionSnapshot.id ? mergedSession : session
+            ));
+            sessionsRef.current = nextSessions;
+            applied = true;
+            return nextSessions;
+          });
+          if (import.meta.env.DEV) {
+            measureOmniSync("react-state.schedule-session-save-update", scheduleSessionSaveUpdate);
+          } else {
+            scheduleSessionSaveUpdate();
+          }
+          logSessionOperation(applied ? "session-save-completed" : "session-save-discarded", {
+            originSessionId: sessionSnapshot.id,
+            activeSessionId: activeSessionIdRef.current,
+            revision: saveRevision,
+            reason: applied ? "saved" : "not-applied",
+            applied,
+          });
+          if (applied) setSyncStatus("Saved");
+        } catch (error) {
+          logSessionOperation("session-save-discarded", {
+            originSessionId: sessionSnapshot.id,
+            activeSessionId: activeSessionIdRef.current,
+            revision: saveRevision,
+            reason: error.body?.code || error.message || "save-failed",
+            applied: false,
+          });
+          setSessionError(error.message || "Could not save this session.");
+          const hasLiveSteps = getSolutionSteps(sessionSnapshot).length > 0;
+          setSyncStatus(hasLiveSteps ? "Solved but not saved" : "");
         }
-        setSyncStatus("Saved");
-      } catch (error) {
-        setSessionError(error.message || "Could not save this session.");
-        const hasLiveSteps = getSolutionSteps(activeSession).length > 0;
-        setSyncStatus(hasLiveSteps ? "Solved but not saved" : "");
       }
     }, 700);
 
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [activeSession, activeSessionId, getToken, isMock, isSignedIn, settings.productivity.autosave]);
+  }, [getToken, isMock, isSignedIn, sessions, settings.productivity.autosave]);
 
   const handleUsageUpdate = (usage) => {
     if (!usage?.kind) return;
@@ -400,11 +551,16 @@ export default function Home() {
     sessionsRef.current = nextSessions;
     activeSessionIdRef.current = session.id;
     setSidebarOpen(false);
-    setGenerationStatus({
+    setSessionGenerationStatus(session.id, {
       type: "empty",
       label: "New session ready",
       detail: "Type a problem or upload an image to begin.",
       meta: "",
+    });
+    logSessionOperation("session-switched", {
+      originSessionId: session.id,
+      activeSessionId: session.id,
+      reason: "new-session",
     });
   };
 
@@ -415,7 +571,8 @@ export default function Home() {
     ));
     setSessions(nextSessions);
     sessionsRef.current = nextSessions;
-    setGenerationStatus(emptyGenerationStatus());
+    activeOperationsRef.current[resetSessionId] = null;
+    setSessionGenerationStatus(resetSessionId, emptyGenerationStatus());
     logSolutionState("reset", {
       activeSessionId: resetSessionId,
       renderedStepCount: 0,
@@ -428,13 +585,20 @@ export default function Home() {
     const selectedSteps = getSolutionSteps(selectedSession);
     setActiveSessionId(sessionId);
     activeSessionIdRef.current = sessionId;
-    setGenerationStatus({
-      type: selectedSteps.length ? "success" : "empty",
-      label: selectedSteps.length ? "Session restored" : "Session ready",
-      detail: selectedSteps.length
-        ? getStatusStepText(selectedSteps)
-        : getSessionLabel(selectedSession, "Ready for a problem."),
-      meta: "",
+    if (!generationStatusBySessionRef.current[sessionId]) {
+      setSessionGenerationStatus(sessionId, {
+        type: selectedSteps.length ? "success" : "empty",
+        label: selectedSteps.length ? "Session restored" : "Session ready",
+        detail: selectedSteps.length
+          ? getStatusStepText(selectedSteps)
+          : getSessionLabel(selectedSession, "Ready for a problem."),
+        meta: "",
+      });
+    }
+    logSessionOperation("session-switched", {
+      originSessionId: sessionId,
+      activeSessionId: sessionId,
+      reason: "select-session",
     });
   };
 
@@ -448,15 +612,35 @@ export default function Home() {
     }));
   };
 
-  const handleProblemGenerated = (data) => {
-    const normalizedData = normalizeSolveResponse(data, { endpoint: "Home.handleProblemGenerated" });
+  const handleProblemGenerated = (data, operationContext = data?._operationContext || null) => {
+    const normalizedData = import.meta.env.DEV
+      ? measureOmniSync("solve-response.home-normalize", () => (
+        normalizeSolveResponse(data, { endpoint: "Home.handleProblemGenerated" })
+      ))
+      : normalizeSolveResponse(data, { endpoint: "Home.handleProblemGenerated" });
     if (normalizedData.canonicalProblem) {
       logCanonicalProblem("solve response", normalizedData.canonicalProblem, { endpoint: normalizedData.metadata?.endpoint });
     }
     handleUsageUpdate(normalizedData.usage || normalizedData.metadata?.usage);
-    const requestSessionId = data?._requestSessionId || data?.requestSessionId || activeSessionIdRef.current;
+    const operationDecision = operationContext
+      ? getOperationApplyDecision(operationContext)
+      : { apply: true, targetSessionId: data?._requestSessionId || data?.requestSessionId || activeSessionIdRef.current, reason: "legacy-request" };
+    if (!operationDecision.apply) {
+      logSessionOperation("operation-result-discarded", {
+        operationContext,
+        activeSessionId: activeSessionIdRef.current,
+        reason: operationDecision.reason,
+        applied: false,
+      });
+      return;
+    }
+    const requestSessionId = operationDecision.targetSessionId;
     const beforeActiveSessionId = activeSessionIdRef.current;
-    const { problemData, steps: normalizedSteps, status: responseStatus } = createGeneratedProblemState(normalizedData);
+    const { problemData, steps: normalizedSteps, status: responseStatus } = import.meta.env.DEV
+      ? measureOmniSync("solve-response.create-generated-state", () => (
+        createGeneratedProblemState(normalizedData)
+      ))
+      : createGeneratedProblemState(normalizedData);
     logSolutionState("solve response", {
       submittedProblemText: normalizedData.originalProblem || normalizedData.problem || normalizedData.expression || "",
       requestSessionId,
@@ -465,12 +649,21 @@ export default function Home() {
       normalizedSolutionStepCount: normalizedSteps.length,
     });
 
-    const commitResult = commitGeneratedProblemToSessions({
-      sessions: sessionsRef.current,
-      activeSessionId: activeSessionIdRef.current,
-      requestSessionId,
-      problemData,
-    });
+    const commitResult = import.meta.env.DEV
+      ? measureOmniSync("solve-response.commit-session-model", () => commitGeneratedProblemToSessions({
+        sessions: sessionsRef.current,
+        activeSessionId: requestSessionId,
+        requestSessionId,
+        problemData,
+      }), {
+        sessionCount: sessionsRef.current.length,
+      })
+      : commitGeneratedProblemToSessions({
+        sessions: sessionsRef.current,
+        activeSessionId: requestSessionId,
+        requestSessionId,
+        problemData,
+      });
     logSolutionState("session write", {
       requestedSessionId: requestSessionId,
       sessionIdBeingWritten: commitResult.activeSessionId,
@@ -480,78 +673,150 @@ export default function Home() {
       wrote: commitResult.wrote,
     });
 
-    setSessions(commitResult.sessions);
-    sessionsRef.current = commitResult.sessions;
+    const scheduleSolveSessionUpdate = () => {
+      setSessions(commitResult.sessions);
+      sessionsRef.current = commitResult.sessions;
+    };
+    if (import.meta.env.DEV) {
+      measureOmniSync("react-state.schedule-solve-session-update", scheduleSolveSessionUpdate, {
+        sessionCount: commitResult.sessions.length,
+        committedStepCount: commitResult.committedSteps.length,
+      });
+    } else {
+      scheduleSolveSessionUpdate();
+    }
 
     const committedStepCount = commitResult.committedSteps.length;
-    const nextActiveSessionId = commitResult.activeSessionId || activeSessionIdRef.current;
-    if (nextActiveSessionId && nextActiveSessionId !== activeSessionIdRef.current) {
-      setActiveSessionId(nextActiveSessionId);
-      activeSessionIdRef.current = nextActiveSessionId;
-    }
+    const targetSessionId = commitResult.activeSessionId || requestSessionId;
 
     const nextStatus = committedStepCount > 0
       ? responseStatus
       : createGeneratedProblemState({ steps: [] }).status;
-    setGenerationStatus(nextStatus);
+    const scheduleGenerationStatusUpdate = () => {
+      setSessionGenerationStatus(targetSessionId, nextStatus, operationContext);
+    };
+    if (import.meta.env.DEV) {
+      measureOmniSync("react-state.schedule-generation-status-update", scheduleGenerationStatusUpdate, {
+        statusType: nextStatus.type,
+        statusLabel: nextStatus.label,
+      });
+    } else {
+      scheduleGenerationStatusUpdate();
+    }
     logSolutionState("status commit", {
-      activeSessionIdAfterWrite: nextActiveSessionId,
+      activeSessionIdAfterWrite: activeSessionIdRef.current,
+      targetSessionId,
       solutionStepCountInActiveSession: committedStepCount,
       statusType: nextStatus.type,
       statusLabel: nextStatus.label,
       statusDetail: nextStatus.detail,
     });
+    logSessionOperation("operation-result-applied", {
+      operationContext,
+      originSessionId: targetSessionId,
+      activeSessionId: activeSessionIdRef.current,
+      problemHash: normalizedData.canonicalInputHash || normalizedData.canonicalProblem?.hash || "",
+      reason: "current-operation",
+      applied: true,
+    });
   };
 
   const handleGenerationStart = (event = {}) => {
     const { source } = event;
+    const operationContext = event.operationContext || createOperationContext({
+      originSessionId: event.requestSessionId || activeSessionIdRef.current,
+      workflowType: source === "image" ? "image-ocr-solve" : "typed-solve",
+      problemHash: event.problemHash || "",
+      imageHash: event.imageHash || "",
+      source,
+    });
+    const requestSessionId = operationContext.originSessionId;
     logSolutionState("submit", {
       source,
       submittedProblemText: event.problem || "",
       activeSessionIdBeforeRequest: activeSessionIdRef.current,
-      requestSessionId: event.requestSessionId || activeSessionIdRef.current,
+      requestSessionId,
     });
-    setGenerationStatus({
+    setSessionGenerationStatus(requestSessionId, {
       type: "loading",
       label: source === "image" ? "Reading image" : "Solving problem",
       detail: "Building the structured explanation.",
       meta: "",
-    });
+      workflowActive: true,
+    }, operationContext);
+    return operationContext;
   };
 
-  const handleExtractionReview = (extraction) => {
+  const handleExtractionReview = (extraction, operationContext = extraction?._operationContext || null) => {
     handleUsageUpdate(extraction?.usage);
+    const operationDecision = getOperationApplyDecision(operationContext);
+    if (!operationDecision.apply) {
+      logSessionOperation("operation-result-discarded", {
+        operationContext,
+        activeSessionId: activeSessionIdRef.current,
+        reason: operationDecision.reason,
+        applied: false,
+      });
+      return;
+    }
     const tier = extraction?.confidenceTier || extraction?.extractionValidation?.tier || "medium";
-    setGenerationStatus({
+    setSessionGenerationStatus(operationDecision.targetSessionId, {
       type: tier === "low" ? "limit" : "empty",
       label: "Review extracted problem",
       detail: tier === "low"
         ? "Confidence is low or a critical math mismatch was detected."
         : "Confirm or edit the extracted problem before solving.",
       meta: extraction?.confidence !== undefined ? `${extraction.confidence}% confidence` : "",
+    }, operationContext);
+    logSessionOperation("extraction-completed", {
+      operationContext,
+      activeSessionId: activeSessionIdRef.current,
+      problemHash: extraction?.canonicalProblem?.hash || "",
+      reason: "review-required",
+      applied: true,
     });
   };
 
-  const handleReviewedProblemSubmitted = (payload = {}) => {
-    const requestSessionId = activeSessionIdRef.current;
+  const handleReviewedProblemSubmitted = (payload = {}, operationContext = payload._operationContext || null) => {
+    const operationDecision = getOperationApplyDecision(operationContext);
+    if (!operationDecision.apply) {
+      logSessionOperation("operation-result-discarded", {
+        operationContext,
+        activeSessionId: activeSessionIdRef.current,
+        reason: operationDecision.reason,
+        applied: false,
+      });
+      return "";
+    }
+    const requestSessionId = operationDecision.targetSessionId;
     const problemData = createPendingReviewedProblemState(payload);
     const commitResult = commitReviewedProblemToSessions({
       sessions: sessionsRef.current,
-      activeSessionId: activeSessionIdRef.current,
+      activeSessionId: requestSessionId,
       requestSessionId,
       problemData,
     });
     setSessions(commitResult.sessions);
     sessionsRef.current = commitResult.sessions;
-    if (commitResult.activeSessionId && commitResult.activeSessionId !== activeSessionIdRef.current) {
-      setActiveSessionId(commitResult.activeSessionId);
-      activeSessionIdRef.current = commitResult.activeSessionId;
-    }
+    setSessionGenerationStatus(requestSessionId, {
+      type: "loading",
+      label: "Solving reviewed problem",
+      detail: "Building the structured explanation.",
+      meta: "",
+      workflowActive: true,
+    }, operationContext);
     logSolutionState("reviewed problem committed", {
       requestSessionId,
       activeSessionId: commitResult.activeSessionId,
       canonicalInputHash: payload.canonicalProblem?.hash || "",
       wrote: commitResult.wrote,
+    });
+    logSessionOperation("operation-result-applied", {
+      operationContext,
+      activeSessionId: activeSessionIdRef.current,
+      problemHash: payload.canonicalProblem?.hash || "",
+      reason: "reviewed-problem-committed",
+      applied: true,
     });
     return commitResult.activeSessionId || requestSessionId;
   };
@@ -564,16 +829,30 @@ export default function Home() {
     usage,
     solutionIssues = [],
     retryable = false,
+    operationContext = null,
   }) => {
     handleUsageUpdate(usage);
+    const operationDecision = operationContext
+      ? getOperationApplyDecision(operationContext)
+      : { apply: true, targetSessionId: activeSessionIdRef.current, reason: "legacy-error" };
+    if (!operationDecision.apply) {
+      logSessionOperation("operation-error-discarded", {
+        operationContext,
+        activeSessionId: activeSessionIdRef.current,
+        reason: operationDecision.reason,
+        applied: false,
+      });
+      return;
+    }
+    const targetSessionId = operationDecision.targetSessionId;
     const isLimitError = status === 429 && code === "USAGE_LIMIT_EXCEEDED";
     if (isLimitError) {
-      setGenerationStatus({
+      setSessionGenerationStatus(targetSessionId, {
         type: "limit",
         label: source === "image" ? "Image limit reached" : "Daily limit reached",
         detail: message || "You've reached today's limit for this action.",
         meta: getUsageMeta(usage),
-      });
+      }, operationContext);
       return;
     }
 
@@ -610,7 +889,13 @@ export default function Home() {
           ? ["Retry from the reviewed problem when ready."]
           : [],
     };
-    setGenerationStatus(nextStatus);
+    setSessionGenerationStatus(targetSessionId, nextStatus, operationContext);
+    logSessionOperation("operation-error-applied", {
+      operationContext,
+      activeSessionId: activeSessionIdRef.current,
+      reason: code || message || "generation-error",
+      applied: true,
+    });
     logSolutionState("status commit", {
       source,
       statusType: nextStatus.type,
@@ -628,8 +913,16 @@ export default function Home() {
     setSessions((prev) =>
       prev.map((session) => {
         if (session.id !== activeSessionId) return session;
-        const current = JSON.stringify(session.pinnedWindows || []);
-        const next = JSON.stringify(pinnedWindows);
+        const current = import.meta.env.DEV
+          ? measureOmniSync("session.pinned-windows.stringify-current", () => JSON.stringify(session.pinnedWindows || []), {
+            pinnedWindowCount: session.pinnedWindows?.length || 0,
+          })
+          : JSON.stringify(session.pinnedWindows || []);
+        const next = import.meta.env.DEV
+          ? measureOmniSync("session.pinned-windows.stringify-next", () => JSON.stringify(pinnedWindows), {
+            pinnedWindowCount: pinnedWindows.length,
+          })
+          : JSON.stringify(pinnedWindows);
         if (current === next) return session;
 
         return {
@@ -771,6 +1064,9 @@ export default function Home() {
                   />
                 </div>
                 <ImageUpload
+                  activeSessionId={activeSession?.id}
+                  onCreateOperation={createOperationContext}
+                  canApplyOperation={canApplyOperation}
                   onProblemGenerated={handleProblemGenerated}
                   onGenerationStart={handleGenerationStart}
                   onGenerationError={handleGenerationError}

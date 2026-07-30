@@ -17,11 +17,33 @@ async function parseResponse(response) {
   return body;
 }
 
-async function getAuthHeaders(getToken) {
+function logPersistenceAuth(event, details = {}) {
+  if (!import.meta.env.DEV) return;
+  console.info("[omnimath:persistence-auth]", {
+    event,
+    ...details,
+  });
+}
+
+async function getAuthHeaders(getToken, { fresh = false, endpoint = "" } = {}) {
   if (typeof getToken !== "function") return {};
 
-  const token = await getToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  try {
+    const token = await getToken(fresh ? { skipCache: true } : undefined);
+    if (fresh) {
+      logPersistenceAuth("persistence-auth-refresh", {
+        endpoint,
+        tokenPresent: Boolean(token),
+      });
+    }
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch (error) {
+    logPersistenceAuth("persistence-auth-failure", {
+      endpoint,
+      message: error.message,
+    });
+    return {};
+  }
 }
 
 export async function syncCurrentUser({ getToken, profile }) {
@@ -58,6 +80,7 @@ export async function fetchUsageSnapshot({ getToken }) {
 
 function buildSessionPayload(session) {
   return {
+    id: session.id,
     title: session.title,
     demoKey: null,
     messages: session.messages || [],
@@ -78,7 +101,7 @@ export async function fetchUserSessions({ getToken }) {
 }
 
 export async function createUserSession({ getToken, session }) {
-  const authHeaders = await getAuthHeaders(getToken);
+  const authHeaders = await getAuthHeaders(getToken, { fresh: true, endpoint: "/api/sessions:create" });
   const response = await fetch("/api/sessions", {
     method: "POST",
     headers: {
@@ -92,7 +115,7 @@ export async function createUserSession({ getToken, session }) {
 }
 
 export async function updateUserSession({ getToken, session }) {
-  const authHeaders = await getAuthHeaders(getToken);
+  const authHeaders = await getAuthHeaders(getToken, { fresh: true, endpoint: "/api/sessions:update" });
   const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}`, {
     method: "PUT",
     headers: {

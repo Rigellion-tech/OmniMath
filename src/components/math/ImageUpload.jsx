@@ -1,8 +1,9 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, FileText, ImagePlus, Loader2, Pencil, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
 import { buildExtractionSubmissionPayload, extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { canonicalProblemFromExtraction, logCanonicalProblem } from "@/lib/canonicalProblem";
+import { logSessionOperation } from "@/lib/sessionOperations";
 import { cn } from "@/lib/utils";
 import {
   analyzeImageQuality,
@@ -252,7 +253,7 @@ function QualityPanel({
               </p>
               <button
                 type="button"
-                onClick={onCancel}
+                onClick={() => onCancel()}
                 className="rounded-lg p-1 text-slate-300/60 transition-colors hover:bg-white/[0.06] hover:text-slate-100"
                 aria-label="Clear selected image"
               >
@@ -361,6 +362,9 @@ function QualityPanel({
 }
 
 export default function ImageUpload({
+  activeSessionId = "",
+  onCreateOperation,
+  canApplyOperation,
   onProblemGenerated,
   onGenerationStart,
   onGenerationError,
@@ -368,31 +372,84 @@ export default function ImageUpload({
   onUsageUpdate,
   onReviewedProblemSubmitted,
 }) {
-  const [preview, setPreview] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [quality, setQuality] = useState(null);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [extraction, setExtraction] = useState(null);
-  const [editedText, setEditedText] = useState("");
-  const [solveError, setSolveError] = useState("");
+  const emptyWorkflow = {
+    preview: null,
+    selectedFile: null,
+    quality: null,
+    analyzing: false,
+    submitting: false,
+    extraction: null,
+    editedText: "",
+    solveError: "",
+    operationContext: null,
+  };
+  const [workflowBySession, setWorkflowBySession] = useState({});
+  const workflowBySessionRef = useRef(workflowBySession);
   const fileRef = useRef(null);
-  const previewRef = useRef(null);
   const { getToken } = useAuthToken();
+  const workflow = workflowBySession[activeSessionId] || emptyWorkflow;
+  const {
+    preview,
+    selectedFile,
+    quality,
+    analyzing,
+    submitting,
+    extraction,
+    editedText,
+    solveError,
+  } = workflow;
 
-  const resetSelection = () => {
-    if (previewRef.current) URL.revokeObjectURL(previewRef.current);
-    previewRef.current = null;
-    setPreview(null);
-    setSelectedFile(null);
-    setQuality(null);
-    setExtraction(null);
-    setEditedText("");
-    setSolveError("");
-    setAnalyzing(false);
-    setSubmitting(false);
+  useEffect(() => {
+    workflowBySessionRef.current = workflowBySession;
+  }, [workflowBySession]);
+
+  useEffect(() => () => {
+    Object.values(workflowBySessionRef.current).forEach((item) => {
+      if (item?.preview) URL.revokeObjectURL(item.preview);
+    });
+  }, []);
+
+  const updateWorkflow = (sessionId, updater) => {
+    if (!sessionId) return;
+    setWorkflowBySession((prev) => {
+      const current = prev[sessionId] || emptyWorkflow;
+      const nextValue = typeof updater === "function" ? updater(current) : updater;
+      const next = {
+        ...prev,
+        [sessionId]: {
+          ...current,
+          ...nextValue,
+        },
+      };
+      workflowBySessionRef.current = next;
+      return next;
+    });
+  };
+
+  const resetSelection = (sessionId = activeSessionId) => {
+    const current = workflowBySessionRef.current[sessionId];
+    if (current?.preview) URL.revokeObjectURL(current.preview);
+    updateWorkflow(sessionId, {
+      ...emptyWorkflow,
+    });
     if (fileRef.current) fileRef.current.value = "";
   };
+
+  const isCurrentOperation = (sessionId, operationContext) => {
+    if (!operationContext?.operationId) return false;
+    const currentOperation = workflowBySessionRef.current[sessionId]?.operationContext;
+    return currentOperation?.operationId === operationContext.operationId
+      && currentOperation?.revision === operationContext.revision
+      && canApplyOperation?.(operationContext) !== false;
+  };
+
+  const getImageHash = (file, imageQuality) => [
+    file?.name || "image",
+    file?.type || "",
+    file?.size || 0,
+    file?.lastModified || 0,
+    imageQuality?.metrics?.ocrConfidence ?? "",
+  ].join(":");
 
   const reportInputProblem = (message, status = 400) => {
     onGenerationError?.({
@@ -405,7 +462,8 @@ export default function ImageUpload({
 
   const handleFile = async (file) => {
     if (!file) return;
-    resetSelection();
+    const originSessionId = activeSessionId;
+    resetSelection(originSessionId);
 
     if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
       reportInputProblem("Please upload a PNG, JPG, WebP, or GIF image.");
@@ -417,41 +475,83 @@ export default function ImageUpload({
     }
 
     const localUrl = URL.createObjectURL(file);
-    previewRef.current = localUrl;
-    setPreview(localUrl);
-    setSelectedFile(file);
-    setAnalyzing(true);
+    updateWorkflow(originSessionId, {
+      preview: localUrl,
+      selectedFile: file,
+      analyzing: true,
+    });
 
     try {
       const result = await analyzeImageQuality(file);
-      setQuality(result);
+      if (workflowBySessionRef.current[originSessionId]?.selectedFile !== file) return;
+      updateWorkflow(originSessionId, {
+        quality: result,
+      });
     } catch (error) {
       reportInputProblem(error.message || "Could not inspect this image.");
-      resetSelection();
+      if (workflowBySessionRef.current[originSessionId]?.selectedFile === file) {
+        resetSelection(originSessionId);
+      }
     } finally {
-      setAnalyzing(false);
+      if (workflowBySessionRef.current[originSessionId]?.selectedFile !== file) return;
+      updateWorkflow(originSessionId, {
+        analyzing: false,
+      });
     }
   };
 
   const handleSubmit = async () => {
-    if (!selectedFile || !quality) return;
+    const originSessionId = activeSessionId;
+    const workflowSnapshot = workflowBySessionRef.current[originSessionId] || emptyWorkflow;
+    const originFile = workflowSnapshot.selectedFile;
+    const originQuality = workflowSnapshot.quality;
+    if (!originFile || !originQuality) return;
 
     // Cost-control guard: failed client-side quality checks return here, before
     // explainImageProblem can send a request to /api/explain-image.
-    if (!canSubmitImageForAi(quality)) return;
+    if (!canSubmitImageForAi(originQuality)) return;
 
-    setSubmitting(true);
-    setSolveError("");
-    onGenerationStart?.({ source: "image" });
+    const imageHash = getImageHash(originFile, originQuality);
+    const operationContext = onCreateOperation?.({
+      originSessionId,
+      workflowType: "image-ocr-solve",
+      imageHash,
+      source: "image",
+    }) || onGenerationStart?.({ source: "image", requestSessionId: originSessionId, imageHash });
+    updateWorkflow(originSessionId, {
+      submitting: true,
+      solveError: "",
+      operationContext,
+    });
+    onGenerationStart?.({ source: "image", requestSessionId: originSessionId, imageHash, operationContext });
+    logSessionOperation("extraction-started", {
+      operationContext,
+      originSessionId,
+      activeSessionId,
+      imageHash,
+      reason: "image-submit",
+    });
     let extractionSucceeded = false;
 
     try {
       const result = await extractImageProblem({
-        file: selectedFile,
+        file: originFile,
         prompt: "Please extract the math problem shown in this image.",
         getToken,
-        quality,
+        quality: originQuality,
       });
+
+      if (!isCurrentOperation(originSessionId, operationContext)) {
+        logSessionOperation("operation-result-discarded", {
+          operationContext,
+          originSessionId,
+          activeSessionId,
+          imageHash,
+          reason: "stale-extraction",
+          applied: false,
+        });
+        return;
+      }
 
       onUsageUpdate?.(result.usage);
       extractionSucceeded = true;
@@ -461,8 +561,10 @@ export default function ImageUpload({
         source: result.confidenceTier === "high" && !result.extractionValidation?.critical ? "ocr-direct" : "ocr-reviewed",
       });
       logCanonicalProblem("OCR extraction", canonicalProblem, { path: "ImageUpload.handleSubmit" });
-      setExtraction({ ...result, canonicalProblem });
-      setEditedText(result.extractedProblemText || result.rawExtractedText || "");
+      updateWorkflow(originSessionId, {
+        extraction: { ...result, canonicalProblem, _operationContext: operationContext },
+        editedText: result.extractedProblemText || result.rawExtractedText || "",
+      });
 
       if (result.confidenceTier === "high" && !result.extractionValidation?.critical) {
         const payload = buildExtractionSubmissionPayload({
@@ -472,20 +574,72 @@ export default function ImageUpload({
           solveDecision: "direct",
           source: "ocr-direct",
         });
-        const requestSessionId = onReviewedProblemSubmitted?.(payload);
+        const requestSessionId = onReviewedProblemSubmitted?.(payload, operationContext);
+        if (!requestSessionId || !isCurrentOperation(originSessionId, operationContext)) {
+          logSessionOperation("operation-result-discarded", {
+            operationContext,
+            originSessionId,
+            activeSessionId,
+            imageHash,
+            reason: "stale-before-auto-solve",
+            applied: false,
+          });
+          return;
+        }
+        logSessionOperation("solve-started", {
+          operationContext,
+          originSessionId,
+          activeSessionId,
+          imageHash,
+          problemHash: canonicalProblem.hash,
+          reason: "ocr-direct",
+        });
         const solved = await solveExtractedProblem({
           ...payload,
           getToken,
         });
-        onProblemGenerated({ ...solved, _requestSessionId: requestSessionId });
-        resetSelection();
+        if (!isCurrentOperation(originSessionId, operationContext)) {
+          logSessionOperation("operation-result-discarded", {
+            operationContext,
+            originSessionId,
+            activeSessionId,
+            imageHash,
+            problemHash: canonicalProblem.hash,
+            reason: "stale-solve",
+            applied: false,
+          });
+          return;
+        }
+        logSessionOperation("solve-completed", {
+          operationContext,
+          originSessionId,
+          activeSessionId,
+          imageHash,
+          problemHash: canonicalProblem.hash,
+          reason: "ocr-direct",
+        });
+        onProblemGenerated({ ...solved, _requestSessionId: requestSessionId, _operationContext: operationContext }, operationContext);
+        resetSelection(originSessionId);
         return;
       }
 
-      onExtractionReview?.(result);
-      setSubmitting(false);
+      onExtractionReview?.({ ...result, canonicalProblem, _operationContext: operationContext }, operationContext);
+      updateWorkflow(originSessionId, {
+        submitting: false,
+      });
     } catch (error) {
       console.error("Image problem generation failed:", error);
+      if (!isCurrentOperation(originSessionId, operationContext)) {
+        logSessionOperation("operation-error-discarded", {
+          operationContext,
+          originSessionId,
+          activeSessionId,
+          imageHash,
+          reason: "stale-image-error",
+          applied: false,
+        });
+        return;
+      }
       onGenerationError?.({
         source: extractionSucceeded ? "image-solve" : "image",
         message: error.message,
@@ -494,41 +648,88 @@ export default function ImageUpload({
         usage: error.body?.usage,
         solutionIssues: error.body?.solutionIssues,
         retryable: error.body?.retryable,
+        operationContext,
       });
       if (extractionSucceeded && error.body?.code === "AI_SERVICE_UNAVAILABLE") {
-        setSolveError("AI service timed out or connection dropped. Try again.");
+        updateWorkflow(originSessionId, { solveError: "AI service timed out or connection dropped. Try again." });
       } else if (extractionSucceeded && error.body?.code === "AI_SOLUTION_QUALITY_INVALID") {
-        setSolveError("The generated solution failed mathematical validation. Retry from the reviewed text.");
+        updateWorkflow(originSessionId, { solveError: "The generated solution failed mathematical validation. Retry from the reviewed text." });
       }
-      setSubmitting(false);
+      updateWorkflow(originSessionId, {
+        submitting: false,
+      });
     }
   };
 
   const solveReviewedExtraction = async (decision) => {
-    if (submitting || !extraction || !editedText.trim()) return;
-    setSubmitting(true);
-    setSolveError("");
-    onGenerationStart?.({ source: "image" });
+    const originSessionId = activeSessionId;
+    const workflowSnapshot = workflowBySessionRef.current[originSessionId] || emptyWorkflow;
+    const originExtraction = workflowSnapshot.extraction;
+    const originEditedText = workflowSnapshot.editedText;
+    const operationContext = workflowSnapshot.operationContext || originExtraction?._operationContext;
+    if (workflowSnapshot.submitting || !originExtraction || !originEditedText.trim()) return;
+    if (!isCurrentOperation(originSessionId, operationContext)) return;
+    updateWorkflow(originSessionId, {
+      submitting: true,
+      solveError: "",
+    });
+    onGenerationStart?.({ source: "image", requestSessionId: originSessionId, operationContext });
 
     try {
-      const rawText = extraction.extractedProblemText || "";
-      const edited = editedText.trim() !== rawText.trim();
+      const rawText = originExtraction.extractedProblemText || "";
+      const edited = originEditedText.trim() !== rawText.trim();
       const payload = buildExtractionSubmissionPayload({
-        extraction,
-        displayText: decision === "anyway" ? rawText : editedText,
-        rawText: extraction.rawExtractedText || extraction.rawOcrText || rawText,
+        extraction: originExtraction,
+        displayText: decision === "anyway" ? rawText : originEditedText,
+        rawText: originExtraction.rawExtractedText || originExtraction.rawOcrText || rawText,
         solveDecision: decision === "anyway" ? "anyway" : edited ? "edited" : "direct",
         source: "ocr-reviewed",
       });
-      const requestSessionId = onReviewedProblemSubmitted?.(payload);
+      const requestSessionId = onReviewedProblemSubmitted?.(payload, operationContext);
+      if (!requestSessionId || !isCurrentOperation(originSessionId, operationContext)) return;
+      logSessionOperation("solve-started", {
+        operationContext,
+        originSessionId,
+        activeSessionId,
+        problemHash: payload.canonicalProblem?.hash || "",
+        reason: "ocr-reviewed",
+      });
       const solved = await solveExtractedProblem({
         ...payload,
         getToken,
       });
-      onProblemGenerated({ ...solved, _requestSessionId: requestSessionId });
-      resetSelection();
+      if (!isCurrentOperation(originSessionId, operationContext)) {
+        logSessionOperation("operation-result-discarded", {
+          operationContext,
+          originSessionId,
+          activeSessionId,
+          problemHash: payload.canonicalProblem?.hash || "",
+          reason: "stale-reviewed-solve",
+          applied: false,
+        });
+        return;
+      }
+      logSessionOperation("solve-completed", {
+        operationContext,
+        originSessionId,
+        activeSessionId,
+        problemHash: payload.canonicalProblem?.hash || "",
+        reason: "ocr-reviewed",
+      });
+      onProblemGenerated({ ...solved, _requestSessionId: requestSessionId, _operationContext: operationContext }, operationContext);
+      resetSelection(originSessionId);
     } catch (error) {
       console.error("Confirmed image problem solve failed:", error);
+      if (!isCurrentOperation(originSessionId, operationContext)) {
+        logSessionOperation("operation-error-discarded", {
+          operationContext,
+          originSessionId,
+          activeSessionId,
+          reason: "stale-reviewed-solve-error",
+          applied: false,
+        });
+        return;
+      }
       onGenerationError?.({
         source: "image-solve",
         message: error.message,
@@ -537,13 +738,16 @@ export default function ImageUpload({
         usage: error.body?.usage,
         solutionIssues: error.body?.solutionIssues,
         retryable: error.body?.retryable,
+        operationContext,
       });
       if (error.body?.code === "AI_SERVICE_UNAVAILABLE") {
-        setSolveError("AI service timed out or connection dropped. Try again.");
+        updateWorkflow(originSessionId, { solveError: "AI service timed out or connection dropped. Try again." });
       } else if (error.body?.code === "AI_SOLUTION_QUALITY_INVALID") {
-        setSolveError("The generated solution failed mathematical validation. Retry from the reviewed text.");
+        updateWorkflow(originSessionId, { solveError: "The generated solution failed mathematical validation. Retry from the reviewed text." });
       }
-      setSubmitting(false);
+      updateWorkflow(originSessionId, {
+        submitting: false,
+      });
     }
   };
 
@@ -587,8 +791,8 @@ export default function ImageUpload({
         submitting={submitting}
         extraction={extraction}
         editedText={editedText}
-        onTextChange={setEditedText}
-        onCancel={resetSelection}
+        onTextChange={(value) => updateWorkflow(activeSessionId, { editedText: value })}
+        onCancel={() => resetSelection(activeSessionId)}
         onSubmit={handleSubmit}
         onSolve={solveReviewedExtraction}
         solveError={solveError}

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
 import { splitEquationChainLatex } from "@/lib/equationChains";
 import { createMathNode, mathNodeToLatex, normalizeLatexTransport, safeMathString, traceMathStage } from "@/lib/mathNode";
+import { measureOmniSync } from "@/lib/performanceDiagnostics";
 import { createSemanticKatexTrust, serializeSemanticTreeToLatex } from "@/lib/semanticMathRenderer";
 
 const LATEX_COMMAND_PATTERN = /\\(?:iiint|iint|int|nabla|cdot|times|mathbf|frac|left|right|sqrt|sum|lim|sin|cos|tan|ln|log|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/;
@@ -337,15 +338,33 @@ export default function MathRenderer({
   const shouldRenderKatex = forceMath || looksLikeMathExpression(normalizedMath);
   const semanticRender = useMemo(() => {
     if (!interactive || !semanticTree) return null;
-    const rendered = serializeSemanticTreeToLatex(semanticTree);
+    const rendered = import.meta.env.DEV
+      ? measureOmniSync("semantic-tree.serialize-for-katex", () => serializeSemanticTreeToLatex(semanticTree), {
+        componentName,
+        displayMode,
+        nodeCount: semanticTree?.flatNodes?.length || 0,
+      })
+      : serializeSemanticTreeToLatex(semanticTree);
     if (rendered.annotatedNodeCount > 0 && rendered.latex) {
       try {
-        katex.renderToString(rendered.latex, {
-          throwOnError: true,
-          strict: /** @type {const} */ ("ignore"),
-          displayMode,
-          trust: createSemanticKatexTrust(),
-        });
+        if (import.meta.env.DEV) {
+          measureOmniSync("katex.renderToString.semantic-validation", () => katex.renderToString(rendered.latex, {
+            throwOnError: true,
+            strict: /** @type {const} */ ("ignore"),
+            displayMode,
+            trust: createSemanticKatexTrust(),
+          }), {
+            componentName,
+            latexLength: rendered.latex.length,
+          });
+        } else {
+          katex.renderToString(rendered.latex, {
+            throwOnError: true,
+            strict: /** @type {const} */ ("ignore"),
+            displayMode,
+            trust: createSemanticKatexTrust(),
+          });
+        }
         return rendered;
       } catch (error) {
         if (import.meta.env.DEV) {
@@ -424,21 +443,50 @@ export default function MathRenderer({
         displayMode,
         ...(semanticKatexTrust ? { trust: semanticKatexTrust } : {}),
       };
-      katex.renderToString(renderMath, {
-        ...katexOptions,
-      });
-      katex.render(renderMath, host, katexOptions);
+      if (import.meta.env.DEV) {
+        measureOmniSync("katex.renderToString.render-path", () => katex.renderToString(renderMath, {
+          ...katexOptions,
+        }), {
+          componentName,
+          displayMode,
+          interactive,
+          latexLength: renderMath.length,
+        });
+        measureOmniSync("katex.render.dom", () => katex.render(renderMath, host, katexOptions), {
+          componentName,
+          displayMode,
+          interactive,
+          latexLength: renderMath.length,
+        });
+      } else {
+        katex.renderToString(renderMath, {
+          ...katexOptions,
+        });
+        katex.render(renderMath, host, katexOptions);
+      }
       host.removeAttribute("data-math-fallback");
       host.removeAttribute("data-semantic-render-fallback");
     } catch (error) {
       if (semanticRender && shouldRenderKatex && !malformedInput) {
         const plainMath = sanitizeKatexInput(sanitizedMath);
         try {
-          katex.render(plainMath, host, {
-            throwOnError: true,
-            strict: "ignore",
-            displayMode,
-          });
+          if (import.meta.env.DEV) {
+            measureOmniSync("katex.render.dom-plain-fallback", () => katex.render(plainMath, host, {
+              throwOnError: true,
+              strict: "ignore",
+              displayMode,
+            }), {
+              componentName,
+              displayMode,
+              latexLength: plainMath.length,
+            });
+          } else {
+            katex.render(plainMath, host, {
+              throwOnError: true,
+              strict: "ignore",
+              displayMode,
+            });
+          }
           host.removeAttribute("data-math-fallback");
           host.setAttribute("data-semantic-render-fallback", "plain-katex");
           if (import.meta.env.DEV) {

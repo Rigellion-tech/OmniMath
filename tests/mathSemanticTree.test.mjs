@@ -654,6 +654,31 @@ describe("math semantic tree", () => {
     assert.deepEqual(tree.linearLeaves.map((id) => tree.nodeMap[id].latex).filter((latex) => ["\\int", "\\infty", "\\ln", "\\arctan", "dx"].includes(latex)), ["\\int", "\\infty", "\\ln", "\\arctan"]);
   });
 
+  it("keeps nested integral upper-bound scripts inside the upperBound semantic group", () => {
+    const latex = "\\int_{0}^{2^{\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}}} f(x)\\,dx";
+    const tree = semanticTree(latex, "complex-upper-bound");
+    const root = tree.nodeMap[tree.rootId];
+    const upper = nodeByLatex(tree, "2^{\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}}", "upperBound");
+    const upperDescendants = descendantsOf(tree, upper);
+    const exponent = findDescendant(tree, upper, (node) => node.role === "exponent" && node.type === "fraction", "upper-bound exponent fraction");
+    const numerator = findDescendant(tree, exponent, (node) => node.role === "numerator" && node.latex === "\\pi", "upper-bound numerator");
+    const denominator = findDescendant(tree, exponent, (node) => node.role === "denominator" && node.latex.includes("\\ln"), "upper-bound denominator");
+    const nestedNumerator = findDescendant(tree, denominator, (node) => node.role === "numerator" && node.latex === "\\ln(\\sec t)", "nested numerator");
+    const nestedDenominator = findDescendant(tree, denominator, (node) => node.role === "denominator" && node.latex === "\\tan t", "nested denominator");
+    const integrand = nodeByLatex(tree, "f(x)", "integrand");
+
+    assert.equal(root.type, "integral");
+    assertSourceText(tree, upper, "2^{\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}}");
+    assertSourceText(tree, exponent, "\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}");
+    assertSourceText(tree, numerator, "\\pi");
+    assertSourceText(tree, denominator, "2+\\frac{\\ln(\\sec t)}{\\tan t}");
+    assertSourceText(tree, nestedNumerator, "\\ln(\\sec t)");
+    assertSourceText(tree, nestedDenominator, "\\tan t");
+    assertSourceText(tree, integrand, "f(x)");
+    assert.equal(upperDescendants.some((node) => node.latex === "f(x)"), false);
+    assert.ok(integrand.sourceRange.start > upper.sourceRange.end, "integrand must start after the full upper bound");
+  });
+
   it("parses signed exponent subtrahends before adjacent fractions", () => {
     const tree = semanticTree("(\\sec^2\\theta)^{a-1}\\frac{\\sec^2\\theta}{\\sec^2\\theta}", "signed-exponent");
     const root = tree.nodeMap[tree.rootId];

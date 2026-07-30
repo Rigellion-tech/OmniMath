@@ -1983,6 +1983,7 @@ function validateSessionPayload(value) {
   }
 
   return {
+    id: typeof session.id === "string" ? session.id.trim().slice(0, 80) : "",
     title,
     demoKey: typeof session.demoKey === "string" ? session.demoKey : null,
     messages: Array.isArray(session.messages) ? parseHistory(session.messages) : [],
@@ -2369,7 +2370,7 @@ export async function handleExplainRequest(req, res) {
         aiUsage: result._aiUsage,
       });
       result.canonicalProblem = canonicalProblem;
-      const saved = await saveExplanationBestEffort(req, { source: "text", problem, result });
+      const saved = await saveExplanationBestEffort(req, { source: "text", problem, result, identity });
       return { result, usage, saved, source };
     });
 
@@ -3084,7 +3085,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       });
       result.canonicalProblem = canonicalProblem;
       result.canonicalInputHash = canonicalProblem.hash;
-      const saved = await saveExplanationBestEffort(req, { source: "image", problem: problemLatex, result });
+      const saved = await saveExplanationBestEffort(req, { source: "image", problem: problemLatex, result, identity });
       return { result, usage, saved, source };
     });
 
@@ -3425,7 +3426,7 @@ export async function handleExplainImageRequest(req, res) {
         prompt,
         aiUsage: result._aiUsage,
       });
-      const saved = await saveExplanationBestEffort(req, { source: "image", problem, result });
+      const saved = await saveExplanationBestEffort(req, { source: "image", problem, result, identity });
       return { result, usage, saved, source };
     });
 

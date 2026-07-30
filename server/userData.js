@@ -3,6 +3,7 @@ import { requireClerkIdentity, resolveClerkIdentity } from "./usageIdentity.js";
 
 const HISTORY_LIMIT = 50;
 const SESSION_LIMIT = 100;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isProductionRuntime() {
   return process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
@@ -254,16 +255,41 @@ export async function getCurrentUserSessions(req) {
 export async function createUserSessionForRequest(req, session) {
   const payload = normalizeSessionPayload(session);
   const title = getSessionTitle(session);
+  const clientSessionId = typeof session.id === "string" && UUID_RE.test(session.id)
+    ? session.id
+    : null;
   try {
     const user = await requireCurrentUser(req);
-    const result = await query(
-      `
-        insert into user_sessions (user_id, title, payload)
-        values ($1, $2, $3)
-        returning id, title, payload, created_at, updated_at
-      `,
-      [user.id, title, payload]
-    );
+    const result = clientSessionId
+      ? await query(
+        `
+          insert into user_sessions (id, user_id, title, payload)
+          values ($1, $2, $3, $4)
+          on conflict (id) do update set
+            title = excluded.title,
+            payload = excluded.payload,
+            updated_at = now()
+          where user_sessions.user_id = excluded.user_id
+          returning id, title, payload, created_at, updated_at
+        `,
+        [clientSessionId, user.id, title, payload]
+      )
+      : await query(
+        `
+          insert into user_sessions (user_id, title, payload)
+          values ($1, $2, $3)
+          returning id, title, payload, created_at, updated_at
+        `,
+        [user.id, title, payload]
+      );
+
+    if (result.rows.length === 0) {
+      throw Object.assign(new Error("Session id is already in use."), {
+        statusCode: 409,
+        code: "SESSION_ID_CONFLICT",
+        publicMessage: "That session could not be saved.",
+      });
+    }
 
     return {
       user,
@@ -278,11 +304,11 @@ export async function createUserSessionForRequest(req, session) {
         databaseConfigured: false,
         fallback: "missing_local_schema",
         session: {
-          id: session.id || `local-${Date.now()}`,
+          id: clientSessionId || session.id || `local-${Date.now()}`,
           title,
           createdAt: now,
           updatedAt: now,
-          ...serializeSession({ id: session.id || `local-${Date.now()}`, title, payload, created_at: now, updated_at: now }),
+          ...serializeSession({ id: clientSessionId || session.id || `local-${Date.now()}`, title, payload, created_at: now, updated_at: now }),
         },
       };
     }
@@ -335,10 +361,10 @@ export async function updateUserSessionForRequest(req, sessionId, session) {
   }
 }
 
-export async function saveExplanationForRequest(req, { source, problem, result }) {
+export async function saveExplanationForRequest(req, { source, problem, result, identity: verifiedIdentity = null }) {
   if (!isDatabaseConfigured()) return null;
 
-  const identity = await resolveClerkIdentity(req);
+  const identity = verifiedIdentity?.clerkUserId ? verifiedIdentity : await resolveClerkIdentity(req);
   if (!identity?.clerkUserId) return null;
 
   const user = await upsertUserRecord(identity);

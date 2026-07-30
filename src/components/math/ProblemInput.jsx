@@ -67,7 +67,7 @@ export default function ProblemInput({
     const newHistory = [...history, { role: "user", text: userMessage }];
     setHistory(newHistory);
     if (!expanded && newHistory.length > 1) setExpanded(true);
-    onGenerationStart?.({ source: "text", problem: userMessage, requestSessionId });
+    const operationContext = onGenerationStart?.({ source: "text", problem: userMessage, requestSessionId });
 
     try {
       const result = await explainProblem({
@@ -80,7 +80,8 @@ export default function ProblemInput({
       onProblemGenerated({
         ...result,
         _requestSessionId: requestSessionId,
-      });
+        _operationContext: operationContext,
+      }, operationContext);
     } catch (error) {
       console.error("Problem generation failed:", error);
       onGenerationError?.({
@@ -89,6 +90,7 @@ export default function ProblemInput({
         status: error.status,
         code: error.body?.code,
         usage: error.body?.usage,
+        operationContext,
       });
       setInput(userMessage);
       setHistory(history);

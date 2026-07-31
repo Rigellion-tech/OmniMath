@@ -227,8 +227,8 @@ describe("solver benchmark suite", () => {
 
     assert.equal(args.live, false);
     assert.deepEqual(candidates.map((candidate) => candidate.id), ["current", "policy-b"]);
-    assert.equal(candidates.find((candidate) => candidate.id === "policy-b").repairModel, "o4-mini");
-    assert.equal(candidates.find((candidate) => candidate.id === "policy-b").escalationModel, "o3");
+    assert.equal(candidates.find((candidate) => candidate.id === "policy-b").repairModel, "gpt-5.6-luna");
+    assert.equal(candidates.find((candidate) => candidate.id === "policy-b").escalationModel, "gpt-5.6-sol");
   });
 
   it("records production-route DNS failures as transport attempts without billed provider calls", async () => {

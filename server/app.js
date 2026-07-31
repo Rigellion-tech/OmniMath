@@ -862,10 +862,55 @@ const MATH_ESCALATION_ELIGIBLE_ISSUES = new Set([
   "sign_inconsistent_named_quantity",
 ]);
 
+const KNOWN_INCORRECT_FINAL_ANSWER_ISSUES = new Set([
+  "answer_target_mismatch",
+  "undefined_final_placeholder",
+  "malformed_set_valued_answer",
+  "final_answer_not_supported_by_steps",
+  "final_answer_sign_inconsistent_with_steps",
+  "sign_contradiction_positive_integrand_negative_answer",
+  "sign_contradiction_reversed_positive_integrand_positive_answer",
+  "numerical_final_answer_mismatch",
+  "incorrect_simple_power_equation_final",
+]);
+
+const FALLBACK_SAFE_SYMBOL_SOURCE_TYPES = new Set([
+  "heading",
+  "label",
+  "title",
+  "reasoning",
+  "summary",
+  "plainExplanation",
+]);
+
+// Only provider content-generation failures permit a retained candidate fallback.
+// Transport, availability, rate-limit, authentication, and server-configuration errors
+// continue through the existing failure and accounting paths unchanged.
+const FALLBACK_PERMITTED_LATER_ERROR_CODES = new Set([
+  "AI_RESPONSE_INVALID",
+  "AI_RESPONSE_TRUNCATED",
+  "AI_REQUEST_REFUSED",
+]);
+
+const SOLVE_CANDIDATE_STAGE_ORDER = {
+  initial: 0,
+  repair: 1,
+  "repair-compact": 2,
+  escalation: 3,
+  "escalation-compact": 4,
+};
+
 function isEscalationEligibleIssue(issue) {
   const normalized = String(issue || "").trim();
   return MATH_ESCALATION_ELIGIBLE_ISSUES.has(normalized)
     || normalized.startsWith("abrupt_special_function_introduction");
+}
+
+function isStructuralRecoveryIssue(issue) {
+  const normalized = String(issue || "").trim();
+  return normalized === "strict_generated_latex"
+    || normalized.startsWith("strict_generated_latex:")
+    || normalized.startsWith("unexplained_generated_symbol:");
 }
 
 function evaluationMatchesIssue(evaluation = {}, issue = "") {
@@ -894,7 +939,267 @@ function hasAffirmativeFailedEvaluation(error = {}, issue = "") {
   return Boolean(signIssue && signIssue === issue);
 }
 
-export function decideSolveEscalation(error, { alreadyEscalated = false } = {}) {
+function failedEvaluationsForIssue(error = {}, issue = "") {
+  const evaluations = Array.isArray(error.solutionRuleEvaluations) ? error.solutionRuleEvaluations : [];
+  return evaluations.filter((evaluation) => (
+    evaluation?.result === "fail" && evaluationMatchesIssue(evaluation, issue)
+  ));
+}
+
+function parseRedactedEvaluationEvidence(evaluation = {}) {
+  if (typeof evaluation.failureEvidence !== "string") return null;
+  try {
+    const parsed = JSON.parse(evaluation.failureEvidence);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isFallbackSafeUnexplainedSymbol(error = {}, issue = "") {
+  if (!String(issue || "").startsWith("unexplained_generated_symbol:")) return false;
+  const evaluations = failedEvaluationsForIssue(error, issue);
+  if (evaluations.length === 0) return false;
+  return evaluations.every((evaluation) => {
+    const evidence = parseRedactedEvaluationEvidence(evaluation);
+    const sourceType = String(evidence?.sourceType || "");
+    const fieldPath = String(evidence?.fieldPath || evaluation.inputFields?.[0] || "");
+    if (!FALLBACK_SAFE_SYMBOL_SOURCE_TYPES.has(sourceType)) return false;
+    return !/(?:^|\.)(?:math|latex|equationLatex|lines|chunks)(?:$|\.|\[)|finalAnswer|problemLatex/iu.test(fieldPath);
+  });
+}
+
+function candidateCompleteness(result = {}) {
+  const steps = Array.isArray(result?.steps) ? result.steps : [];
+  const meaningfulSteps = steps.filter((step) => (
+    String(step?.math || step?.latex || "").trim()
+    && String(step?.summary || step?.reasoning || step?.plainExplanation || "").trim()
+  )).length;
+  const hasFinalAnswer = Boolean(String(result?.finalAnswerLatex || result?.finalAnswer || "").trim());
+  return {
+    hasFinalAnswer,
+    meaningfulSteps,
+    score: (hasFinalAnswer ? 2 : 0) + Math.min(8, meaningfulSteps),
+  };
+}
+
+function candidateSource(baseSource = "initial", result = {}) {
+  const compact = Boolean(result?._omniOpenAiDiagnostics?.compactFallback);
+  if (!compact || baseSource === "initial") return baseSource;
+  return `${baseSource}-compact`;
+}
+
+function failedCandidateStage(baseSource = "initial", error = {}) {
+  const attemptType = String(error?._omniOpenAiDiagnostics?.attemptType || "").toLowerCase();
+  return attemptType.includes("compact") && baseSource !== "initial"
+    ? `${baseSource}-compact`
+    : baseSource;
+}
+
+export function classifySolveCandidate({
+  source = "initial",
+  result = null,
+  error = null,
+  parseSchemaSuccess = Boolean(result),
+  accepted = !error,
+} = {}) {
+  const issueCodes = [...new Set(
+    (Array.isArray(error?.solutionIssues) ? error.solutionIssues : []).filter(Boolean)
+  )];
+  const numericalIssue = error?.solutionValidationContext?.numericalCrossCheckResult?.issue || null;
+  const numericalConfidence = error?.solutionValidationContext?.numericalCrossCheckResult?.confidence || null;
+  const numericalMismatch = numericalIssue === "numerical_final_answer_mismatch"
+    || issueCodes.includes("numerical_final_answer_mismatch");
+  const numericalAgreement = !numericalMismatch && numericalConfidence === "agreement";
+  const issueClassifications = issueCodes.map((code) => {
+    const affirmativeMathematical = isEscalationEligibleIssue(code)
+      && hasAffirmativeFailedEvaluation(error || {}, code);
+    const knownIncorrectFinalAnswer = KNOWN_INCORRECT_FINAL_ANSWER_ISSUES.has(code);
+    const fallbackSafeStructural = isFallbackSafeUnexplainedSymbol(error || {}, code);
+    const severity = affirmativeMathematical || knownIncorrectFinalAnswer || numericalMismatch
+      ? "mathematical"
+      : fallbackSafeStructural
+        ? "presentation"
+        : "unsafe_structural";
+    return {
+      code,
+      severity,
+      affirmativeMathematical,
+      knownIncorrectFinalAnswer,
+      fallbackEligible: fallbackSafeStructural
+        && !affirmativeMathematical
+        && !knownIncorrectFinalAnswer
+        && !numericalMismatch,
+    };
+  });
+  const affirmativeMathematicalFailure = issueClassifications.some((issue) => issue.affirmativeMathematical);
+  const knownIncorrectFinalAnswer = issueClassifications.some((issue) => (
+    KNOWN_INCORRECT_FINAL_ANSWER_ISSUES.has(issue.code)
+  ));
+  const structuralRecovery = issueCodes.length > 0 && issueCodes.every(isStructuralRecoveryIssue);
+  const completeness = candidateCompleteness(result || {});
+  const fallbackEligible = Boolean(
+    parseSchemaSuccess
+    && result
+    && completeness.hasFinalAnswer
+    && issueCodes.length > 0
+    && issueClassifications.every((issue) => issue.fallbackEligible)
+    && !affirmativeMathematicalFailure
+    && !numericalMismatch
+    && !knownIncorrectFinalAnswer
+  );
+  return {
+    source,
+    result,
+    parseSchemaSuccess: Boolean(parseSchemaSuccess),
+    qualityIssueCodes: issueCodes,
+    issueClassifications,
+    affirmativeMathematicalFailure,
+    numericalMismatch,
+    numericalAgreement,
+    numericalStatus: numericalMismatch ? "mismatch" : numericalAgreement ? "agreement" : "no_contradiction",
+    structuralRecovery,
+    completeness,
+    accepted: Boolean(accepted),
+    rejectionReason: accepted
+      ? null
+      : !parseSchemaSuccess
+        ? "parse_or_schema_failed"
+        : affirmativeMathematicalFailure
+          ? "affirmative_mathematical_failure"
+          : numericalMismatch
+            ? "numerical_mismatch"
+            : knownIncorrectFinalAnswer
+              ? "known_incorrect_final_answer"
+              : fallbackEligible
+                ? "quality_rejected_fallback_safe"
+                : "quality_rejected_not_fallback_safe",
+    fallbackEligible,
+  };
+}
+
+export function compareSafeSolveCandidates(left = {}, right = {}) {
+  const leftMathSafety = left.affirmativeMathematicalFailure
+    || left.numericalMismatch
+    || left.knownIncorrectFinalAnswer ? 0 : 1;
+  const rightMathSafety = right.affirmativeMathematicalFailure
+    || right.numericalMismatch
+    || right.knownIncorrectFinalAnswer ? 0 : 1;
+  if (leftMathSafety !== rightMathSafety) return rightMathSafety - leftMathSafety;
+  const leftNumerical = left.numericalAgreement ? 2 : left.numericalMismatch ? 0 : 1;
+  const rightNumerical = right.numericalAgreement ? 2 : right.numericalMismatch ? 0 : 1;
+  if (leftNumerical !== rightNumerical) return rightNumerical - leftNumerical;
+  const leftSeverity = (left.issueClassifications || []).reduce((total, issue) => (
+    total + (issue.severity === "presentation" ? 1 : issue.severity === "unsafe_structural" ? 10 : 100)
+  ), 0);
+  const rightSeverity = (right.issueClassifications || []).reduce((total, issue) => (
+    total + (issue.severity === "presentation" ? 1 : issue.severity === "unsafe_structural" ? 10 : 100)
+  ), 0);
+  if (leftSeverity !== rightSeverity) return leftSeverity - rightSeverity;
+  const leftCompleteness = Number(left.completeness?.score || 0);
+  const rightCompleteness = Number(right.completeness?.score || 0);
+  if (leftCompleteness !== rightCompleteness) return rightCompleteness - leftCompleteness;
+  return Number(SOLVE_CANDIDATE_STAGE_ORDER[right.source] || 0)
+    - Number(SOLVE_CANDIDATE_STAGE_ORDER[left.source] || 0);
+}
+
+export function selectBestSafeSolveCandidate(candidates = []) {
+  return candidates
+    .filter((candidate) => candidate?.fallbackEligible)
+    .sort(compareSafeSolveCandidates)[0] || null;
+}
+
+function canUseSafeFallbackForError(error = {}) {
+  return FALLBACK_PERMITTED_LATER_ERROR_CODES.has(error?.code);
+}
+
+function candidateDiagnostic(candidate = {}) {
+  return {
+    source: candidate.source || null,
+    parseSchemaSuccess: Boolean(candidate.parseSchemaSuccess),
+    qualityIssueCodes: candidate.qualityIssueCodes || [],
+    issueClassifications: (candidate.issueClassifications || []).map((issue) => ({
+      code: issue.code,
+      severity: issue.severity,
+      fallbackEligible: issue.fallbackEligible,
+    })),
+    affirmativeMathematicalFailure: Boolean(candidate.affirmativeMathematicalFailure),
+    knownIncorrectFinalAnswer: Boolean(candidate.knownIncorrectFinalAnswer),
+    numericalStatus: candidate.numericalStatus || null,
+    structuralRecovery: Boolean(candidate.structuralRecovery),
+    completenessScore: Number(candidate.completeness?.score || 0),
+    accepted: Boolean(candidate.accepted),
+    rejectionReason: candidate.rejectionReason || null,
+    fallbackEligible: Boolean(candidate.fallbackEligible),
+  };
+}
+
+function recordSolveCandidate(ledger, candidate, { requestId = "", endpoint = "" } = {}) {
+  if (!candidate?.result || !candidate.parseSchemaSuccess) return null;
+  ledger.push(candidate);
+  const diagnostic = candidateDiagnostic(candidate);
+  logSolveDebug("solve_candidate_recorded", { requestId, endpoint, ...diagnostic });
+  logSolveDebug(candidate.accepted ? "solve_candidate_accepted" : "solve_candidate_rejected", {
+    requestId,
+    endpoint,
+    ...diagnostic,
+  });
+  logSolveDebug("solve_candidate_fallback_eligibility", {
+    requestId,
+    endpoint,
+    source: candidate.source,
+    fallbackEligible: candidate.fallbackEligible,
+    reason: candidate.fallbackEligible ? "safe_fallback_floor_passed" : candidate.rejectionReason,
+    qualityIssueCodes: candidate.qualityIssueCodes,
+  });
+  return candidate;
+}
+
+function selectSafeFallbackAfterFailure(ledger, error, {
+  requestId = "",
+  endpoint = "",
+  failedStage = "",
+} = {}) {
+  const permittedError = canUseSafeFallbackForError(error);
+  const selected = permittedError ? selectBestSafeSolveCandidate(ledger) : null;
+  if (selected) {
+    logSolveDebug("solve_fallback_selected", {
+      requestId,
+      endpoint,
+      laterFailedStage: failedStage,
+      laterErrorCode: error?.code || null,
+      selectedCandidateSource: selected.source,
+      qualityIssueCodes: selected.qualityIssueCodes,
+    });
+    return selected;
+  }
+  logSolveDebug("solve_fallback_rejected", {
+    requestId,
+    endpoint,
+    laterFailedStage: failedStage,
+    laterErrorCode: error?.code || null,
+    reason: permittedError ? "no_safe_candidate" : "later_error_category_not_permitted",
+    candidateSources: ledger.map((candidate) => candidate.source),
+  });
+  return null;
+}
+
+function attachDegradedFallbackMetadata(result, metadata = {}) {
+  if (!result || typeof result !== "object") return result;
+  Object.defineProperty(result, "_omniDegradedFallback", {
+    enumerable: false,
+    configurable: true,
+    value: {
+      selected: true,
+      source: metadata.source || null,
+      failedLaterStage: metadata.failedLaterStage || null,
+      laterErrorCode: metadata.laterErrorCode || null,
+    },
+  });
+  return result;
+}
+
+export function decideSolveEscalation(error, { alreadyEscalated = false, afterRepairAttempt = false } = {}) {
   if (alreadyEscalated) {
     return {
       shouldEscalate: false,
@@ -921,18 +1226,30 @@ export function decideSolveEscalation(error, { alreadyEscalated = false } = {}) 
     isEscalationEligibleIssue(issue)
     && hasAffirmativeFailedEvaluation(error || {}, issue)
   ));
+  if (triggeringValidatorIssues.length > 0) {
+    return {
+      shouldEscalate: true,
+      reason: "affirmative_mathematical_validator_failure",
+      triggeringValidatorIssues,
+    };
+  }
+  const structuralRecoveryIssues = afterRepairAttempt
+    ? issues.filter(isStructuralRecoveryIssue)
+    : [];
+  if (structuralRecoveryIssues.length > 0) {
+    return {
+      shouldEscalate: true,
+      reason: "structural_recovery_after_failed_repair",
+      triggeringValidatorIssues: structuralRecoveryIssues,
+    };
+  }
   if (triggeringValidatorIssues.length === 0) {
     return {
       shouldEscalate: false,
-      reason: "no_affirmative_mathematical_invalidity",
+      reason: afterRepairAttempt ? "no_escalation_recovery_issue" : "no_affirmative_mathematical_invalidity",
       triggeringValidatorIssues: [],
     };
   }
-  return {
-    shouldEscalate: true,
-    reason: "affirmative_mathematical_validator_failure",
-    triggeringValidatorIssues,
-  };
 }
 
 function isSolutionQualityValidationError(error) {
@@ -1196,14 +1513,24 @@ function sendError(res, error) {
       apiHost: diagnostics.apiHost || null,
       model: diagnostics.model || null,
       modelPath: diagnostics.modelPath || null,
+      modelRole: diagnostics.modelRole || null,
+      solveMode: diagnostics.solveMode || null,
       purpose: diagnostics.purpose || null,
       maxAttempts: diagnostics.maxAttempts ?? null,
       timeoutMs: diagnostics.timeoutMs ?? null,
+      timeoutSource: diagnostics.timeoutSource || null,
+      timeoutConfigStatus: diagnostics.timeoutConfigStatus || null,
       transportAttempts: diagnostics.transportAttempts ?? null,
       successfulProviderResponses: diagnostics.successfulProviderResponses ?? null,
       retryCount: diagnostics.retryCount ?? null,
       finalInfrastructureErrorCode: diagnostics.finalInfrastructureErrorCode || error.networkCauseCode || null,
       finalInfrastructureFailureType: diagnostics.finalInfrastructureFailureType || null,
+      finalNormalizedErrorCode: diagnostics.finalNormalizedErrorCode || error.networkCauseCode || null,
+      finalLegacyNumericCode: diagnostics.finalLegacyNumericCode ?? error.networkLegacyNumericCode ?? null,
+      finalErrorName: diagnostics.finalErrorName || error.networkCauseName || null,
+      finalErrorMessage: diagnostics.finalErrorMessage || error.networkCauseMessage || null,
+      finalCauseChain: diagnostics.finalCauseChain || error.networkCauseChain || [],
+      finalTimeoutScope: diagnostics.finalTimeoutScope || null,
       attempts: Array.isArray(diagnostics.attempts)
         ? diagnostics.attempts.map((attempt) => ({
             attempt: attempt.attempt ?? null,
@@ -1212,6 +1539,12 @@ function sendError(res, error) {
             status: attempt.status ?? null,
             retryable: Boolean(attempt.retryable),
             errorCode: attempt.errorCode || null,
+            normalizedErrorCode: attempt.normalizedErrorCode || attempt.errorCode || null,
+            legacyNumericCode: attempt.legacyNumericCode ?? null,
+            errorName: attempt.errorName || null,
+            errorMessage: attempt.errorMessage || null,
+            causeChain: attempt.causeChain || [],
+            timeoutScope: attempt.timeoutScope || null,
             failureType: attempt.failureType || null,
           }))
         : [],
@@ -1846,6 +2179,7 @@ async function getUsageForKind(req, kind, identity) {
 }
 
 function buildResponse(result, { usage, saved, source, demoMode, canonicalProblem = null }) {
+  const degradedFallback = result?._omniDegradedFallback || null;
   return {
     ...result,
     canonicalProblem: canonicalProblem || result.canonicalProblem || null,
@@ -1856,6 +2190,11 @@ function buildResponse(result, { usage, saved, source, demoMode, canonicalProble
       source,
       demoMode,
       saveWarning: saved?.warning || null,
+      ...(degradedFallback?.selected ? {
+        degradedFallback: true,
+        degradedFallbackSource: degradedFallback.source || null,
+        failedLaterStage: degradedFallback.failedLaterStage || null,
+      } : {}),
     },
   };
 }
@@ -2670,6 +3009,40 @@ export async function handleSolveExtractedProblemRequest(req, res) {
         escalationSuccess: false,
         finalFailure: false,
       };
+      const candidateLedger = [];
+      let degradedFallbackMetadata = null;
+      const candidateContext = {
+        requestId,
+        endpoint: "/api/solve-extracted-problem",
+      };
+      const retainCandidate = ({
+        resolvedSource,
+        candidateResult,
+        error = null,
+        accepted = !error,
+      }) => recordSolveCandidate(candidateLedger, classifySolveCandidate({
+        source: resolvedSource,
+        result: candidateResult,
+        error,
+        parseSchemaSuccess: Boolean(candidateResult),
+        accepted,
+      }), candidateContext);
+      const adoptSafeFallback = (selected, laterError, failedLaterStage, totalUsage, totalCallCount) => {
+        if (!selected) return false;
+        result = selected.result;
+        accumulatedAiUsage = totalUsage;
+        accumulatedAiCallCount = totalCallCount;
+        degradedFallbackMetadata = {
+          source: selected.source,
+          failedLaterStage,
+          laterErrorCode: laterError?.code || null,
+        };
+        attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
+        attachDegradedFallbackMetadata(result, degradedFallbackMetadata);
+        source = `live AI ${selected.source} degraded fallback`;
+        solveMetrics.finalFailure = false;
+        return true;
+      };
 
       try {
         if (result) {
@@ -2685,6 +3058,8 @@ export async function handleSolveExtractedProblemRequest(req, res) {
           if (!isOpenAiConfigured()) {
             throw createOpenAiRequiredError();
           }
+          let initialCandidateResult = null;
+          let initialResolvedSource = "initial";
           try {
             result = await createMathExplanation({
               prompt,
@@ -2714,9 +3089,16 @@ export async function handleSolveExtractedProblemRequest(req, res) {
             accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
             accumulatedAiCallCount += aiCallCountFrom(result);
             attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
+            initialResolvedSource = candidateSource("initial", result);
             traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM solve response");
             result = applyLocalRulesToExplanation(result);
+            initialCandidateResult = result;
             validateSolutionQualityWithDebug(result, { problem: problemLatex, requestId, stage: "live-ai-initial" });
+            retainCandidate({
+              resolvedSource: initialResolvedSource,
+              candidateResult: initialCandidateResult,
+              accepted: true,
+            });
             solveMetrics.initialSuccess = true;
             source = "live AI call";
           } catch (firstError) {
@@ -2731,6 +3113,14 @@ export async function handleSolveExtractedProblemRequest(req, res) {
             accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(firstError));
             accumulatedAiCallCount += aiCallCountFrom(firstError);
             const initialInvalidResult = result;
+            if (isSolutionQualityValidationError(firstError) && initialCandidateResult) {
+              retainCandidate({
+                resolvedSource: initialResolvedSource,
+                candidateResult: initialCandidateResult,
+                error: firstError,
+                accepted: false,
+              });
+            }
             const repairIssues = firstError.solutionIssues || [firstError.code || firstError.message];
             const repairFeedback = buildRepairFeedbackDetails(repairIssues, {
               error: firstError,
@@ -2768,6 +3158,8 @@ export async function handleSolveExtractedProblemRequest(req, res) {
               repairPromptHash: hashDebugText(repairPrompt),
             });
             const repairPromptHash = hashDebugText(repairPrompt);
+            let repairCandidateResult = null;
+            let repairResolvedSource = "repair";
             try {
               result = await createMathExplanation({
                 prompt: repairPrompt,
@@ -2798,16 +3190,31 @@ export async function handleSolveExtractedProblemRequest(req, res) {
               accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
               accumulatedAiCallCount += aiCallCountFrom(result);
               attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
+              repairResolvedSource = candidateSource("repair", result);
               traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM repair solve response");
               result = applyLocalRulesToExplanation(result);
+              repairCandidateResult = result;
               validateSolutionQualityWithDebug(result, { problem: problemLatex, requestId, stage: "live-ai-repair" });
+              retainCandidate({
+                resolvedSource: repairResolvedSource,
+                candidateResult: repairCandidateResult,
+                accepted: true,
+              });
               solveMetrics.repairSuccess = true;
               source = "live AI repair call";
             } catch (repairError) {
+              if (isSolutionQualityValidationError(repairError) && repairCandidateResult) {
+                retainCandidate({
+                  resolvedSource: repairResolvedSource,
+                  candidateResult: repairCandidateResult,
+                  error: repairError,
+                  accepted: false,
+                });
+              }
               const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(repairError));
               const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(repairError);
               attachAccumulatedAiUsage(repairError, failureUsage, failureCallCount);
-              const escalationDecision = decideSolveEscalation(repairError);
+              const escalationDecision = decideSolveEscalation(repairError, { afterRepairAttempt: true });
               if (escalationDecision.shouldEscalate) {
                 solveMetrics.escalationAttempted = true;
                 const escalationModel = getOpenAiModelForPath("escalation");
@@ -2859,7 +3266,9 @@ export async function handleSolveExtractedProblemRequest(req, res) {
                 const escalationPromptHash = hashDebugText(escalationPrompt);
                 let escalationAttemptUsage = null;
                 let escalationAttemptCallCount = 0;
-                logSolveDebug("escalation_retry", {
+                let escalationCandidateResult = null;
+                let escalationResolvedSource = "escalation";
+                logSolveDebug(escalationDecision.reason === "structural_recovery_after_failed_repair" ? "structural_recovery_retry" : "escalation_retry", {
                   requestId,
                   endpoint: "/api/solve-extracted-problem",
                   reason: escalationDecision.reason,
@@ -2877,7 +3286,9 @@ export async function handleSolveExtractedProblemRequest(req, res) {
                       endpoint: "/api/solve-extracted-problem",
                       normalizedProblem: problemLatex,
                       promptHash: escalationPromptHash,
-                      retryPurpose: "quality-escalation",
+                      retryPurpose: escalationDecision.reason === "structural_recovery_after_failed_repair"
+                        ? "quality-structural-recovery"
+                        : "quality-escalation",
                       attemptType: "escalation",
                     },
                     onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
@@ -2901,9 +3312,23 @@ export async function handleSolveExtractedProblemRequest(req, res) {
                   accumulatedAiUsage = mergeOpenAiUsageValues(failureUsage, escalationAttemptUsage);
                   accumulatedAiCallCount = failureCallCount + escalationAttemptCallCount;
                   attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-                  traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM escalated solve response");
+                  escalationResolvedSource = candidateSource("escalation", result);
+                  traceMathStage(
+                    "Explanation generation",
+                    problemLatex,
+                    result.expression || result.problem || "",
+                    escalationDecision.reason === "structural_recovery_after_failed_repair"
+                      ? "LLM structural recovery solve response"
+                      : "LLM escalated solve response"
+                  );
                   result = applyLocalRulesToExplanation(result);
+                  escalationCandidateResult = result;
                   validateSolutionQualityWithDebug(result, { problem: problemLatex, requestId, stage: "live-ai-escalation" });
+                  retainCandidate({
+                    resolvedSource: escalationResolvedSource,
+                    candidateResult: escalationCandidateResult,
+                    accepted: true,
+                  });
                   solveMetrics.escalationSuccess = true;
                   logSolveDebug("solve_metrics", {
                     requestId,
@@ -2915,14 +3340,36 @@ export async function handleSolveExtractedProblemRequest(req, res) {
                     escalationModel,
                     escalationElapsedMs: Date.now() - escalationStartedAt,
                   });
-                  source = "live AI escalation call";
+                  source = escalationDecision.reason === "structural_recovery_after_failed_repair"
+                    ? "live AI structural recovery call"
+                    : "live AI escalation call";
                 } catch (escalationError) {
+                  if (isSolutionQualityValidationError(escalationError) && escalationCandidateResult) {
+                    retainCandidate({
+                      resolvedSource: escalationResolvedSource,
+                      candidateResult: escalationCandidateResult,
+                      error: escalationError,
+                      accepted: false,
+                    });
+                  }
                   const failedAttemptUsage = aiUsageFrom(escalationError) || escalationAttemptUsage;
                   const failedAttemptCallCount = aiCallCountFrom(escalationError) || escalationAttemptCallCount;
                   const escalationUsage = mergeOpenAiUsageValues(failureUsage, failedAttemptUsage);
                   const escalationCallCount = failureCallCount + failedAttemptCallCount;
                   attachAccumulatedAiUsage(escalationError, escalationUsage, escalationCallCount);
-                  solveMetrics.finalFailure = true;
+                  const failedEscalationStage = failedCandidateStage("escalation", escalationError);
+                  const selectedFallback = selectSafeFallbackAfterFailure(candidateLedger, escalationError, {
+                    ...candidateContext,
+                    failedStage: failedEscalationStage,
+                  });
+                  const fallbackAdopted = adoptSafeFallback(
+                    selectedFallback,
+                    escalationError,
+                    failedEscalationStage,
+                    escalationUsage,
+                    escalationCallCount,
+                  );
+                  solveMetrics.finalFailure = !fallbackAdopted;
                   const escalationElapsedMs = Date.now() - escalationStartedAt;
                   logSolveDebug("solve_metrics", {
                     requestId,
@@ -2969,10 +3416,22 @@ export async function handleSolveExtractedProblemRequest(req, res) {
                     },
                     previousResult: initialInvalidResult,
                   });
-                  throw escalationError;
+                  if (!fallbackAdopted) throw escalationError;
                 }
               } else {
-                solveMetrics.finalFailure = true;
+                const failedRepairStage = failedCandidateStage("repair", repairError);
+                const selectedFallback = selectSafeFallbackAfterFailure(candidateLedger, repairError, {
+                  ...candidateContext,
+                  failedStage: failedRepairStage,
+                });
+                const fallbackAdopted = adoptSafeFallback(
+                  selectedFallback,
+                  repairError,
+                  failedRepairStage,
+                  failureUsage,
+                  failureCallCount,
+                );
+                solveMetrics.finalFailure = !fallbackAdopted;
                 logSolveDebug("solve_metrics", {
                   requestId,
                   endpoint: "/api/solve-extracted-problem",
@@ -2984,39 +3443,44 @@ export async function handleSolveExtractedProblemRequest(req, res) {
               if (escalationDecision.shouldEscalate) {
                 // Escalation succeeded and result/source have been updated.
               } else {
-              await captureSolveQualityFailure({
-                error: repairError,
-                result,
-                stage: "repair",
-                requestId,
-                endpoint: "/api/solve-extracted-problem",
-                prompt: repairPrompt,
-                promptHash: repairPromptHash,
-                problem: problemLatex,
-                problemText,
-                canonicalProblem,
-                canonicalDisplayText,
-                canonicalDisplaySource,
-                canonicalMathInput,
-                canonicalMathInputSource,
-                extraction,
-                repairAttempted: true,
-                repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
+                await captureSolveQualityFailure({
                   error: repairError,
+                  result,
+                  stage: "repair",
+                  requestId,
+                  endpoint: "/api/solve-extracted-problem",
+                  prompt: repairPrompt,
+                  promptHash: repairPromptHash,
+                  problem: problemLatex,
+                  problemText,
+                  canonicalProblem,
+                  canonicalDisplayText,
+                  canonicalDisplaySource,
+                  canonicalMathInput,
+                  canonicalMathInputSource,
+                  extraction,
+                  repairAttempted: true,
+                  repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
+                    error: repairError,
+                    previousResult: initialInvalidResult,
+                    currentResult: result,
+                  }),
                   previousResult: initialInvalidResult,
-                  currentResult: result,
-                }),
-                previousResult: initialInvalidResult,
-              });
-              throw repairError;
+                });
+                if (!degradedFallbackMetadata) throw repairError;
               }
             }
           }
         }
-        validateSolutionQualityWithDebug(result, { problem: problemLatex, requestId, stage: "pre-annotation-final" });
+        if (!degradedFallbackMetadata) {
+          validateSolutionQualityWithDebug(result, { problem: problemLatex, requestId, stage: "pre-annotation-final" });
+        }
         const beforeAnnotation = result.expression || result.problem || problemLatex;
         result = annotateMathExplanation(result);
         attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
+        if (degradedFallbackMetadata) {
+          attachDegradedFallbackMetadata(result, degradedFallbackMetadata);
+        }
         traceMathStage("Tokenization", beforeAnnotation, result.expression || result.problem || "", "annotate explanation tokens/chunks");
         result.imageSource = {
           ...(extraction.imageSource || {}),

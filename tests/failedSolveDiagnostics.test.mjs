@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
+import {
+  classifySolveCandidate,
+  compareSafeSolveCandidates,
+  decideSolveEscalation,
+  selectBestSafeSolveCandidate,
+} from "../server/app.js";
 
 const repoRoot = process.cwd();
 const appUrl = pathToFileURL(join(repoRoot, "server", "app.js")).href;
@@ -44,6 +50,24 @@ function openAiBody(outputText, extra = {}) {
     },
     ...extra,
   };
+}
+
+function truncatedOpenAiBody(marker = "truncated", outputTokens = 6500) {
+  return openAiBody(undefined, {
+    id: `resp_${marker}`,
+    status: "incomplete",
+    incomplete_details: { reason: "max_output_tokens" },
+    output: [
+      { type: "reasoning", id: `reasoning_${marker}`, summary: [] },
+      { type: "message", id: `message_${marker}`, role: "assistant", content: [] },
+    ],
+    usage: {
+      input_tokens: 40,
+      output_tokens: outputTokens,
+      total_tokens: 40 + outputTokens,
+      output_tokens_details: { reasoning_tokens: outputTokens },
+    },
+  });
 }
 
 function jsonResponse(payload) {
@@ -186,6 +210,59 @@ function concisePassingIntegralOutput() {
     ],
     finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
     numericCheck: "0.7546938294602481",
+  });
+}
+
+function fallbackSafePresentationIntegralOutput(marker = "fallback-safe", { compact = false, extraReasoning = "" } = {}) {
+  const response = {
+    title: `Integral value ${marker}`,
+    problemLatex: regressionIntegralLatex,
+    steps: [
+      {
+        id: `${marker}-final`,
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: `A verified evaluation gives the stated positive value. The presentation note \\(G\\) is not used in any equation. ${extraReasoning}`.trim(),
+        anchors: [],
+      },
+    ],
+  };
+  if (!compact) {
+    response.finalAnswerLatex = "\\frac{\\pi}{2}\\ln^2 2";
+    response.numericCheck = "0.7546938294602481";
+  }
+  return JSON.stringify(response);
+}
+
+function compactPassingIntegralOutput(marker = "compact-valid") {
+  return JSON.stringify({
+    title: `Integral value ${marker}`,
+    problemLatex: regressionIntegralLatex,
+    steps: [
+      {
+        id: `${marker}-final`,
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi}{2}\\ln^2 2",
+        reasoning: "A verified evaluation gives the stated positive value.",
+        anchors: [],
+      },
+    ],
+  });
+}
+
+function compactWrongPiCubedIntegralOutput(marker = "compact-wrong") {
+  return JSON.stringify({
+    title: `Wrong integral value ${marker}`,
+    problemLatex: regressionIntegralLatex,
+    steps: [
+      {
+        id: `${marker}-final`,
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi^3}{12}",
+        reasoning: "State a numerically incorrect value.",
+        anchors: [],
+      },
+    ],
   });
 }
 
@@ -628,6 +705,9 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
     OPENAI_MODEL: process.env.OPENAI_MODEL,
     OPENAI_SOLVER_MODEL: process.env.OPENAI_SOLVER_MODEL,
     OPENAI_ESCALATION_MODEL: process.env.OPENAI_ESCALATION_MODEL,
+    OMNIMATH_SOLVER_MODEL: process.env.OMNIMATH_SOLVER_MODEL,
+    OMNIMATH_REPAIR_MODEL: process.env.OMNIMATH_REPAIR_MODEL,
+    OMNIMATH_ESCALATION_MODEL: process.env.OMNIMATH_ESCALATION_MODEL,
     OMNIMATH_CAPTURE_FAILED_SOLVES: process.env.OMNIMATH_CAPTURE_FAILED_SOLVES,
     DATABASE_URL: process.env.DATABASE_URL,
     POSTGRES_URL: process.env.POSTGRES_URL,
@@ -655,6 +735,9 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
   process.env.OPENAI_MODEL = "test-solver-model";
   process.env.OPENAI_SOLVER_MODEL = "test-solver-model";
   process.env.OPENAI_ESCALATION_MODEL = "test-escalation-model";
+  process.env.OMNIMATH_SOLVER_MODEL = "test-solver-model";
+  process.env.OMNIMATH_REPAIR_MODEL = "test-solver-model";
+  process.env.OMNIMATH_ESCALATION_MODEL = "test-escalation-model";
   process.env.OMNIMATH_CAPTURE_FAILED_SOLVES = capture ? "1" : "";
   process.env.DATABASE_URL = "";
   process.env.POSTGRES_URL = "";
@@ -744,6 +827,33 @@ async function invokeSolve(handler, {
 }
 
 describe("failed solve diagnostics", () => {
+  it("does not escalate structural failures before normal repair", () => {
+    const decision = decideSolveEscalation({
+      message: "Solution failed quality validation.",
+      solutionIssues: ["strict_generated_latex", "unexplained_generated_symbol:\\theta"],
+      solutionRuleEvaluations: [
+        { result: "fail", name: "strict_generated_latex", issue: "strict_generated_latex" },
+      ],
+    });
+
+    assert.equal(decision.shouldEscalate, false);
+    assert.equal(decision.reason, "no_affirmative_mathematical_invalidity");
+  });
+
+  it("escalates numerical mismatch validator failures", () => {
+    const decision = decideSolveEscalation({
+      message: "Solution failed quality validation.",
+      solutionIssues: ["numerical_final_answer_mismatch"],
+      solutionRuleEvaluations: [
+        { result: "fail", name: "numerical_final_answer_mismatch", issue: "numerical_final_answer_mismatch" },
+      ],
+    });
+
+    assert.equal(decision.shouldEscalate, true);
+    assert.equal(decision.reason, "affirmative_mathematical_validator_failure");
+    assert.deepEqual(decision.triggeringValidatorIssues, ["numerical_final_answer_mismatch"]);
+  });
+
   it("does not create an artifact when capture is unset", async () => {
     await withRuntime({ capture: false }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       globalThis.fetch = async () => jsonResponse(openAiBody(invalidSolveOutput("uncaptured")));
@@ -1013,7 +1123,7 @@ describe("failed solve diagnostics", () => {
     });
   });
 
-  it("records undefined Bernoulli and coefficient notation without summation-index false positives", async () => {
+  it("records undefined Bernoulli and coefficient notation before structural recovery", async () => {
     await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       const outputs = [
         wrongPiCubedIntegralOutput(),
@@ -1037,10 +1147,12 @@ describe("failed solve diagnostics", () => {
       const artifacts = await readArtifacts(cwd);
       const repair = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
 
-      assert.equal(response.statusCode, 502);
-      assert.equal(body.code, "AI_SOLUTION_QUALITY_INVALID");
-      assert.equal(requests.length, 2);
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.equal(body.runtime.source, "live AI structural recovery call");
       assert.ok(repair);
+      assert.equal(repair.body.validation.repairFeedback.escalation.reason, "structural_recovery_after_failed_repair");
       assert.ok(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:B"));
       assert.ok(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:C"));
       assert.equal(repair.body.validation.solutionIssues.includes("unexplained_generated_symbol:n"), false);
@@ -1205,6 +1317,78 @@ describe("failed solve diagnostics", () => {
       assert.match(repairPrompt, /\\frac\{\\pi\}\{2\}\\ln\^2 2/);
       assert.doesNotMatch(repairPrompt, /Reconstruct the solution from scratch/);
       assert.doesNotMatch(repairPrompt, /Assume the previous derivation is mathematically unreliable/);
+    });
+  });
+
+  it("uses exactly one stronger recovery attempt after failed structural repair", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        structurallyInvalidThetaIntegralOutput(),
+        structurallyInvalidThetaIntegralOutput(),
+        structurallyRepairedThetaIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        requests.push(payload);
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-structural-recovery",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+        canonicalTextValue: regressionIntegralProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const stages = artifacts.map((artifact) => artifact.body.metadata.failureStage).sort();
+      const repairArtifact = artifacts.find((artifact) => artifact.body.metadata.failureStage === "repair");
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[0].model, "test-solver-model");
+      assert.equal(requests[1].model, "test-solver-model");
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.equal(body.runtime.source, "live AI structural recovery call");
+      assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
+      assert.deepEqual(stages, ["initial", "repair"]);
+      assert.equal(repairArtifact.body.validation.repairFeedback.escalation.reason, "structural_recovery_after_failed_repair");
+      assert.ok(repairArtifact.body.validation.repairFeedback.escalation.triggeringValidatorIssues.includes("unexplained_generated_symbol:\\theta"));
+    });
+  });
+
+  it("throws when the stronger structural recovery result is still invalid", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        structurallyInvalidThetaIntegralOutput(),
+        structurallyInvalidThetaIntegralOutput(),
+        structurallyInvalidThetaIntegralOutput(),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "diag-structural-recovery-fails",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralProblem,
+        canonicalTextValue: regressionIntegralProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+      const artifacts = await readArtifacts(cwd);
+      const stages = artifacts.map((artifact) => artifact.body.metadata.failureStage).sort();
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(body.code, "AI_SOLUTION_QUALITY_INVALID");
+      assert.equal(requests.length, 3);
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.deepEqual(stages, ["escalation", "initial", "repair"]);
+      assert.ok(body.solutionIssues.includes("unexplained_generated_symbol:\\theta"));
     });
   });
 
@@ -1919,6 +2103,229 @@ describe("failed solve diagnostics", () => {
       assert.equal(body.solutionValidationContext, undefined);
       assert.equal(artifacts.length, 0);
     });
+  });
+
+  it("returns a valid repair compact candidate without escalating", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const responses = [
+        openAiBody(wrongPiCubedIntegralOutput()),
+        truncatedOpenAiBody("repair-full-valid-compact"),
+        openAiBody(compactPassingIntegralOutput()),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(responses.shift());
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "fallback-valid-repair-compact",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[2].text.format.name, "math_compact_solve");
+      assert.ok(requests.every((request) => request.model !== "test-escalation-model"));
+      assert.equal(body.runtime.source, "live AI repair call");
+      assert.equal(body.runtime.degradedFallback, undefined);
+      assert.equal(body.finalAnswerLatex, "I=\\frac{\\pi}{2}\\ln^2 2");
+    });
+  });
+
+  it("escalates when a repair compact candidate has an affirmative mathematical failure", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const responses = [
+        openAiBody(wrongPiCubedIntegralOutput("initial")),
+        truncatedOpenAiBody("repair-full-math-failure"),
+        openAiBody(compactWrongPiCubedIntegralOutput()),
+        openAiBody(concisePassingIntegralOutput()),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(responses.shift());
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "fallback-repair-compact-math-failure",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 4);
+      assert.equal(requests[3].model, "test-escalation-model");
+      assert.equal(response.json().runtime.source, "live AI escalation call");
+    });
+  });
+
+  it("returns a structurally safe repair compact fallback after escalation truncates", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const responses = [
+        openAiBody(wrongPiCubedIntegralOutput()),
+        truncatedOpenAiBody("repair-full-safe"),
+        openAiBody(fallbackSafePresentationIntegralOutput("repair-compact-safe", { compact: true })),
+        truncatedOpenAiBody("escalation-full-safe"),
+        truncatedOpenAiBody("escalation-compact-safe"),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(responses.shift());
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "fallback-repair-compact-safe",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 5);
+      assert.equal(body.runtime.degradedFallback, true);
+      assert.equal(body.runtime.degradedFallbackSource, "repair-compact");
+      assert.equal(body.runtime.failedLaterStage, "escalation-compact");
+      assert.equal(body.runtime.source, "live AI repair-compact degraded fallback");
+      assert.equal(body.usage.settlement.providerCalls, 5);
+      assert.equal(body.finalAnswerLatex, "I=\\frac{\\pi}{2}\\ln^2 2");
+    });
+  });
+
+  it("does not return a numerically mismatched repair compact candidate after escalation truncates", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const responses = [
+        openAiBody(wrongPiCubedIntegralOutput()),
+        truncatedOpenAiBody("repair-full-numeric"),
+        openAiBody(compactWrongPiCubedIntegralOutput()),
+        truncatedOpenAiBody("escalation-full-numeric"),
+        truncatedOpenAiBody("escalation-compact-numeric"),
+      ];
+      globalThis.fetch = async () => jsonResponse(responses.shift());
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "fallback-reject-numeric",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(body.code, "AI_RESPONSE_TRUNCATED");
+      assert.equal(body.runtime, undefined);
+    });
+  });
+
+  it("selects the safer earlier structural candidate instead of using route order", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const responses = [
+        openAiBody(fallbackSafePresentationIntegralOutput("initial-safe")),
+        truncatedOpenAiBody("repair-full-two-symbols"),
+        openAiBody(fallbackSafePresentationIntegralOutput("repair-compact-two-symbols", {
+          compact: true,
+          extraReasoning: "A second presentation note \\(H\\) is also unused.",
+        })),
+        truncatedOpenAiBody("escalation-full-ranking"),
+        truncatedOpenAiBody("escalation-compact-ranking"),
+      ];
+      globalThis.fetch = async () => jsonResponse(responses.shift());
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "fallback-ranking-earlier-safer",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const body = response.json();
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(body.runtime.degradedFallback, true);
+      assert.equal(body.runtime.degradedFallbackSource, "initial");
+      assert.equal(body.runtime.failedLaterStage, "escalation-compact");
+      assert.equal(body.usage.settlement.providerCalls, 5);
+    });
+  });
+
+  it("ranks candidate mathematical safety ahead of cosmetics, completeness, and stage order", () => {
+    const safeEarlier = {
+      source: "initial",
+      fallbackEligible: true,
+      affirmativeMathematicalFailure: false,
+      numericalMismatch: false,
+      numericalAgreement: true,
+      issueClassifications: [
+        { code: "presentation:a", severity: "presentation" },
+        { code: "presentation:b", severity: "presentation" },
+      ],
+      completeness: { score: 2 },
+    };
+    const unsafeLater = {
+      source: "escalation-compact",
+      fallbackEligible: true,
+      affirmativeMathematicalFailure: true,
+      numericalMismatch: false,
+      numericalAgreement: true,
+      issueClassifications: [],
+      completeness: { score: 10 },
+    };
+
+    assert.ok(compareSafeSolveCandidates(safeEarlier, unsafeLater) < 0);
+    assert.equal(selectBestSafeSolveCandidate([unsafeLater, safeEarlier]), safeEarlier);
+  });
+
+  it("classifies malformed and equation-field symbol candidates below the fallback floor", () => {
+    const result = {
+      finalAnswerLatex: "I=1",
+      steps: [{ math: "I=G", summary: "Use an undefined equation symbol." }],
+    };
+    const equationSymbolError = {
+      solutionIssues: ["unexplained_generated_symbol:G"],
+      solutionRuleEvaluations: [{
+        result: "fail",
+        name: "unexplained_generated_symbol",
+        issue: "unexplained_generated_symbol:G",
+        inputFields: ["steps[0].math"],
+        failureEvidence: JSON.stringify({
+          symbol: "G",
+          fieldPath: "steps[0].math",
+          sourceType: "math",
+          classification: "undefined_free_symbol",
+        }),
+      }],
+    };
+
+    const equationCandidate = classifySolveCandidate({
+      source: "repair-compact",
+      result,
+      error: equationSymbolError,
+      parseSchemaSuccess: true,
+      accepted: false,
+    });
+    const malformedCandidate = classifySolveCandidate({
+      source: "repair",
+      result: null,
+      error: { code: "AI_RESPONSE_INVALID" },
+      parseSchemaSuccess: false,
+      accepted: false,
+    });
+
+    assert.equal(equationCandidate.fallbackEligible, false);
+    assert.equal(equationCandidate.rejectionReason, "quality_rejected_not_fallback_safe");
+    assert.equal(malformedCandidate.fallbackEligible, false);
+    assert.equal(malformedCandidate.rejectionReason, "parse_or_schema_failed");
+    assert.equal(selectBestSafeSolveCandidate([equationCandidate, malformedCandidate]), null);
   });
 
   it("does not capture sensitive headers or environment values", async () => {

@@ -109,6 +109,49 @@ function transientFetchError(code, message = code) {
   });
 }
 
+function responseWithoutText({
+  id = "resp_no_text",
+  model = "gpt-5.6-luna",
+  status = "completed",
+  incompleteReason = null,
+  refusal = "",
+  usage = {
+    input_tokens: 12,
+    output_tokens: 34,
+    total_tokens: 46,
+    output_tokens_details: { reasoning_tokens: 30 },
+  },
+} = {}) {
+  const output = refusal
+    ? [{
+        id: "msg_refusal",
+        type: "message",
+        status,
+        content: [{ type: "refusal", refusal }],
+      }]
+    : [{
+        id: "rs_reasoning",
+        type: "reasoning",
+        status,
+        summary: [{ type: "summary_text", text: "sensitive reasoning must not be diagnosed" }],
+      }, {
+        id: "msg_metadata",
+        type: "message",
+        status,
+        content: [{ type: "diagnostic_metadata", data: "sensitive content must not be diagnosed" }],
+      }];
+
+  return {
+    id,
+    object: "response",
+    model,
+    status,
+    output,
+    usage,
+    ...(incompleteReason ? { incomplete_details: { reason: incompleteReason } } : {}),
+  };
+}
+
 describe("openai JSON parsing", () => {
   it("parses valid JSON", () => {
     const parsed = parseJsonResponse(body('{"title":"Ok"}'), assertObject);
@@ -169,8 +212,219 @@ describe("openai JSON parsing", () => {
 });
 
 describe("createMathExplanation compact fallback", () => {
+  it("preserves max-output reasoning-only diagnostics when the compact retry also fails", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalModel = process.env.OMNIMATH_SOLVER_MODEL;
+    process.env.OMNIMATH_SOLVER_MODEL = "gpt-5.6-luna";
+    const requests = [];
+    const capturedFailures = [];
+    globalThis.fetch = async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      if (requests.length === 1) {
+        return jsonResponse(200, responseWithoutText({
+          id: "resp_reasoning_incomplete",
+          status: "incomplete",
+          incompleteReason: "max_output_tokens",
+          usage: {
+            input_tokens: 101,
+            output_tokens: 6500,
+            total_tokens: 6601,
+            output_tokens_details: { reasoning_tokens: 6500 },
+          },
+        }));
+      }
+      return jsonResponse(200, responseWithoutText({
+        id: "resp_compact_no_text",
+        usage: {
+          input_tokens: 55,
+          output_tokens: 21,
+          total_tokens: 76,
+          output_tokens_details: { reasoning_tokens: 20 },
+        },
+      }));
+    };
+
+    try {
+      let finalError;
+      await assert.rejects(
+        createMathExplanation({
+          prompt: "Solve x+1=2",
+          originalProblem: "x+1=2",
+          debugContext: { requestId: "reasoning-only-max-output" },
+          onGeneratedResponseFailure(details) {
+            capturedFailures.push(details);
+          },
+        }),
+        (error) => {
+          finalError = error;
+          return true;
+        }
+      );
+
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].text.format.name, "math_compact_solve");
+      assert.equal(capturedFailures.length, 2);
+
+      const initialError = capturedFailures[0].error;
+      const initialDiagnostics = initialError._omniOpenAiDiagnostics;
+      assert.equal(initialError.code, "AI_RESPONSE_TRUNCATED");
+      assert.equal(initialError.responseFailureType, "truncated");
+      assert.notEqual(initialError.code, "AI_RESPONSE_INVALID");
+      assert.equal(initialError._aiCallCount, 1);
+      assert.equal(initialError._aiUsage.total_tokens, 6601);
+      assert.equal(initialDiagnostics.requestId, "reasoning-only-max-output");
+      assert.equal(initialDiagnostics.responseId, "resp_reasoning_incomplete");
+      assert.equal(initialDiagnostics.responseModel, "gpt-5.6-luna");
+      assert.equal(initialDiagnostics.responseStatus, "incomplete");
+      assert.equal(initialDiagnostics.providerHttpStatus, 200);
+      assert.equal(initialDiagnostics.incompleteReason, "max_output_tokens");
+      assert.equal(initialDiagnostics.providerCallCount, 1);
+      assert.deepEqual(initialDiagnostics.responseShape.outputItemTypes, ["reasoning", "message"]);
+      assert.deepEqual(initialDiagnostics.responseShape.contentItemTypes, ["diagnostic_metadata"]);
+      assert.equal(initialDiagnostics.responseShape.outputTextPresent, false);
+      assert.equal(initialDiagnostics.responseShape.refusalPresent, false);
+
+      assert.equal(finalError.code, "AI_RESPONSE_INVALID");
+      assert.equal(finalError.responseFailureType, "missing_text");
+      assert.equal(finalError._aiCallCount, 2);
+      assert.equal(finalError._aiUsage.total_tokens, 6677);
+      assert.equal(finalError._omniOpenAiDiagnostics.requestId, "reasoning-only-max-output");
+      assert.equal(finalError._omniOpenAiDiagnostics.responseId, "resp_compact_no_text");
+      assert.equal(finalError._omniOpenAiDiagnostics.providerCallCount, 1);
+      assert.equal(finalError._omniOpenAiDiagnostics.responseShape.outputTextPresent, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalModel === undefined) delete process.env.OMNIMATH_SOLVER_MODEL;
+      else process.env.OMNIMATH_SOLVER_MODEL = originalModel;
+    }
+  });
+
+  it("retains redacted diagnostics for an unclassified successful no-text response", async () => {
+    const originalFetch = globalThis.fetch;
+    const responseBody = responseWithoutText({ id: "resp_unclassified_no_text" });
+    globalThis.fetch = async () => jsonResponse(200, responseBody);
+
+    try {
+      let failure;
+      await assert.rejects(
+        createMathExplanation({
+          prompt: "Solve x+1=2",
+          originalProblem: "x+1=2",
+          image: {
+            filename: "redacted.png",
+            contentType: "image/png",
+            buffer: Buffer.from([0]),
+          },
+          debugContext: { requestId: "unclassified-no-text" },
+        }),
+        (error) => {
+          failure = error;
+          return error.code === "AI_RESPONSE_INVALID";
+        }
+      );
+
+      const diagnostics = failure._omniOpenAiDiagnostics;
+      const serializedShape = JSON.stringify(diagnostics.responseShape);
+      assert.equal(failure.responseFailureType, "missing_text");
+      assert.equal(failure._aiCallCount, 1);
+      assert.equal(failure._aiUsage.total_tokens, 46);
+      assert.equal(diagnostics.requestId, "unclassified-no-text");
+      assert.equal(diagnostics.responseId, "resp_unclassified_no_text");
+      assert.equal(diagnostics.responseModel, "gpt-5.6-luna");
+      assert.equal(diagnostics.responseStatus, "completed");
+      assert.equal(diagnostics.providerHttpStatus, 200);
+      assert.equal(diagnostics.providerCallCount, 1);
+      assert.deepEqual(diagnostics.responseShape.outputItemTypes, ["reasoning", "message"]);
+      assert.deepEqual(diagnostics.responseShape.contentItemTypes, ["diagnostic_metadata"]);
+      assert.equal(diagnostics.responseShape.outputTextPresent, false);
+      assert.equal(diagnostics.responseShape.outputTextType, null);
+      assert.equal(diagnostics.responseShape.refusalPresent, false);
+      assert.equal(Object.hasOwn(diagnostics, "promptText"), false);
+      assert.equal(Object.hasOwn(diagnostics, "modelInputMessages"), false);
+      assert.doesNotMatch(serializedShape, /sensitive reasoning/);
+      assert.doesNotMatch(serializedShape, /sensitive content/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("classifies a no-text refusal before the generic missing-text failure", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => jsonResponse(200, responseWithoutText({
+      id: "resp_refusal",
+      refusal: "The request was declined.",
+    }));
+
+    try {
+      let failure;
+      await assert.rejects(
+        createMathExplanation({
+          prompt: "Solve x+1=2",
+          originalProblem: "x+1=2",
+          debugContext: { requestId: "refusal-no-text" },
+        }),
+        (error) => {
+          failure = error;
+          return error.code === "AI_REQUEST_REFUSED";
+        }
+      );
+
+      assert.equal(failure._aiCallCount, 1);
+      assert.equal(failure._aiUsage.total_tokens, 46);
+      assert.equal(failure._omniOpenAiDiagnostics.requestId, "refusal-no-text");
+      assert.equal(failure._omniOpenAiDiagnostics.responseId, "resp_refusal");
+      assert.equal(failure._omniOpenAiDiagnostics.responseShape.refusalPresent, true);
+      assert.deepEqual(failure._omniOpenAiDiagnostics.responseShape.contentItemTypes, ["refusal"]);
+      assert.doesNotMatch(
+        JSON.stringify(failure._omniOpenAiDiagnostics.responseShape),
+        /The request was declined/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("logs a no-text provider response without blocking parser-driven compact recovery", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalInfo = console.info;
+    const responseLogs = [];
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return jsonResponse(200, calls === 1
+        ? responseWithoutText({ id: "resp_logged_no_text" })
+        : compactSolveOutput());
+    };
+    console.info = (...args) => {
+      if (args[0] === "[omnimath:openai-response]") responseLogs.push(args[1]);
+    };
+
+    try {
+      const result = await createMathExplanation({
+        prompt: "Solve x+1=2",
+        originalProblem: "x+1=2",
+        debugContext: { requestId: "logger-no-text" },
+      });
+
+      assert.equal(calls, 2);
+      assert.equal(result._aiCallCount, 2);
+      assert.equal(result.runtimeNotice, "Compact explanation generated because the full structured response was too long.");
+      assert.equal(responseLogs[0].responseId, "resp_logged_no_text");
+      assert.equal(responseLogs[0].outputChars, 0);
+      assert.equal(responseLogs[0].responseShape.outputTextPresent, false);
+      assert.deepEqual(responseLogs[0].responseShape.outputItemTypes, ["reasoning", "message"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.info = originalInfo;
+    }
+  });
+
   it("retries with compact schema when a long solve response is truncated", async () => {
     const originalFetch = globalThis.fetch;
+    const originalEnv = {
+      OMNIMATH_SOLVER_MODEL: process.env.OMNIMATH_SOLVER_MODEL,
+    };
+    process.env.OMNIMATH_SOLVER_MODEL = "gpt-4.1-mini";
     const requests = [];
     globalThis.fetch = async (_url, options) => {
       const payload = JSON.parse(options.body);
@@ -238,6 +492,8 @@ describe("createMathExplanation compact fallback", () => {
       assert.equal(result._aiUsage.total_tokens, 60);
     } finally {
       globalThis.fetch = originalFetch;
+      if (originalEnv.OMNIMATH_SOLVER_MODEL === undefined) delete process.env.OMNIMATH_SOLVER_MODEL;
+      else process.env.OMNIMATH_SOLVER_MODEL = originalEnv.OMNIMATH_SOLVER_MODEL;
     }
   });
 
@@ -424,6 +680,10 @@ describe("createMathExplanation compact fallback", () => {
 describe("OpenAI solver sampling", () => {
   it("passes explicit low-temperature sampling settings on initial solves", async () => {
     const originalFetch = globalThis.fetch;
+    const originalEnv = {
+      OMNIMATH_SOLVER_MODEL: process.env.OMNIMATH_SOLVER_MODEL,
+    };
+    process.env.OMNIMATH_SOLVER_MODEL = "gpt-4.1-mini";
     const requests = [];
     globalThis.fetch = async (_url, options) => {
       const payload = JSON.parse(options.body);
@@ -447,11 +707,17 @@ describe("OpenAI solver sampling", () => {
       assert.equal(requests[0].top_p, 1);
     } finally {
       globalThis.fetch = originalFetch;
+      if (originalEnv.OMNIMATH_SOLVER_MODEL === undefined) delete process.env.OMNIMATH_SOLVER_MODEL;
+      else process.env.OMNIMATH_SOLVER_MODEL = originalEnv.OMNIMATH_SOLVER_MODEL;
     }
   });
 
   it("passes the same explicit sampling settings on quality repair solves", async () => {
     const originalFetch = globalThis.fetch;
+    const originalEnv = {
+      OMNIMATH_REPAIR_MODEL: process.env.OMNIMATH_REPAIR_MODEL,
+    };
+    process.env.OMNIMATH_REPAIR_MODEL = "gpt-4.1-mini";
     const requests = [];
     globalThis.fetch = async (_url, options) => {
       const payload = JSON.parse(options.body);
@@ -477,6 +743,8 @@ describe("OpenAI solver sampling", () => {
       assert.equal(requests[0].top_p, 1);
     } finally {
       globalThis.fetch = originalFetch;
+      if (originalEnv.OMNIMATH_REPAIR_MODEL === undefined) delete process.env.OMNIMATH_REPAIR_MODEL;
+      else process.env.OMNIMATH_REPAIR_MODEL = originalEnv.OMNIMATH_REPAIR_MODEL;
     }
   });
 

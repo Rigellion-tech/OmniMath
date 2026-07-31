@@ -16,10 +16,10 @@ export const MODEL_ROLES = Object.freeze({
 export const DEFAULT_OPENAI_MODELS = {
   imageExtraction: "gpt-4.1",
   extractionReview: "gpt-4.1-mini",
-  solver: "gpt-4.1",
-  repair: "gpt-4.1-mini",
-  escalation: "gpt-4.1",
-  premiumEscalation: "o3",
+  solver: "gpt-5.6-luna",
+  repair: "gpt-5.6-terra",
+  escalation: "gpt-5.6-sol",
+  premiumEscalation: "gpt-5.6-sol",
   hover: "gpt-4.1-mini",
   pinned: "gpt-4.1-mini",
 };
@@ -43,6 +43,33 @@ export const DEFAULT_OPENAI_SAMPLING = {
   },
 };
 
+export const OPENAI_TIMEOUT_LIMITS = Object.freeze({
+  minMs: 5000,
+  maxMs: 300000,
+});
+
+export const DEFAULT_OPENAI_TIMEOUTS_MS = Object.freeze({
+  imageExtraction: 60000,
+  extractionReview: 60000,
+  solver: 60000,
+  repair: 120000,
+  escalation: 180000,
+  premiumEscalation: 180000,
+  hover: 30000,
+  pinned: 30000,
+});
+
+const ROLE_TIMEOUT_ENV = Object.freeze({
+  imageExtraction: "OMNIMATH_OPENAI_IMAGE_EXTRACTION_TIMEOUT_MS",
+  extractionReview: "OMNIMATH_OPENAI_EXTRACTION_REVIEW_TIMEOUT_MS",
+  solver: "OMNIMATH_OPENAI_SOLVER_TIMEOUT_MS",
+  repair: "OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS",
+  escalation: "OMNIMATH_OPENAI_ESCALATION_TIMEOUT_MS",
+  premiumEscalation: "OMNIMATH_OPENAI_PREMIUM_ESCALATION_TIMEOUT_MS",
+  hover: "OMNIMATH_OPENAI_LAZY_TIMEOUT_MS",
+  pinned: "OMNIMATH_OPENAI_LAZY_TIMEOUT_MS",
+});
+
 const ROLE_DEFAULT_REASONING_EFFORT = {
   solver: "medium",
   repair: "high",
@@ -53,12 +80,16 @@ const ROLE_DEFAULT_REASONING_EFFORT = {
 const ROLE_MODEL_ENV = {
   imageExtraction: ["OMNIMATH_IMAGE_EXTRACTION_MODEL", "OPENAI_IMAGE_EXTRACTION_MODEL"],
   extractionReview: ["OMNIMATH_EXTRACTION_REVIEW_MODEL", "OPENAI_EXTRACTION_REVIEW_MODEL"],
-  solver: ["OMNIMATH_SOLVER_MODEL", "OPENAI_SOLVER_MODEL", "OPENAI_MODEL"],
-  repair: ["OMNIMATH_REPAIR_MODEL", "OPENAI_REPAIR_MODEL", "OMNIMATH_SOLVER_MODEL", "OPENAI_SOLVER_MODEL", "OPENAI_MODEL"],
+  solver: ["OMNIMATH_SOLVER_MODEL", "OPENAI_SOLVER_MODEL"],
+  repair: ["OMNIMATH_REPAIR_MODEL", "OPENAI_REPAIR_MODEL"],
   escalation: ["OMNIMATH_ESCALATION_MODEL", "OPENAI_ESCALATION_MODEL"],
   premiumEscalation: ["OMNIMATH_PREMIUM_ESCALATION_MODEL", "OPENAI_PREMIUM_ESCALATION_MODEL", "OMNIMATH_ESCALATION_MODEL", "OPENAI_ESCALATION_MODEL"],
   hover: ["OMNIMATH_HOVER_MODEL", "OPENAI_HOVER_MODEL", "OPENAI_LAZY_MODEL"],
   pinned: ["OMNIMATH_PINNED_MODEL", "OPENAI_PINNED_MODEL", "OPENAI_LAZY_MODEL"],
+};
+
+const ROLE_MODEL_FALLBACK_ENV = {
+  repair: ["OMNIMATH_SOLVER_MODEL", "OPENAI_SOLVER_MODEL"],
 };
 
 const ROLE_EFFORT_ENV = {
@@ -79,6 +110,42 @@ const MODEL_CAPABILITY_RULES = [
     maxOutputTokens: 6500,
     inputCostPer1M: 10,
     outputCostPer1M: 40,
+    pricingSource: "configurable_default_estimate",
+  },
+  {
+    name: "gpt-5.6-sol",
+    pattern: /^gpt-5\.6(?:-sol)?$/iu,
+    reasoning: true,
+    reasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    allowSampling: false,
+    structuredOutput: true,
+    maxOutputTokens: 128000,
+    inputCostPer1M: 5,
+    outputCostPer1M: 30,
+    pricingSource: "configurable_default_estimate",
+  },
+  {
+    name: "gpt-5.6-terra",
+    pattern: /^gpt-5\.6-terra$/iu,
+    reasoning: true,
+    reasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    allowSampling: false,
+    structuredOutput: true,
+    maxOutputTokens: 128000,
+    inputCostPer1M: 2.5,
+    outputCostPer1M: 15,
+    pricingSource: "configurable_default_estimate",
+  },
+  {
+    name: "gpt-5.6-luna",
+    pattern: /^gpt-5\.6-luna$/iu,
+    reasoning: true,
+    reasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    allowSampling: false,
+    structuredOutput: true,
+    maxOutputTokens: 128000,
+    inputCostPer1M: 1,
+    outputCostPer1M: 6,
     pricingSource: "configurable_default_estimate",
   },
   {
@@ -144,6 +211,25 @@ function firstEnv(names = []) {
   return { value: "", source: "" };
 }
 
+function resolveRoleModel(role = "solver") {
+  const primary = firstEnv(ROLE_MODEL_ENV[role] || []);
+  if (primary.value) return primary;
+
+  const fallback = firstEnv(ROLE_MODEL_FALLBACK_ENV[role] || []);
+  if (fallback.value) {
+    return {
+      ...fallback,
+      source: `${fallback.source}:role_fallback`,
+    };
+  }
+
+  const defaultValue = DEFAULT_OPENAI_MODELS[role] || DEFAULT_OPENAI_MODELS.solver;
+  return {
+    value: defaultValue,
+    source: "role_default",
+  };
+}
+
 function readNumberEnv(names = [], fallback = null) {
   for (const name of names) {
     const value = Number(process.env[name]);
@@ -168,6 +254,84 @@ function roleFromPath(path = "solver", debugContext = {}) {
   if (attemptType.includes("repair")) return "repair";
   if (attemptType.includes("escalation")) return "escalation";
   return "solver";
+}
+
+export function resolveOpenAiRequestTimeout(role = "solver") {
+  const resolvedRole = Object.hasOwn(DEFAULT_OPENAI_TIMEOUTS_MS, role)
+    ? role
+    : "solver";
+  const envName = ROLE_TIMEOUT_ENV[resolvedRole];
+  const defaultTimeoutMs = DEFAULT_OPENAI_TIMEOUTS_MS[resolvedRole];
+  const rawValue = process.env[envName];
+  const configuredValue = typeof rawValue === "string" && rawValue.trim()
+    ? Number(rawValue)
+    : null;
+
+  if (configuredValue === null) {
+    return {
+      role: resolvedRole,
+      timeoutMs: defaultTimeoutMs,
+      timeoutSource: "role_default",
+      timeoutEnv: envName,
+      timeoutConfigStatus: "default",
+      defaultTimeoutMs,
+    };
+  }
+
+  if (!Number.isFinite(configuredValue) || configuredValue <= 0) {
+    return {
+      role: resolvedRole,
+      timeoutMs: defaultTimeoutMs,
+      timeoutSource: "role_default",
+      timeoutEnv: envName,
+      timeoutConfigStatus: "invalid_fallback",
+      defaultTimeoutMs,
+    };
+  }
+
+  const roundedValue = Math.round(configuredValue);
+  const timeoutMs = Math.min(
+    OPENAI_TIMEOUT_LIMITS.maxMs,
+    Math.max(OPENAI_TIMEOUT_LIMITS.minMs, roundedValue),
+  );
+  const timeoutConfigStatus = timeoutMs === roundedValue
+    ? "configured"
+    : timeoutMs === OPENAI_TIMEOUT_LIMITS.minMs
+      ? "clamped_min"
+      : "clamped_max";
+
+  return {
+    role: resolvedRole,
+    timeoutMs,
+    timeoutSource: envName,
+    timeoutEnv: envName,
+    timeoutConfigStatus,
+    defaultTimeoutMs,
+  };
+}
+
+export function getOpenAiTimeoutPolicy() {
+  return {
+    minTimeoutMs: OPENAI_TIMEOUT_LIMITS.minMs,
+    maxTimeoutMs: OPENAI_TIMEOUT_LIMITS.maxMs,
+    compactRetryPolicy: "inherits_resolved_role",
+    legacyRequestTimeoutConfigured: Boolean(
+      typeof process.env.OPENAI_REQUEST_TIMEOUT_MS === "string"
+      && process.env.OPENAI_REQUEST_TIMEOUT_MS.trim(),
+    ),
+    roles: Object.fromEntries(
+      Object.keys(DEFAULT_OPENAI_TIMEOUTS_MS).map((role) => {
+        const resolution = resolveOpenAiRequestTimeout(role);
+        return [role, {
+          timeoutMs: resolution.timeoutMs,
+          timeoutSource: resolution.timeoutSource,
+          timeoutEnv: resolution.timeoutEnv,
+          timeoutConfigStatus: resolution.timeoutConfigStatus,
+          defaultTimeoutMs: resolution.defaultTimeoutMs,
+        }];
+      }),
+    ),
+  };
 }
 
 export function getModelCapability(modelId = "") {
@@ -238,19 +402,33 @@ function resolveReasoningEffort(role = "solver", capability = {}) {
 }
 
 export function getOpenAiModels() {
-  const legacyModel = process.env.OPENAI_MODEL;
   const legacyLazyModel = process.env.OPENAI_LAZY_MODEL;
 
   return {
-    imageExtraction: process.env.OMNIMATH_IMAGE_EXTRACTION_MODEL || process.env.OPENAI_IMAGE_EXTRACTION_MODEL || legacyModel || DEFAULT_OPENAI_MODELS.imageExtraction,
-    extractionReview: process.env.OMNIMATH_EXTRACTION_REVIEW_MODEL || process.env.OPENAI_EXTRACTION_REVIEW_MODEL || DEFAULT_OPENAI_MODELS.extractionReview,
-    solver: process.env.OMNIMATH_SOLVER_MODEL || process.env.OPENAI_SOLVER_MODEL || legacyModel || DEFAULT_OPENAI_MODELS.solver,
-    repair: process.env.OMNIMATH_REPAIR_MODEL || process.env.OPENAI_REPAIR_MODEL || process.env.OMNIMATH_SOLVER_MODEL || process.env.OPENAI_SOLVER_MODEL || legacyModel || DEFAULT_OPENAI_MODELS.repair,
-    escalation: process.env.OMNIMATH_ESCALATION_MODEL || process.env.OPENAI_ESCALATION_MODEL || DEFAULT_OPENAI_MODELS.escalation,
-    premiumEscalation: process.env.OMNIMATH_PREMIUM_ESCALATION_MODEL || process.env.OPENAI_PREMIUM_ESCALATION_MODEL || process.env.OMNIMATH_ESCALATION_MODEL || process.env.OPENAI_ESCALATION_MODEL || DEFAULT_OPENAI_MODELS.premiumEscalation,
+    imageExtraction: resolveRoleModel("imageExtraction").value,
+    extractionReview: resolveRoleModel("extractionReview").value,
+    solver: resolveRoleModel("solver").value,
+    repair: resolveRoleModel("repair").value,
+    escalation: resolveRoleModel("escalation").value,
+    premiumEscalation: resolveRoleModel("premiumEscalation").value,
     hover: process.env.OMNIMATH_HOVER_MODEL || process.env.OPENAI_HOVER_MODEL || legacyLazyModel || DEFAULT_OPENAI_MODELS.hover,
     pinned: process.env.OMNIMATH_PINNED_MODEL || process.env.OPENAI_PINNED_MODEL || legacyLazyModel || DEFAULT_OPENAI_MODELS.pinned,
   };
+}
+
+export function getOpenAiModelResolutions() {
+  return Object.fromEntries(Object.keys(DEFAULT_OPENAI_MODELS).map((role) => {
+    const resolution = role === "hover" || role === "pinned"
+      ? {
+        value: getOpenAiModels()[role],
+        source: firstEnv(ROLE_MODEL_ENV[role] || []).source || "role_default",
+      }
+      : resolveRoleModel(role);
+    return [role, {
+      modelId: resolution.value,
+      modelSource: resolution.source,
+    }];
+  }));
 }
 
 export function getOpenAiModelForPath(path, debugContext = {}) {
@@ -271,18 +449,19 @@ export function selectOpenAiModel({
   const role = roleFromPath(modelPath, debugContext);
   const modelSelection = model
     ? { value: model, source: "explicit_override" }
-    : firstEnv(ROLE_MODEL_ENV[role] || []);
-  const modelId = modelSelection.value || DEFAULT_OPENAI_MODELS[role] || DEFAULT_OPENAI_MODELS.solver;
+    : resolveRoleModel(role);
+  const modelId = modelSelection.value;
   const capability = getModelCapability(modelId);
   const reasoning = resolveReasoningEffort(role, capability);
   const pricing = resolvePricing(modelId, capability);
+  const timeout = resolveOpenAiRequestTimeout(role);
   const sampling = DEFAULT_OPENAI_SAMPLING[role] ? { ...DEFAULT_OPENAI_SAMPLING[role] } : {};
   const samplingOmitted = !capability.allowSampling && Object.keys(sampling).length > 0;
   return {
     role,
     modelPath,
     modelId,
-    modelSource: modelSelection.source || "default",
+    modelSource: modelSelection.source || "role_default",
     capabilityName: capability.name,
     knownModel: capability.known,
     supportsReasoning: capability.reasoning,
@@ -296,6 +475,10 @@ export function selectOpenAiModel({
     samplingOmitted,
     structuredOutput: capability.structuredOutput,
     maxOutputTokens: capability.maxOutputTokens,
+    timeoutMs: timeout.timeoutMs,
+    timeoutSource: timeout.timeoutSource,
+    timeoutEnv: timeout.timeoutEnv,
+    timeoutConfigStatus: timeout.timeoutConfigStatus,
     solveMode: debugContext.attemptType || debugContext.retryPurpose || "initial",
     freshSolve: role === "escalation" || role === "premiumEscalation",
     ...pricing,
@@ -341,6 +524,8 @@ export function logOpenAiModelSelection(path, extra = {}) {
     sampling: selection.sampling,
     samplingOmitted: selection.samplingOmitted,
     solveMode: selection.solveMode,
+    timeoutMs: selection.timeoutMs,
+    timeoutSource: selection.timeoutSource,
     freshSolve: selection.freshSolve,
     purpose: extra.purpose,
   });

@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { loadEnvFiles } from "../server/env.js";
 import { normalizeOpenAiUsage } from "../server/openai.js";
 import { analyzeNumericExpression } from "../server/mathValidationAnalysis.js";
-import { estimateModelCostUsd } from "../server/openaiModels.js";
+import { estimateModelCostUsd, getOpenAiModels } from "../server/openaiModels.js";
 import { getSolverBenchmarkSuite } from "../server/solverBenchmarkSuite.js";
 import { aggregateBenchmarkResults, classifyBenchmarkRecord, summarizeBenchmarkByCandidate } from "../server/solverBenchmarkMetrics.js";
 
@@ -53,7 +53,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg.startsWith("--max-calls")) args.maxCalls = Math.max(1, Number(readValue()) || 1);
     else if (arg.startsWith("--limit")) args.limit = Math.max(0, Number(readValue()) || 0);
   }
-  if (args.models.length === 0) args.models = [process.env.OPENAI_MODEL || "gpt-4.1-mini"];
+  if (args.models.length === 0) args.models = [getOpenAiModels().solver];
   if (args.efforts.length === 0) args.efforts = ["none"];
   return args;
 }
@@ -113,11 +113,12 @@ function normalizeEffort(effort = "") {
 
 function namedPolicyCandidate(policy = "") {
   const id = String(policy || "").trim();
-  const currentStandard = process.env.OPENAI_MODEL || process.env.OPENAI_SOLVER_MODEL || "gpt-4.1-mini";
-  const currentRepair = process.env.OPENAI_REPAIR_MODEL || currentStandard;
-  const currentEscalation = process.env.OPENAI_ESCALATION_MODEL || "gpt-4.1";
-  const efficientReasoning = process.env.OMNIMATH_BENCHMARK_EFFICIENT_REASONING_MODEL || "o4-mini";
-  const strongReasoning = process.env.OMNIMATH_BENCHMARK_STRONG_REASONING_MODEL || "o3";
+  const resolvedModels = getOpenAiModels();
+  const currentStandard = resolvedModels.solver;
+  const currentRepair = resolvedModels.repair;
+  const currentEscalation = resolvedModels.escalation;
+  const efficientReasoning = process.env.OMNIMATH_BENCHMARK_EFFICIENT_REASONING_MODEL || "gpt-5.6-luna";
+  const strongReasoning = process.env.OMNIMATH_BENCHMARK_STRONG_REASONING_MODEL || "gpt-5.6-sol";
   if (id === "current") {
     return {
       id,
@@ -189,7 +190,7 @@ function buildBenchmarkCandidates(args = {}) {
   if (Array.isArray(args.policies) && args.policies.length > 0) {
     return args.policies.map((policy) => namedPolicyCandidate(policy));
   }
-  const models = args.models?.length ? args.models : [process.env.OPENAI_MODEL || "gpt-4.1-mini"];
+  const models = args.models?.length ? args.models : [getOpenAiModels().solver];
   const efforts = args.efforts?.length ? args.efforts : ["none"];
   return models.flatMap((model) => efforts.map((effort) => comboCandidate(model, effort)));
 }

@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 import {
   HOVER_LOADING_MESSAGE,
   HOVER_STILL_GENERATING_MESSAGE,
+  HOVER_TIMEOUT_MS,
   INITIAL_LAZY_EXPLANATION_STATE,
+  PIN_TIMEOUT_MS,
   createLazyRequestDescriptor,
   getLazyLoadingMessage,
   reduceLazyExplanationLifecycle,
@@ -18,6 +20,11 @@ function start(state, request, fallback = null) {
 }
 
 describe("lazy explanation lifecycle", () => {
+  it("keeps browser guards longer than the lazy provider deadline", () => {
+    assert.ok(HOVER_TIMEOUT_MS > 30000);
+    assert.ok(PIN_TIMEOUT_MS > 30000);
+  });
+
   it("ignores stale hover success for an older request", () => {
     const oldRequest = createLazyRequestDescriptor({
       requestId: 1,

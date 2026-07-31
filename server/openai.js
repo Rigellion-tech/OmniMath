@@ -23,9 +23,12 @@ import {
   buildResponsesModelParameters,
   estimateModelCostUsd,
   getOpenAiModelForPath,
+  getOpenAiModelResolutions,
   getOpenAiModels,
   getOpenAiSamplingForPath,
+  getOpenAiTimeoutPolicy,
   logOpenAiModelSelection,
+  resolveOpenAiRequestTimeout,
   selectOpenAiModel,
 } from "./openaiModels.js";
 
@@ -38,8 +41,6 @@ const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 4200;
 const DEFAULT_LAZY_MAX_OUTPUT_TOKENS = 700;
 const DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1700;
-const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 60000;
-const DEFAULT_OPENAI_IMAGE_EXTRACTION_TIMEOUT_MS = 45000;
 const DEFAULT_OPENAI_RETRY_BASE_DELAY_MS = 500;
 const COMPLEX_SOLVE_MAX_OUTPUT_TOKENS = 6500;
 const COMPACT_SOLVE_MAX_OUTPUT_TOKENS = 2400;
@@ -208,13 +209,6 @@ function readPositiveNumber(name, fallback) {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
-function getOpenAiRequestTimeoutMs(modelPath = "solver") {
-  const fallback = modelPath === "imageExtraction"
-    ? DEFAULT_OPENAI_IMAGE_EXTRACTION_TIMEOUT_MS
-    : DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
-  return readPositiveNumber("OPENAI_REQUEST_TIMEOUT_MS", fallback);
-}
-
 function getOpenAiRetryBaseDelayMs() {
   return readPositiveNumber("OPENAI_RETRY_BASE_DELAY_MS", DEFAULT_OPENAI_RETRY_BASE_DELAY_MS);
 }
@@ -270,16 +264,20 @@ function getOptionalOpenAiHeaders() {
 }
 
 export function getOpenAiRuntimeConfig() {
+  const timeoutPolicy = getOpenAiTimeoutPolicy();
   return {
     hasApiKey: isOpenAiConfigured(),
     model: getOpenAiModel(),
     models: getOpenAiModels(),
+    modelResolutions: getOpenAiModelResolutions(),
+    legacyModelConfigured: Boolean(process.env.OPENAI_MODEL),
     lazyModel: getLazyOpenAiModel(),
     maxOutputTokens: getMaxOutputTokens(),
     solveMaxOutputTokens: getSolveMaxOutputTokens(),
     lazyMaxOutputTokens: getLazyMaxOutputTokens(),
     imageExtractionMaxOutputTokens: getImageExtractionMaxOutputTokens(),
-    requestTimeoutMs: getOpenAiRequestTimeoutMs("solver"),
+    requestTimeoutMs: timeoutPolicy.roles.solver.timeoutMs,
+    timeoutPolicy,
     organizationConfigured: Boolean(process.env.OPENAI_ORG_ID || process.env.OPENAI_ORGANIZATION),
     projectConfigured: Boolean(process.env.OPENAI_PROJECT_ID || process.env.OPENAI_PROJECT),
   };
@@ -344,14 +342,27 @@ function logOpenAiRequest({ purpose, payload }) {
   });
 }
 
-function logOpenAiProviderError({ purpose, response, responseBody }) {
+function logOpenAiProviderError({
+  purpose,
+  response,
+  responseBody,
+  model,
+  modelRole,
+  solveMode,
+  timeoutMs,
+  timeoutSource,
+}) {
   const providerError = responseBody?.error || {};
   const config = getOpenAiRuntimeConfig();
   console.error("[omnimath:openai-error]", {
     purpose,
     status: response.status,
     statusText: response.statusText,
-    model: responseBody?.model || config.model,
+    model: responseBody?.model || model || config.model,
+    modelRole,
+    solveMode,
+    timeoutMs,
+    timeoutSource,
     organizationConfigured: config.organizationConfigured,
     projectConfigured: config.projectConfigured,
     error: {
@@ -379,30 +390,119 @@ function isLengthFinishReason(responseBody) {
   return reason === "length" || reason === "max_output_tokens" || reason === "max_tokens";
 }
 
-function logOpenAiResponse({ purpose, responseBody, outputText = "" }) {
+function findOutputText(responseBody) {
+  if (typeof responseBody?.output_text === "string") return responseBody.output_text;
+
+  for (const item of responseBody?.output || []) {
+    for (const content of item?.content || []) {
+      if (typeof content?.text === "string") return content.text;
+    }
+  }
+
+  return null;
+}
+
+function findResponseRefusal(responseBody) {
+  return responseBody?.output
+    ?.flatMap((item) => item?.content || [])
+    ?.find((content) => content?.refusal)?.refusal || null;
+}
+
+function getIncompleteDetails(responseBody) {
+  const details = responseBody?.incomplete_details
+    || responseBody?.output?.find((item) => item?.incomplete_details)?.incomplete_details
+    || null;
+  if (!details || typeof details !== "object") return details;
+  return {
+    reason: typeof details.reason === "string" ? details.reason : null,
+  };
+}
+
+function isExplicitlyIncompleteResponse(responseBody) {
+  return responseBody?.status === "incomplete"
+    || responseBody?.output?.some((item) => item?.status === "incomplete")
+    || Boolean(getIncompleteDetails(responseBody)?.reason);
+}
+
+function summarizeOpenAiResponseShape(responseBody) {
+  const output = Array.isArray(responseBody?.output) ? responseBody.output : [];
+  const outputItems = output.map((item) => {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    return {
+      id: typeof item?.id === "string" ? item.id : null,
+      type: typeof item?.type === "string" ? item.type : typeof item,
+      status: typeof item?.status === "string" ? item.status : null,
+      contentCount: content.length,
+      content: content.map((contentItem) => ({
+        id: typeof contentItem?.id === "string" ? contentItem.id : null,
+        type: typeof contentItem?.type === "string" ? contentItem.type : typeof contentItem,
+        status: typeof contentItem?.status === "string" ? contentItem.status : null,
+        textType: Object.hasOwn(contentItem || {}, "text") ? typeof contentItem.text : null,
+        refusalPresent: Boolean(contentItem?.refusal),
+      })),
+    };
+  });
+  const contentItems = outputItems.flatMap((item) => item.content);
+
+  return {
+    responseId: typeof responseBody?.id === "string" ? responseBody.id : null,
+    model: typeof responseBody?.model === "string" ? responseBody.model : null,
+    status: typeof responseBody?.status === "string" ? responseBody.status : null,
+    incompleteDetails: getIncompleteDetails(responseBody),
+    incompleteReason: getIncompleteDetails(responseBody)?.reason || null,
+    outputTextPresent: Object.hasOwn(responseBody || {}, "output_text"),
+    outputTextType: Object.hasOwn(responseBody || {}, "output_text")
+      ? typeof responseBody.output_text
+      : null,
+    refusalPresent: Boolean(findResponseRefusal(responseBody)),
+    outputCount: output.length,
+    outputItemTypes: outputItems.map((item) => item.type),
+    contentItemTypes: contentItems.map((item) => item.type),
+    outputItems,
+    usage: responseBody?.usage || null,
+  };
+}
+
+function logOpenAiResponse({ purpose, responseBody }) {
+  const outputText = findOutputText(responseBody);
   console.info("[omnimath:openai-response]", {
     purpose,
+    responseId: responseBody?.id || null,
     model: responseBody?.model || null,
     finishReason: getFinishReason(responseBody) || null,
     status: responseBody?.status || null,
     outputChars: String(outputText || "").length,
     usage: responseBody?.usage || null,
+    responseShape: summarizeOpenAiResponseShape(responseBody),
   });
 }
 
-function logOpenAiNonProviderError({ purpose, error }) {
+function logOpenAiNonProviderError({
+  purpose,
+  error,
+  model,
+  modelRole,
+  solveMode,
+  timeoutMs,
+  timeoutSource,
+}) {
+  const normalizedError = normalizeOpenAiTransportError(error);
+
   console.error("[omnimath:openai-exception]", {
     purpose,
-    model: getOpenAiModel(),
-    message: error.message,
-    cause: error.cause
-      ? {
-          name: error.cause.name,
-          code: error.cause.code,
-          message: error.cause.message,
-          stack: error.cause.stack,
-        }
-      : null,
+    model,
+    modelRole,
+    solveMode,
+    timeoutMs,
+    timeoutSource,
+    normalizedErrorCode: normalizedError.normalizedErrorCode,
+    legacyNumericCode: normalizedError.legacyNumericCode,
+    failureType: normalizedError.failureType,
+    timeoutScope: normalizedError.timeoutScope,
+    errorName: normalizedError.errorName,
+    message: normalizedError.errorMessage,
+    rootError: normalizedError.rootError,
+    causeChain: normalizedError.causeChain,
     stack: error.stack,
   });
 }
@@ -410,11 +510,7 @@ function logOpenAiNonProviderError({ purpose, error }) {
 export function classifyOpenAiInfrastructureFailure({ error = null, response = null } = {}) {
   if (response?.status === 429) return "provider_rate_limit";
   if (response && RETRYABLE_PROVIDER_STATUSES.has(response.status)) return "provider_http_failure";
-  const code = getErrorCauseCode(error);
-  if (code === "EAI_AGAIN" || code === "ENOTFOUND") return "dns_failure";
-  if (code === "AbortError" || code === "TimeoutError" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "ETIMEDOUT") return "timeout";
-  if (code === "ECONNRESET" || code === "ECONNREFUSED" || code === "EPIPE") return "connect_failure";
-  return code ? "connect_failure" : "unknown_infrastructure_failure";
+  return normalizeOpenAiTransportError(error).failureType;
 }
 
 const TRANSIENT_NETWORK_CODES = new Set([
@@ -446,7 +542,7 @@ function getOpenAiAgent(timeoutMs) {
   return openAiAgents.get(key);
 }
 
-function getErrorCauseCode(error) {
+function getRetryClassificationCode(error) {
   return error?.cause?.code
     || error?.code
     || error?.cause?.name
@@ -454,14 +550,111 @@ function getErrorCauseCode(error) {
     || null;
 }
 
-function getErrorCauseMessage(error) {
-  return error?.cause?.message || error?.message || "";
+function describeTransportError(error) {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) {
+    return {
+      name: null,
+      code: null,
+      message: error == null ? "" : String(error),
+    };
+  }
+
+  return {
+    name: typeof error.name === "string" ? error.name : null,
+    code: typeof error.code === "string" || typeof error.code === "number"
+      ? error.code
+      : null,
+    message: typeof error.message === "string" ? error.message : "",
+  };
+}
+
+function getTransportErrorChain(error) {
+  const chain = [];
+  const seen = new Set();
+  let current = error;
+
+  while (
+    current
+    && (typeof current === "object" || typeof current === "function")
+    && !seen.has(current)
+    && chain.length < 8
+  ) {
+    seen.add(current);
+    chain.push({
+      value: current,
+      details: describeTransportError(current),
+    });
+    current = current.cause;
+  }
+
+  return chain;
+}
+
+function isRequestTimeoutError(entry) {
+  const { value, details } = entry;
+  if (details.name === "TimeoutError") return true;
+
+  return value?.constructor?.name === "DOMException"
+    && details.code === 23
+    && /timeout/i.test(details.message);
+}
+
+export function normalizeOpenAiTransportError(error) {
+  const chain = getTransportErrorChain(error);
+  const rootError = chain[0]?.details ?? describeTransportError(error);
+  const requestTimeoutEntry = chain.find(isRequestTimeoutError);
+  const selectedEntry = requestTimeoutEntry || chain[1] || chain[0] || null;
+  const selectedDetails = selectedEntry?.details ?? {
+    name: null,
+    code: null,
+    message: "",
+  };
+  const retryClassificationCode = getRetryClassificationCode(error);
+  const normalizedErrorCode = requestTimeoutEntry
+    ? "TimeoutError"
+    : retryClassificationCode;
+  const legacyNumericCode = typeof selectedDetails.code === "number"
+    ? selectedDetails.code
+    : (chain.find((entry) => typeof entry.details.code === "number")?.details.code ?? null);
+  let failureType = "unknown_infrastructure_failure";
+  let timeoutScope = null;
+
+  if (requestTimeoutEntry) {
+    failureType = "request_timeout";
+    timeoutScope = "request";
+  } else if (normalizedErrorCode === "EAI_AGAIN" || normalizedErrorCode === "ENOTFOUND") {
+    failureType = "dns_failure";
+  } else if (normalizedErrorCode === "UND_ERR_CONNECT_TIMEOUT") {
+    failureType = "connection_timeout";
+    timeoutScope = "connection_establishment";
+  } else if (normalizedErrorCode === "AbortError" || normalizedErrorCode === "ETIMEDOUT") {
+    failureType = "timeout";
+  } else if (
+    normalizedErrorCode === "ECONNRESET"
+    || normalizedErrorCode === "ECONNREFUSED"
+    || normalizedErrorCode === "EPIPE"
+  ) {
+    failureType = "connect_failure";
+  } else if (normalizedErrorCode) {
+    failureType = "connect_failure";
+  }
+
+  return {
+    normalizedErrorCode: normalizedErrorCode ?? null,
+    legacyNumericCode,
+    failureType,
+    timeoutScope,
+    errorName: selectedDetails.name,
+    errorMessage: selectedDetails.message,
+    rootError,
+    causeChain: chain.slice(1).map((entry) => entry.details),
+  };
 }
 
 function isTransientNetworkError(error) {
-  const code = getErrorCauseCode(error);
+  const code = getRetryClassificationCode(error);
   if (TRANSIENT_NETWORK_CODES.has(code)) return true;
-  const message = getErrorCauseMessage(error);
+  const message = error?.cause?.message || error?.message || "";
   if (code === "ENOTFOUND") {
     return /api\.openai\.com|getaddrinfo|dns|resolve/i.test(message);
   }
@@ -481,14 +674,18 @@ function isRetryableProviderError(response, responseBody) {
 }
 
 function createOpenAiUnavailableError(error, { statusCode = 503, transportDiagnostics = null } = {}) {
-  return Object.assign(new Error(`OpenAI request failed: ${getErrorCauseMessage(error) || "service unavailable"}`, { cause: error }), {
+  const normalizedError = normalizeOpenAiTransportError(error);
+  return Object.assign(new Error(`OpenAI request failed: ${normalizedError.errorMessage || "service unavailable"}`, { cause: error }), {
     statusCode,
     code: "AI_SERVICE_UNAVAILABLE",
     publicMessage: "The AI service is temporarily unreachable. Check your internet connection and try again.",
     providerStatus: error?.providerStatus || null,
     providerCode: error?.providerCode || null,
-    networkCauseCode: getErrorCauseCode(error),
-    networkCauseMessage: getErrorCauseMessage(error),
+    networkCauseCode: normalizedError.normalizedErrorCode,
+    networkCauseMessage: normalizedError.errorMessage,
+    networkCauseName: normalizedError.errorName,
+    networkLegacyNumericCode: normalizedError.legacyNumericCode,
+    networkCauseChain: normalizedError.causeChain,
     openAiTransportDiagnostics: transportDiagnostics,
   });
 }
@@ -514,17 +711,58 @@ function getOpenAiRetryDelayMs(attempt) {
   return planned + jitter;
 }
 
-function logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error, response }) {
+function logOpenAiRetry({
+  purpose,
+  model,
+  modelRole,
+  solveMode,
+  timeoutMs,
+  timeoutSource,
+  attempt,
+  maxAttempts,
+  startedAt,
+  error,
+  response,
+}) {
+  const normalizedError = response ? null : normalizeOpenAiTransportError(error);
   console.warn("[omnimath:openai-retry]", {
     purpose,
     model,
+    modelRole,
+    solveMode,
+    timeoutMs,
+    timeoutSource,
     attempt,
     maxAttempts,
-    causeCode: response?.status || getErrorCauseCode(error),
+    causeCode: response?.status || normalizedError?.normalizedErrorCode,
     causeMessage: response
       ? response.statusText || `HTTP ${response.status}`
-      : getErrorCauseMessage(error),
+      : normalizedError?.errorMessage,
+    failureType: response
+      ? classifyOpenAiInfrastructureFailure({ response })
+      : normalizedError?.failureType,
+    timeoutScope: normalizedError?.timeoutScope || null,
     elapsedMs: Date.now() - startedAt,
+  });
+}
+
+function logOpenAiRequestDeadline({
+  purpose,
+  model,
+  modelRole,
+  solveMode,
+  timeoutMs,
+  timeoutSource,
+  timeoutConfigStatus,
+}) {
+  console.info("[omnimath:openai-timeout]", {
+    purpose,
+    model,
+    modelRole,
+    solveMode,
+    timeoutMs,
+    timeoutSource,
+    timeoutConfigStatus,
   });
 }
 
@@ -539,24 +777,50 @@ async function readOpenAiResponseBody(response) {
 
 async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext = {} }) {
   const model = payload.model;
+  const modelRole = debugContext.modelRole || selectOpenAiModel({
+    modelPath,
+    model,
+    debugContext,
+  }).role;
+  const solveMode = debugContext.solveMode || debugAttemptType(debugContext);
+  const timeoutResolution = resolveOpenAiRequestTimeout(modelRole);
   const maxAttempts = getOpenAiMaxAttempts(modelPath);
-  const timeoutMs = getOpenAiRequestTimeoutMs(modelPath);
+  const timeoutMs = timeoutResolution.timeoutMs;
   const startedAt = Date.now();
   let lastRetryableError = null;
   const transportDiagnostics = {
     apiHost: OPENAI_RESPONSES_HOSTNAME,
     model,
     modelPath,
+    modelRole,
+    solveMode,
     purpose,
     maxAttempts,
     timeoutMs,
+    timeoutSource: timeoutResolution.timeoutSource,
+    timeoutConfigStatus: timeoutResolution.timeoutConfigStatus,
     transportAttempts: 0,
     successfulProviderResponses: 0,
     retryCount: 0,
     finalInfrastructureErrorCode: null,
     finalInfrastructureFailureType: null,
+    finalNormalizedErrorCode: null,
+    finalLegacyNumericCode: null,
+    finalErrorName: null,
+    finalErrorMessage: null,
+    finalCauseChain: [],
+    finalTimeoutScope: null,
     attempts: [],
   };
+  logOpenAiRequestDeadline({
+    purpose,
+    model,
+    modelRole,
+    solveMode,
+    timeoutMs,
+    timeoutSource: timeoutResolution.timeoutSource,
+    timeoutConfigStatus: timeoutResolution.timeoutConfigStatus,
+  });
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let response;
@@ -571,19 +835,39 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
         dispatcher: getOpenAiAgent(timeoutMs),
       });
     } catch (error) {
-      const failureType = classifyOpenAiInfrastructureFailure({ error });
-      const causeCode = getErrorCauseCode(error);
-      transportDiagnostics.finalInfrastructureErrorCode = causeCode;
-      transportDiagnostics.finalInfrastructureFailureType = failureType;
+      const normalizedError = normalizeOpenAiTransportError(error);
+      const retryable = isTransientNetworkError(error) && attempt < maxAttempts;
+      transportDiagnostics.finalInfrastructureErrorCode = normalizedError.normalizedErrorCode;
+      transportDiagnostics.finalInfrastructureFailureType = normalizedError.failureType;
+      transportDiagnostics.finalNormalizedErrorCode = normalizedError.normalizedErrorCode;
+      transportDiagnostics.finalLegacyNumericCode = normalizedError.legacyNumericCode;
+      transportDiagnostics.finalErrorName = normalizedError.errorName;
+      transportDiagnostics.finalErrorMessage = normalizedError.errorMessage;
+      transportDiagnostics.finalCauseChain = normalizedError.causeChain;
+      transportDiagnostics.finalTimeoutScope = normalizedError.timeoutScope;
       transportDiagnostics.attempts.push({
         attempt,
         stage: "transport_error",
         elapsedMs: Date.now() - attemptStartedAt,
-        retryable: isTransientNetworkError(error) && attempt < maxAttempts,
-        errorCode: causeCode,
-        failureType,
+        retryable,
+        errorCode: normalizedError.normalizedErrorCode,
+        normalizedErrorCode: normalizedError.normalizedErrorCode,
+        legacyNumericCode: normalizedError.legacyNumericCode,
+        errorName: normalizedError.errorName,
+        errorMessage: normalizedError.errorMessage,
+        causeChain: normalizedError.causeChain,
+        timeoutScope: normalizedError.timeoutScope,
+        failureType: normalizedError.failureType,
       });
-      logOpenAiNonProviderError({ purpose, error });
+      logOpenAiNonProviderError({
+        purpose,
+        error,
+        model,
+        modelRole,
+        solveMode,
+        timeoutMs,
+        timeoutSource: timeoutResolution.timeoutSource,
+      });
       if (error.code === "SERVER_CONFIG_ERROR") throw error;
       if (!isTransientNetworkError(error) || attempt >= maxAttempts) {
         throw createOpenAiUnavailableError(error, { transportDiagnostics });
@@ -591,7 +875,18 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
 
       lastRetryableError = error;
       transportDiagnostics.retryCount += 1;
-      logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error });
+      logOpenAiRetry({
+        purpose,
+        model,
+        modelRole,
+        solveMode,
+        timeoutMs,
+        timeoutSource: timeoutResolution.timeoutSource,
+        attempt,
+        maxAttempts,
+        startedAt,
+        error,
+      });
       await delay(getOpenAiRetryDelayMs(attempt));
       continue;
     }
@@ -601,6 +896,12 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       transportDiagnostics.successfulProviderResponses += 1;
       transportDiagnostics.finalInfrastructureErrorCode = null;
       transportDiagnostics.finalInfrastructureFailureType = null;
+      transportDiagnostics.finalNormalizedErrorCode = null;
+      transportDiagnostics.finalLegacyNumericCode = null;
+      transportDiagnostics.finalErrorName = null;
+      transportDiagnostics.finalErrorMessage = null;
+      transportDiagnostics.finalCauseChain = [];
+      transportDiagnostics.finalTimeoutScope = null;
       transportDiagnostics.attempts.push({
         attempt,
         stage: "provider_response",
@@ -619,17 +920,21 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
           purpose,
           model,
           modelPath,
+          modelRole,
+          solveMode,
           attempt,
           maxAttempts,
           retryCount: attempt - 1,
+          providerHttpStatus: response.status,
           timeoutMs,
+          timeoutSource: timeoutResolution.timeoutSource,
+          timeoutConfigStatus: timeoutResolution.timeoutConfigStatus,
           temperature: payload.temperature ?? null,
           topP: payload.top_p ?? null,
           temperatureSource: payload.temperature === undefined ? "provider_default" : "payload",
           topPSource: payload.top_p === undefined ? "provider_default" : "payload",
           reasoningEffort: payload.reasoning?.effort || null,
           reasoning: payload.reasoning || null,
-          modelRole: debugContext.modelRole || null,
           samplingOmitted: Boolean(debugContext.samplingOmitted),
           reasoningOmittedReason: debugContext.reasoningOmittedReason || null,
           normalizedProblemHash: debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null,
@@ -639,6 +944,7 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
           modelInputMessages: createDiagnosticInputMessages(payload.input),
           maxOutputTokens: payload.max_output_tokens ?? null,
           schemaName: payload.text?.format?.name || null,
+          providerCallCount: transportDiagnostics.successfulProviderResponses,
           transportDiagnostics,
         },
       });
@@ -647,10 +953,13 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
         purpose,
         model,
         modelPath,
+        modelRole,
+        solveMode,
+        timeoutMs,
+        timeoutSource: timeoutResolution.timeoutSource,
         temperature: payload.temperature ?? null,
         topP: payload.top_p ?? null,
         reasoningEffort: payload.reasoning?.effort || null,
-        modelRole: debugContext.modelRole || null,
         samplingOmitted: Boolean(debugContext.samplingOmitted),
         reasoningOmittedReason: debugContext.reasoningOmittedReason || null,
         promptHash: debugContext.promptHash || null,
@@ -664,10 +973,25 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       return responseBody;
     }
 
-    logOpenAiProviderError({ purpose, response, responseBody });
+    logOpenAiProviderError({
+      purpose,
+      response,
+      responseBody,
+      model,
+      modelRole,
+      solveMode,
+      timeoutMs,
+      timeoutSource: timeoutResolution.timeoutSource,
+    });
     if (!isRetryableProviderError(response, responseBody)) {
       transportDiagnostics.finalInfrastructureErrorCode = responseBody?.error?.code || responseBody?.error?.type || `HTTP_${response.status}`;
       transportDiagnostics.finalInfrastructureFailureType = "provider_http_failure";
+      transportDiagnostics.finalNormalizedErrorCode = transportDiagnostics.finalInfrastructureErrorCode;
+      transportDiagnostics.finalLegacyNumericCode = null;
+      transportDiagnostics.finalErrorName = "OpenAIProviderError";
+      transportDiagnostics.finalErrorMessage = responseBody?.error?.message || response.statusText || `HTTP ${response.status}`;
+      transportDiagnostics.finalCauseChain = [];
+      transportDiagnostics.finalTimeoutScope = null;
       transportDiagnostics.attempts.push({
         attempt,
         stage: "provider_error",
@@ -692,6 +1016,12 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
     if (attempt >= maxAttempts) {
       transportDiagnostics.finalInfrastructureErrorCode = providerError.providerCode || `HTTP_${response.status}`;
       transportDiagnostics.finalInfrastructureFailureType = classifyOpenAiInfrastructureFailure({ response });
+      transportDiagnostics.finalNormalizedErrorCode = transportDiagnostics.finalInfrastructureErrorCode;
+      transportDiagnostics.finalLegacyNumericCode = null;
+      transportDiagnostics.finalErrorName = "OpenAIProviderError";
+      transportDiagnostics.finalErrorMessage = providerError.message;
+      transportDiagnostics.finalCauseChain = [];
+      transportDiagnostics.finalTimeoutScope = null;
       transportDiagnostics.attempts.push({
         attempt,
         stage: "provider_error",
@@ -718,7 +1048,19 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       errorCode: providerError.providerCode || `HTTP_${response.status}`,
       failureType: classifyOpenAiInfrastructureFailure({ response }),
     });
-    logOpenAiRetry({ purpose, model, attempt, maxAttempts, startedAt, error: providerError, response });
+    logOpenAiRetry({
+      purpose,
+      model,
+      modelRole,
+      solveMode,
+      timeoutMs,
+      timeoutSource: timeoutResolution.timeoutSource,
+      attempt,
+      maxAttempts,
+      startedAt,
+      error: providerError,
+      response,
+    });
     await delay(getOpenAiRetryDelayMs(attempt));
   }
 
@@ -803,32 +1145,52 @@ export function estimateOpenAiCost(usage, { model = "" } = {}) {
     + (normalized.outputTokens / 1000000 * outputCost);
 }
 
-function extractOutputText(responseBody) {
-  if (typeof responseBody.output_text === "string") return responseBody.output_text;
+function attachResponseFailureDiagnostics(error, diagnostics = {}, extra = {}) {
+  const mergedDiagnostics = {
+    ...diagnostics,
+    ...extra,
+  };
+  attachOpenAiDiagnosticsToError(error, mergedDiagnostics);
+  attachOpenAiUsageToError(
+    error,
+    mergedDiagnostics.usage || null,
+    mergedDiagnostics.providerCallCount || 0,
+  );
+  return error;
+}
 
-  for (const item of responseBody.output || []) {
-    for (const content of item.content || []) {
-      if (typeof content.text === "string") return content.text;
-    }
-  }
+function extractOutputText(responseBody, diagnostics = {}) {
+  const outputText = findOutputText(responseBody);
+  if (outputText !== null) return outputText;
 
-  const refusal = responseBody.output
-    ?.flatMap((item) => item.content || [])
-    ?.find((content) => content.refusal)?.refusal;
-
+  const refusal = findResponseRefusal(responseBody);
   if (refusal) {
-    throw Object.assign(new Error(refusal), {
+    throw attachResponseFailureDiagnostics(Object.assign(new Error(refusal), {
       statusCode: 502,
       code: "AI_REQUEST_REFUSED",
+      responseFailureType: "refusal",
       publicMessage: "The AI service declined to complete that explanation.",
+    }), diagnostics, {
+      responseFailureType: "refusal",
     });
   }
 
-  throw Object.assign(new Error("OpenAI response did not include text output."), {
+  if (isExplicitlyIncompleteResponse(responseBody)) {
+    throw attachResponseFailureDiagnostics(
+      createTruncatedJsonError("", responseBody),
+      diagnostics,
+      { responseFailureType: RESPONSE_FAILURE_TYPES.TRUNCATED },
+    );
+  }
+
+  throw attachResponseFailureDiagnostics(Object.assign(new Error("OpenAI response did not include text output."), {
     statusCode: 502,
     code: "AI_RESPONSE_INVALID",
     compactRetryable: true,
+    responseFailureType: "missing_text",
     publicMessage: "The AI service returned an incomplete explanation.",
+  }), diagnostics, {
+    responseFailureType: "missing_text",
   });
 }
 
@@ -882,8 +1244,6 @@ function createTruncatedJsonError(outputText, responseBody) {
 }
 
 export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
-  const outputText = extractOutputText(responseBody);
-  logOpenAiResponse({ purpose: "json_parse", responseBody, outputText });
   const meta = responseBody?._omniOpenAiMeta || {};
   const baseDiagnostics = {
     requestId: debugContext.requestId || meta.requestId || null,
@@ -910,38 +1270,48 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
     finishReason: getFinishReason(responseBody) || null,
     responseId: responseBody?.id || null,
     responseStatus: responseBody?.status || null,
-    incompleteDetails: responseBody?.incomplete_details || null,
+    providerHttpStatus: meta.providerHttpStatus ?? null,
+    incompleteDetails: getIncompleteDetails(responseBody),
+    incompleteReason: getIncompleteDetails(responseBody)?.reason || null,
+    responseShape: summarizeOpenAiResponseShape(responseBody),
+    maxOutputTokens: meta.maxOutputTokens ?? null,
+    schemaName: meta.schemaName || null,
+    schemaValidator: debugContext.schemaValidator || null,
+    usage: responseBody?.usage || null,
+    providerCallCount: meta.providerCallCount
+      ?? meta.transportDiagnostics?.successfulProviderResponses
+      ?? 0,
+  };
+  const outputText = extractOutputText(responseBody, baseDiagnostics);
+  const outputDiagnostics = {
+    ...baseDiagnostics,
     rawOutputHash: hashDebugText(outputText),
     rawOutputChars: outputText.length,
     rawOutput: outputText,
     promptText: meta.promptText || "",
     modelInputMessages: meta.modelInputMessages || [],
-    maxOutputTokens: meta.maxOutputTokens ?? null,
-    schemaName: meta.schemaName || null,
-    schemaValidator: debugContext.schemaValidator || null,
-    usage: responseBody?.usage || null,
   };
+  logOpenAiResponse({ purpose: "json_parse", responseBody });
   logOpenAiDebug("raw_model_response", {
-    requestId: baseDiagnostics.requestId,
-    purpose: baseDiagnostics.purpose,
-    model: baseDiagnostics.model,
-    temperature: baseDiagnostics.temperature,
-    topP: baseDiagnostics.topP,
-    temperatureSource: baseDiagnostics.temperatureSource,
-    topPSource: baseDiagnostics.topPSource,
-    promptHash: baseDiagnostics.promptHash,
-    normalizedProblemHash: baseDiagnostics.normalizedProblemHash,
-    attemptType: baseDiagnostics.attemptType,
-    retryCount: baseDiagnostics.retryCount,
-    finishReason: baseDiagnostics.finishReason,
-    rawOutputHash: baseDiagnostics.rawOutputHash,
-    rawOutputChars: baseDiagnostics.rawOutputChars,
+    requestId: outputDiagnostics.requestId,
+    purpose: outputDiagnostics.purpose,
+    model: outputDiagnostics.model,
+    temperature: outputDiagnostics.temperature,
+    topP: outputDiagnostics.topP,
+    temperatureSource: outputDiagnostics.temperatureSource,
+    topPSource: outputDiagnostics.topPSource,
+    promptHash: outputDiagnostics.promptHash,
+    normalizedProblemHash: outputDiagnostics.normalizedProblemHash,
+    attemptType: outputDiagnostics.attemptType,
+    retryCount: outputDiagnostics.retryCount,
+    finishReason: outputDiagnostics.finishReason,
+    rawOutputHash: outputDiagnostics.rawOutputHash,
+    rawOutputChars: outputDiagnostics.rawOutputChars,
     rawOutput: outputText,
   });
   if (isLengthFinishReason(responseBody)) {
     const error = createTruncatedJsonError(outputText, responseBody);
-    attachOpenAiDiagnosticsToError(error, {
-      ...baseDiagnostics,
+    attachResponseFailureDiagnostics(error, outputDiagnostics, {
       responseFailureType: RESPONSE_FAILURE_TYPES.TRUNCATED,
     });
     throw error;
@@ -957,8 +1327,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       publicMessage: "The AI service returned an incomplete explanation.",
       invalidOutputText: outputText,
     });
-    attachOpenAiDiagnosticsToError(error, {
-      ...baseDiagnostics,
+    attachResponseFailureDiagnostics(error, outputDiagnostics, {
       responseFailureType: RESPONSE_FAILURE_TYPES.TRUNCATED,
     });
     throw error;
@@ -984,8 +1353,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       publicMessage: "The AI service returned an invalid explanation.",
       invalidOutputText: outputText,
     });
-    attachOpenAiDiagnosticsToError(wrapped, {
-      ...baseDiagnostics,
+    attachResponseFailureDiagnostics(wrapped, outputDiagnostics, {
       responseFailureType: RESPONSE_FAILURE_TYPES.JSON_PARSE,
     });
     throw wrapped;
@@ -1002,7 +1370,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
   let asserted;
   try {
     asserted = attachOpenAiDiagnostics(assertFn(parsed), {
-      ...baseDiagnostics,
+      ...outputDiagnostics,
       parsedJson: parsed,
     });
     logOpenAiDebug("sanitized_response", {
@@ -1036,8 +1404,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       if (!error.responseFailureType) {
         error.responseFailureType = RESPONSE_FAILURE_TYPES.SCHEMA_CONTRACT;
       }
-      attachOpenAiDiagnosticsToError(error, {
-        ...baseDiagnostics,
+      attachResponseFailureDiagnostics(error, outputDiagnostics, {
         parsedJson: parsed,
         responseFailureType: error.responseFailureType,
       });
@@ -1051,8 +1418,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       publicMessage: "The AI service returned an invalid explanation.",
       invalidOutputText: outputText,
     });
-    attachOpenAiDiagnosticsToError(wrapped, {
-      ...baseDiagnostics,
+    attachResponseFailureDiagnostics(wrapped, outputDiagnostics, {
       parsedJson: parsed,
       responseFailureType: RESPONSE_FAILURE_TYPES.GENERATED_VALIDATION,
     });
@@ -1075,6 +1441,7 @@ async function requestOpenAi({
   const enrichedDebugContext = {
     ...debugContext,
     modelRole: selection.role,
+    solveMode: selection.solveMode,
     samplingOmitted: selection.samplingOmitted,
     reasoningOmittedReason: selection.reasoningOmittedReason,
   };
@@ -1101,6 +1468,9 @@ async function requestOpenAi({
     modelPath,
     modelRole: selection.role,
     modelSource: selection.modelSource,
+    timeoutMs: selection.timeoutMs,
+    timeoutSource: selection.timeoutSource,
+    timeoutConfigStatus: selection.timeoutConfigStatus,
     reasoningEffort: selection.reasoningEffort,
     requestedReasoningEffort: selection.requestedReasoningEffort || null,
     reasoningOmittedReason: selection.reasoningOmittedReason || null,
@@ -1119,23 +1489,47 @@ async function requestOpenAi({
   });
   const responseBody = await fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext: enrichedDebugContext });
 
-  logOpenAiResponse({ purpose, responseBody, outputText: extractOutputText(responseBody) });
+  logOpenAiResponse({ purpose, responseBody });
   return responseBody;
 }
 
 async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "text_completion", modelPath = "solver" }) {
-  const model = getOpenAiModelForPath(modelPath);
+  const selection = selectOpenAiModel({ modelPath });
   const payload = {
-    model,
+    model: selection.modelId,
     input: [{ role: "user", content }],
     max_output_tokens: maxOutputTokens,
   };
-  logOpenAiModelSelection(modelPath, { purpose });
+  logOpenAiModelSelection(modelPath, { purpose, selection });
   logOpenAiRequest({ purpose, payload });
-  const responseBody = await fetchOpenAiWithRetry({ purpose, modelPath, payload });
+  const responseBody = await fetchOpenAiWithRetry({
+    purpose,
+    modelPath,
+    payload,
+    debugContext: {
+      modelRole: selection.role,
+      solveMode: selection.solveMode,
+    },
+  });
 
+  const diagnostics = {
+    requestId: responseBody?._omniOpenAiMeta?.requestId || null,
+    purpose,
+    model: responseBody?._omniOpenAiMeta?.model || responseBody?.model || null,
+    responseModel: responseBody?.model || null,
+    responseId: responseBody?.id || null,
+    responseStatus: responseBody?.status || null,
+    providerHttpStatus: responseBody?._omniOpenAiMeta?.providerHttpStatus ?? null,
+    incompleteDetails: getIncompleteDetails(responseBody),
+    incompleteReason: getIncompleteDetails(responseBody)?.reason || null,
+    responseShape: summarizeOpenAiResponseShape(responseBody),
+    usage: responseBody?.usage || null,
+    providerCallCount: responseBody?._omniOpenAiMeta?.providerCallCount
+      ?? responseBody?._omniOpenAiMeta?.transportDiagnostics?.successfulProviderResponses
+      ?? 0,
+  };
   return {
-    text: extractOutputText(responseBody).trim(),
+    text: extractOutputText(responseBody, diagnostics).trim(),
     usage: responseBody.usage || null,
   };
 }

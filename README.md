@@ -130,16 +130,20 @@ The complete local template is in `.env.example`. Important groups:
 | Group | Variables |
 | --- | --- |
 | OpenAI secrets | `OPENAI_API_KEY`, optional `OPENAI_ORG_ID`, optional `OPENAI_PROJECT_ID` |
-| Model routing | `OPENAI_*_MODEL` legacy-compatible variables and preferred `OMNIMATH_*_MODEL` overrides |
+| Model routing | Preferred `OMNIMATH_*_MODEL` role overrides and legacy-compatible `OPENAI_*_MODEL` role overrides |
 | Reasoning models | `OMNIMATH_SOLVER_REASONING_EFFORT`, `OMNIMATH_REPAIR_REASONING_EFFORT`, `OMNIMATH_ESCALATION_REASONING_EFFORT`, `OMNIMATH_PREMIUM_ESCALATION_REASONING_EFFORT` |
-| Output and timeout limits | `OPENAI_MAX_OUTPUT_TOKENS`, `OPENAI_SOLVE_MAX_OUTPUT_TOKENS`, `OPENAI_LAZY_MAX_OUTPUT_TOKENS`, `OPENAI_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS`, `OPENAI_REQUEST_TIMEOUT_MS` |
+| Output and timeout limits | `OPENAI_MAX_OUTPUT_TOKENS`, `OPENAI_SOLVE_MAX_OUTPUT_TOKENS`, `OPENAI_LAZY_MAX_OUTPUT_TOKENS`, `OPENAI_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS`, role-specific `OMNIMATH_OPENAI_*_TIMEOUT_MS` variables |
 | Usage limits | `AI_ENABLED`, `AI_RATE_LIMIT_PER_MINUTE`, `AI_RATE_LIMIT_PER_HOUR`, `DAILY_AI_LIMIT`, `MONTHLY_AI_LIMIT`, `DAILY_TOKEN_LIMIT`, `MONTHLY_TOKEN_LIMIT`, `DAILY_SPEND_LIMIT_USD`, `MONTHLY_SPEND_LIMIT_USD` |
 | Auth | `VITE_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `CLERK_JWT_KEY`, `CLERK_AUTHORIZED_PARTIES`, `CLERK_TIER_CLAIM` |
 | Persistence | `DATABASE_URL`, `DATABASE_SSL`, `DATABASE_POOL_MAX` |
 | Development | `PORT`, `VITE_PORT`, `DEV_API_TARGET`, `DEV_CLIENT_ORIGIN`, `VITE_AUTH_MODE` |
 | Diagnostics | `OMNIMATH_DEBUG_SOLVE`, `OMNIMATH_CAPTURE_FAILED_SOLVES`, `VITE_DEBUG_*` flags |
 
-`OPENAI_MODEL` and `OPENAI_LAZY_MODEL` are still supported as fallback model selectors. New deployments should prefer role-specific `OMNIMATH_*_MODEL` variables when overriding defaults.
+Model routing is role-specific. Solver resolution is `OMNIMATH_SOLVER_MODEL` > `OPENAI_SOLVER_MODEL` > role default. Repair resolution is `OMNIMATH_REPAIR_MODEL` > `OPENAI_REPAIR_MODEL` > explicitly configured solver role model > role default. Escalation resolution is `OMNIMATH_ESCALATION_MODEL` > `OPENAI_ESCALATION_MODEL` > role default, and premium escalation checks premium role variables before escalation variables. `OPENAI_MODEL` is retained only as a documented legacy value and does not silently override solver, repair, escalation, or image extraction defaults.
+
+Current role defaults are `gpt-5.6-luna` for the initial solver, `gpt-5.6-terra` for repair, `gpt-5.6-sol` for escalation and premium escalation, `gpt-4.1` for image extraction, and `gpt-4.1-mini` for extraction review, hover, and pinned explanations.
+
+OpenAI request deadlines are also role-specific. Defaults are 60 seconds for image extraction, extraction review, and the initial solver; 120 seconds for repair; 180 seconds for escalation and premium escalation; and 30 seconds for hover and pinned explanations. Initial compact retries inherit the solver deadline, while compact retries inside another resolved role inherit that role's deadline. Configured deadlines are clamped to 5–300 seconds; missing, zero, negative, and nonnumeric values use the role default. The legacy blanket `OPENAI_REQUEST_TIMEOUT_MS` is not used for request deadlines.
 
 ## Running Locally
 

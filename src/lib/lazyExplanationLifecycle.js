@@ -1,7 +1,7 @@
 export const HOVER_LOADING_DELAY_MS = 650;
 export const HOVER_STILL_GENERATING_DELAY_MS = 4200;
 export const HOVER_TIMEOUT_MS = 55000;
-export const PIN_TIMEOUT_MS = 12000;
+export const PIN_TIMEOUT_MS = 35000;
 
 export const HOVER_LOADING_MESSAGE = "Loading...";
 export const HOVER_STILL_GENERATING_MESSAGE = "Still generating...";

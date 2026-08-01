@@ -1070,27 +1070,41 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
         currentSelectionState.selectionStartTokenId,
         currentSelectionState.selectionEndTokenId
       );
-    if (!selection || selection.tokenIds.length <= 1) {
-      const next = {
-        isSelecting: false,
-        selectionStartTokenId: null,
-        selectionEndTokenId: null,
-        selectedTokenIds: [],
-        selectedText: "",
-        selectedStepId: null,
-        selectionMode: null,
-        selectionRect: null,
-        dragStartPoint: null,
-        dragCurrentPoint: null,
-        fallbackToken: null,
-        semanticSelection: null,
-        selectedSemanticRange: null,
-        activeSelection: null,
-      };
-      selectionStateRef.current = next;
-      setSelectionState(next);
-      return;
-    }
+      if (!selection || selection.tokenIds.length <= 1) {
+        const singleToken = endpointToken || currentSelectionState.fallbackToken || null;
+        const singleTokenId = singleToken?.id || null;
+      
+        const next = {
+          isSelecting: false,
+          selectionStartTokenId: null,
+          selectionEndTokenId: null,
+          selectedTokenIds: singleTokenId ? [singleTokenId] : [],
+          selectedText: singleToken
+            ? (
+                singleToken.selectedText
+                || singleToken.display
+                || singleToken.latex
+                || singleToken.text
+                || ""
+              )
+            : "",
+          selectedStepId: singleTokenId
+            ? currentSelectionState.selectedStepId
+            : null,
+          selectionMode: null,
+          selectionRect: null,
+          dragStartPoint: null,
+          dragCurrentPoint: null,
+          fallbackToken: null,
+          semanticSelection: null,
+          selectedSemanticRange: null,
+          activeSelection: null,
+        };
+      
+        selectionStateRef.current = next;
+        setSelectionState(next);
+        return;
+      }
     const next = {
       ...currentSelectionState,
       isSelecting: false,

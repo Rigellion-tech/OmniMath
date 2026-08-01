@@ -940,7 +940,7 @@ function FloatingWindow({ item, index, problem, getToken }) {
         transform: `translate3d(${item.x}px, ${item.y}px, 0)`,
         zIndex: 70 + index,
       }}
-      onMouseEnter={clearHoverLens}
+      
     >
       <div
         className={cn(

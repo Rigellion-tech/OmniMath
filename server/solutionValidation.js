@@ -1699,16 +1699,45 @@ export function findSolutionIntegrityIssues(result, { problem = "" } = {}) {
   return buildSolutionRuleEvaluations(result, { problem, includeQualityRules: false }).issues;
 }
 
-export function validateSolutionQuality(result, { problem = "", onRuleEvaluation = null } = {}) {
+export function validateSolutionQuality(
+  result,
+  { problem = "", onRuleEvaluation = null } = {}
+) {
   const { issues, evaluations, context } = buildSolutionRuleEvaluations(result, {
     problem,
     includeQualityRules: true,
     onRuleEvaluation,
   });
+
   if (issues.length > 0) {
-    const error = createInvalidSolutionError("Solution failed quality validation.", issues);
+    const failedEvaluations = evaluations.filter(
+      (evaluation) => evaluation?.applicable && evaluation?.result === "fail"
+    );
+
+    console.error("[omnimath:validator-issues]", {
+      issues,
+      failedRules: failedEvaluations.map((evaluation) => ({
+        validatorName: evaluation.validatorName,
+        issue: evaluation.issue || evaluation.validatorName,
+        domain: evaluation.domain || null,
+        applicabilityReason: evaluation.applicabilityReason || null,
+        failureEvidence: evaluation.failureEvidence || null,
+        inputFields: evaluation.inputFields || [],
+      })),
+      problem,
+      stepCount: Array.isArray(result?.steps) ? result.steps.length : 0,
+      finalAnswerLatex:
+        result?.finalAnswerLatex || result?.finalAnswer || "",
+    });
+
+    const error = createInvalidSolutionError(
+      "Solution failed quality validation.",
+      issues
+    );
+
     error.solutionRuleEvaluations = evaluations;
     error.solutionValidationContext = context;
+
     throw error;
   }
 

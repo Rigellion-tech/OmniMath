@@ -1,9 +1,9 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { ChevronDown } from "lucide-react";
 import { MathRenderShell, looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
 import MathChunk from "./MathChunk";
 import MathText from "./MathText";
-import { useHover } from "@/lib/HoverContext";
+import { useHoverActions, useHoverSemanticState } from "@/lib/HoverContext";
 import { cn } from "@/lib/utils";
 
 function lineHasRenderableToken(line) {
@@ -115,9 +115,14 @@ function mathBlockChunk(latex, idHint, role = "equation") {
 }
 
 function SemanticMathBlock({ latex, idHint, stepId, role = "equation" }) {
+  const chunk = useMemo(
+    () => mathBlockChunk(latex, `${idHint || "math"}-${stepId || "step"}`, role),
+    [idHint, latex, role, stepId]
+  );
+
   return (
     <MathChunk
-      chunk={mathBlockChunk(latex, `${idHint || "math"}-${stepId || "step"}`, role)}
+      chunk={chunk}
       stepId={stepId}
     />
   );
@@ -204,12 +209,26 @@ function SplitMathBlocks({ blocks, idBase, stepId, displayMode }) {
 }
 
 export function InteractiveMathLine({ line, stepId }) {
-  const tokens = Array.isArray(line?.tokens) ? line.tokens : [];
+  const tokens = useMemo(
+    () => (Array.isArray(line?.tokens) ? line.tokens : []),
+    [line?.tokens]
+  );
   const hasTokens = lineHasRenderableToken(line);
   const showLineText = shouldRenderLineText(line, tokens);
   const textAsMath = !hasTokens && !line?.latex && line?.text && looksLikeMathExpression(line.text);
   const singleTokenLatex = tokens.length === 1 ? renderableTokenLatex(tokens[0]) : "";
-  const singleTokenBlocks = singleTokenLatex ? splitLatexRenderBlocks(singleTokenLatex) : [];
+  const singleTokenBlocks = useMemo(
+    () => (singleTokenLatex ? splitLatexRenderBlocks(singleTokenLatex) : []),
+    [singleTokenLatex]
+  );
+  const latexBlocks = useMemo(
+    () => (line?.latex ? splitLatexRenderBlocks(line.latex) : []),
+    [line?.latex]
+  );
+  const textMathBlocks = useMemo(
+    () => (textAsMath ? splitLatexRenderBlocks(line.text) : []),
+    [line?.text, textAsMath]
+  );
   const shouldSplitSingleToken = hasTokens
     && tokens.length === 1
     && !showLineText
@@ -249,10 +268,9 @@ export function InteractiveMathLine({ line, stepId }) {
   }
 
   if (line?.latex) {
-    const blocks = splitLatexRenderBlocks(line.latex);
     return (
       <SplitMathBlocks
-        blocks={blocks}
+        blocks={latexBlocks}
         idBase={line.id || `${stepId}-latex`}
         stepId={stepId}
         displayMode={line.kind === "block" || line.displayMode === true}
@@ -261,10 +279,9 @@ export function InteractiveMathLine({ line, stepId }) {
   }
 
   if (textAsMath) {
-    const blocks = splitLatexRenderBlocks(line.text);
     return (
       <SplitMathBlocks
-        blocks={blocks}
+        blocks={textMathBlocks}
         idBase={line.id || `${stepId}-text`}
         stepId={stepId}
         displayMode
@@ -279,14 +296,16 @@ export function InteractiveMathLine({ line, stepId }) {
   return null;
 }
 
-export function SolutionStep({ step, index, selected, expanded, onSelect, onToggleExpanded }) {
+function SolutionStepView({ step, index, selected, expanded, onSelect, onToggleExpanded, hoverSemantic, hoverActions }) {
   const {
     activeStepId,
+    openReferenceIds = [],
+  } = hoverSemantic;
+  const {
     clearSelectedConcept,
     handleStepLeave,
-    openReferenceIds = [],
-  } = useHover();
-  const lines = solutionLinesForStep(step);
+  } = hoverActions;
+  const lines = useMemo(() => solutionLinesForStep(step), [step]);
   const isActiveStep = activeStepId === step.id;
   const hasWindow = openReferenceIds.includes(step.id);
   const state = isActiveStep ? "active" : selected ? "selected" : "idle";
@@ -391,5 +410,41 @@ export function SolutionStep({ step, index, selected, expanded, onSelect, onTogg
     </article>
   );
 }
+
+function solutionStepHoverSignature(stepId, state = {}) {
+  return [
+    state.activeStepId === stepId,
+    (state.openReferenceIds || []).includes(stepId),
+  ].join("|");
+}
+
+function sameSolutionStepViewProps(previous, next) {
+  return previous.step === next.step
+    && previous.index === next.index
+    && previous.selected === next.selected
+    && previous.expanded === next.expanded
+    && previous.onSelect === next.onSelect
+    && previous.onToggleExpanded === next.onToggleExpanded
+    && previous.hoverActions === next.hoverActions
+    && solutionStepHoverSignature(previous.step?.id, previous.hoverSemantic)
+      === solutionStepHoverSignature(next.step?.id, next.hoverSemantic);
+}
+
+SolutionStepView.displayName = "SolutionStep";
+const MemoizedSolutionStepView = React.memo(SolutionStepView, sameSolutionStepViewProps);
+
+export function SolutionStep(props) {
+  const hoverSemantic = useHoverSemanticState();
+  const hoverActions = useHoverActions();
+  return (
+    <MemoizedSolutionStepView
+      {...props}
+      hoverSemantic={hoverSemantic}
+      hoverActions={hoverActions}
+    />
+  );
+}
+
+SolutionStep.displayName = "SolutionStepContextBridge";
 
 export default SolutionStep;

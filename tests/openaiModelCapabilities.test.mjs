@@ -98,6 +98,18 @@ describe("OpenAI model capabilities", () => {
     assert.equal(selection.modelSource, "OMNIMATH_REPAIR_MODEL");
   });
 
+  it("resolves repair when it is selected as the initial model path", () => {
+    clearEnv();
+    process.env.OMNIMATH_SOLVER_MODEL = "gpt-5.6-luna";
+    process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
+
+    const selection = selectOpenAiModel({ modelPath: "repair", debugContext: { attemptType: "initial" } });
+
+    assert.equal(selection.role, "repair");
+    assert.equal(selection.modelId, "gpt-5.6-terra");
+    assert.equal(selection.modelSource, "OMNIMATH_REPAIR_MODEL");
+  });
+
   it("does not let repair inherit obsolete OPENAI_MODEL", () => {
     clearEnv();
     process.env.OPENAI_MODEL = "gpt-4.1-mini";
@@ -257,6 +269,28 @@ describe("OpenAI model capabilities", () => {
     assert.equal(repair.reasoningEffort, "high");
     assert.equal(escalation.modelId, "o3");
     assert.equal(escalation.freshSolve, true);
+  });
+
+  it("reduces difficult compact retries to nonzero reasoning", () => {
+    const selection = selectOpenAiModel({
+      modelPath: "solver",
+      debugContext: { retryPurpose: "compact", attemptType: "repair-compact" },
+    });
+    assert.equal(selection.role, "repair");
+    assert.equal(selection.reasoningEffort, "medium");
+    assert.equal(selection.reasoningEffortSource, "compact_retry_reduced_reasoning_policy");
+    assert.equal(buildResponsesModelParameters(selection).reasoning.effort, "medium");
+  });
+
+  it("keeps Luna compact retries on the existing no-reasoning policy", () => {
+    const selection = selectOpenAiModel({
+      modelPath: "solver",
+      debugContext: { retryPurpose: "compact", attemptType: "initial-compact" },
+    });
+
+    assert.equal(selection.role, "solver");
+    assert.equal(selection.reasoningEffort, "none");
+    assert.equal(buildResponsesModelParameters(selection).reasoning.effort, "none");
   });
 
   it("falls back predictably for unknown models", () => {

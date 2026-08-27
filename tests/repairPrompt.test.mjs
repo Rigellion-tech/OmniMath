@@ -83,17 +83,66 @@ test("fresh escalation prompt avoids full contaminated derivation", () => {
         failureEvidence: "estimate=0.7546930417050932 proposed=0",
       }],
     },
+    priorFailures: [{
+      stage: "initial",
+      result: {
+        finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+        steps: [{ latex: "earlier_bad_series", reasoning: "Do not copy this derivation." }],
+      },
+      error: qualityError({
+        rule: "unverified_critical_identity",
+        evidence: "parameter family did not reproduce the target integrand",
+      }),
+    }],
   });
 
   assert.match(prompt, /Fresh escalation task/);
   assert.match(prompt, /Solve the canonical original problem from scratch/);
   assert.match(prompt, /validation constraint, not as a derivation/);
+  assert.match(prompt, /Independently verify the final result numerically against the canonical original problem/);
   assert.match(prompt, /numerical_final_answer_mismatch/);
   assert.match(prompt, /0\.7546930417050932/);
   assert.match(prompt, /Previous final answer to avoid repeating without proof: \\frac\{\\pi\}\{2\}G/);
+  assert.match(prompt, /Earlier rejected candidate findings:/);
+  assert.match(prompt, /initial:/);
+  assert.match(prompt, /unverified_critical_identity/);
+  assert.match(prompt, /Previous final answer to avoid repeating without proof: \\frac\{\\pi\}\{2\}\\ln\^2 2/);
   assert.doesNotMatch(prompt, /bad_step_0/);
   assert.doesNotMatch(prompt, /bad_step_5/);
+  assert.doesNotMatch(prompt, /earlier_bad_series/);
   assert.doesNotMatch(prompt, /Previous invalid solution:/);
+});
+
+test("missing numerical evidence is never coerced into a trusted zero estimate", () => {
+  const error = {
+    solutionIssues: ["unsupported_final_answer_jump"],
+    solutionValidationContext: {
+      numericalCrossCheckResult: {
+        numericalEstimate: null,
+        proposedValue: null,
+        absoluteDifference: null,
+        tolerance: null,
+      },
+    },
+    solutionRuleEvaluations: [{
+      issue: "unsupported_final_answer_jump",
+      result: "fail",
+      failureEvidence: "final equality has no supported bridge",
+    }],
+  };
+  const prompt = buildFreshEscalationSolvePrompt({
+    problem: "\\int_0^\\infty f(x)\\,dx",
+    canonicalLatex: "\\int_0^\\infty f(x)\\,dx",
+    issues: error.solutionIssues,
+    previousResult: { finalAnswerLatex: "I=G" },
+    error,
+  });
+
+  assert.doesNotMatch(prompt, /independent numerical estimate:/u);
+  assert.doesNotMatch(prompt, /proposed model value:/u);
+  assert.doesNotMatch(prompt, /absolute difference:/u);
+  assert.doesNotMatch(prompt, /allowed tolerance:/u);
+  assert.match(prompt, /No detailed validator findings|Validator evidence:/u);
 });
 
 test("repair prompt caps and sanitizes failure evidence", () => {
@@ -107,6 +156,23 @@ test("repair prompt caps and sanitizes failure evidence", () => {
   assert.doesNotMatch(prompt, /\u0000/);
   assert.match(prompt, /Exact failure evidence:/);
   assert.ok(prompt.length < 10000);
+});
+
+test("repair prompts remove raw and JSON-escaped ANSI sequences", () => {
+  const latex = "\\int_0^\\infty f(x)\\,dx";
+  const prompt = buildRepairSolvePrompt("unused", ["numerical_final_answer_mismatch"], {
+    problem: `\u001b[1m${latex}\u001b[0m`,
+    previousResult: {
+      problemLatex: `\u001b[1m${latex}\u001b[0m`,
+      finalAnswerLatex: "1",
+      steps: [],
+    },
+    error: qualityError({ rule: "numerical_final_answer_mismatch" }),
+  });
+
+  assert.match(prompt, new RegExp(latex.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(prompt, /\u001b|\\u001b|\x1b|\\x1b|\[[01]m/iu);
+  assert.doesNotMatch(prompt, /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u);
 });
 
 test("unrelated repair rules do not include integration-by-parts-specific guidance", () => {
@@ -183,6 +249,41 @@ test("repair issue categorization routes structural-only failures narrowly", () 
   ]).category, "mathematical");
 
   assert.equal(categorizeRepairIssues(["unknown_validator_issue"]).category, "mathematical");
+});
+
+test("undefined symbols used by the final answer trigger mathematical repair", () => {
+  const issue = "unexplained_generated_symbol:G";
+  const error = {
+    solutionIssues: [issue],
+    solutionRuleEvaluations: [{
+      validatorName: "unexplained_generated_symbol",
+      name: "unexplained_generated_symbol",
+      issue,
+      result: "fail",
+      inputFields: ["result.finalAnswerLatex"],
+      failureEvidence: JSON.stringify({
+        symbol: "G",
+        fieldPath: "finalAnswerLatex",
+        sourceType: "finalAnswer",
+        classification: "undefined_free_symbol",
+      }),
+    }],
+  };
+
+  assert.equal(categorizeRepairIssues([issue], { error }).category, "mathematical");
+  const prompt = buildRepairSolvePrompt("Original solve prompt", [issue], {
+    problem: "\\int_0^\\infty f(x)\\,dx",
+    previousResult: {
+      finalAnswerLatex: "I=\\frac{\\pi}{2}G",
+      steps: [{ label: "Known form", math: "I=\\frac{\\pi}{2}G", summary: "State an unsupported constant." }],
+    },
+    error,
+  });
+
+  assert.match(prompt, /Assume the previous derivation is mathematically unreliable/);
+  assert.match(prompt, /Reconstruct the solution from scratch/);
+  assert.doesNotMatch(prompt, /Preserve final answer/);
+  assert.doesNotMatch(prompt, /Do not recompute/);
 });
 
 test("structural repair prompt preserves the previous derivation and final answer", () => {

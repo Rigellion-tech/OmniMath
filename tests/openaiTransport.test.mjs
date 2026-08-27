@@ -132,7 +132,7 @@ describe("OpenAI transport retry diagnostics", () => {
     );
   });
 
-  it("reports the attempted Terra repair model and repair deadline on timeout", async () => {
+  it("caps an explicitly requested Terra call by the interactive solve budget", async () => {
     process.env.OPENAI_API_KEY = "test-key";
     process.env.OMNIMATH_SOLVER_MODEL = "gpt-5.6-luna";
     process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
@@ -168,7 +168,9 @@ describe("OpenAI transport retry diagnostics", () => {
           assert.equal(diagnostics.model, "gpt-5.6-terra");
           assert.equal(diagnostics.modelRole, "repair");
           assert.equal(diagnostics.solveMode, "quality-repair");
-          assert.equal(diagnostics.timeoutMs, 120000);
+          assert.ok(diagnostics.timeoutMs <= 75000);
+          assert.ok(diagnostics.timeoutMs >= 74000);
+          assert.equal(diagnostics.maxAttempts, 2);
           assert.equal(
             diagnostics.timeoutSource,
             "OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS",
@@ -192,11 +194,48 @@ describe("OpenAI transport retry diagnostics", () => {
     assert.equal(exceptionLogs[0].model, "gpt-5.6-terra");
     assert.equal(exceptionLogs[0].modelRole, "repair");
     assert.equal(exceptionLogs[0].solveMode, "quality-repair");
-    assert.equal(exceptionLogs[0].timeoutMs, 120000);
+    assert.ok(exceptionLogs[0].timeoutMs <= 75000);
+    assert.ok(exceptionLogs[0].timeoutMs >= 74000);
     assert.equal(
       exceptionLogs[0].timeoutSource,
       "OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS",
     );
+  });
+
+  it("bounds retryable quality-repair connection failures by the repair role", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENAI_RETRY_BASE_DELAY_MS = "0";
+    process.env.OMNIMATH_SOLVER_MODEL = "gpt-5.6-luna";
+    process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      throw transportError("UND_ERR_CONNECT_TIMEOUT", "Connect Timeout Error");
+    };
+
+    await assert.rejects(
+      () => createMathExplanation({
+        prompt: "Repair x+7=12",
+        originalProblem: "x+7=12",
+        debugContext: {
+          retryPurpose: "quality-repair",
+          requestId: "repair-role-attempt-bound",
+        },
+      }),
+      (error) => {
+        const diagnostics = error.openAiTransportDiagnostics;
+        assert.equal(error.code, "AI_SERVICE_UNAVAILABLE");
+        assert.equal(diagnostics.modelPath, "solver");
+        assert.equal(diagnostics.modelRole, "repair");
+        assert.equal(diagnostics.maxAttempts, 2);
+        assert.equal(diagnostics.transportAttempts, 2);
+        assert.equal(diagnostics.retryCount, 1);
+        assert.equal(diagnostics.finalInfrastructureFailureType, "connection_timeout");
+        return true;
+      },
+    );
+
+    assert.equal(calls, 2);
   });
 
   it("keeps connection-establishment timeouts retryable", () => {

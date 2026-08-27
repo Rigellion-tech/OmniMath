@@ -66,16 +66,20 @@ export function mathNodeToLatex(value = "") {
   return normalizeLatexTransport(value);
 }
 
+export function canonicalLatexForKatex(value = "") {
+  return createMathNode(value, { stage: "canonical-katex-input" }).latex;
+}
+
 export function hasMalformedLatexCommandSpacing(value = "") {
   const text = normalizeLatexTransport(value);
-  return /\\(?:iiint|iint|oint|int|quad|langle|rangle|sin|cos|tan|sec|csc|cot|log|ln|exp|notin|to)(?=[A-Za-z0-9])|\\le(?=(?!ft)[A-Za-z0-9])|\\ge(?=(?!q)[A-Za-z0-9])|\\in(?=(?!t|fty)[A-Za-z0-9])/.test(text);
+  return /\\(?:iiint|iint|oint|int|quad|langle|rangle|sinh|cosh|tanh|sin(?!h\b)|cos(?!h\b)|tan(?!h\b)|sec|csc|cot|log|ln|exp|notin|to)(?=[A-Za-z0-9])|\\le(?=(?!ft)[A-Za-z0-9])|\\ge(?=(?!q)[A-Za-z0-9])|\\in(?=(?!t|fty)[A-Za-z0-9])/.test(text);
 }
 
 export function shouldPreserveLatex(value = "") {
   const text = normalizeLatexTransport(value);
   if (hasMalformedLatexCommandSpacing(text)) return false;
   if (/[^\\]\//.test(text) && !/\\(?:frac|left|right)\b/.test(text)) return false;
-  return /\\(?:sin|cos|tan|sec|csc|cot|log|ln|exp)\s*\(/.test(text)
+  return /\\(?:arcsin|arccos|arctan|sinh|cosh|tanh|sin|cos|tan|sec|csc|cot|log|ln|exp)\s*\(/.test(text)
     || /\\(?:oint|int|iint|iiint)_/.test(text)
     || /\\(?:frac|sqrt|left|right|langle|rangle|quad|nabla|cdot|times|mathbf)\b/.test(text)
     || /\^\{|_\{/.test(text);
@@ -140,7 +144,7 @@ export function balanceLatexDelimiters(value = "") {
 function repairCommandSpacing(value = "") {
   return String(value || "")
     .replace(/\\(quad|qquad)(?=[A-Za-z0-9\\])/g, "\\$1 ")
-    .replace(/\\(sin|cos|tan|sec|csc|cot|log|ln|exp)(?=[A-Za-z0-9])/g, "\\$1 ")
+    .replace(/\\(sinh|cosh|tanh|sin(?!h\b)|cos(?!h\b)|tan(?!h\b)|sec|csc|cot|log|ln|exp)(?=[A-Za-z0-9])/g, "\\$1 ")
     .replace(/\\(oint|iint|iiint|int)(?=[A-Za-z0-9\\])/g, "\\$1 ")
     .replace(/\\le(?=(?!ft)[A-Za-z0-9\\])/g, "\\le ")
     .replace(/\\ge(?=(?!q)[A-Za-z0-9\\])/g, "\\ge ")

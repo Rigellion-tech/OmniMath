@@ -183,6 +183,50 @@ function createLongLatexApiResponse() {
   };
 }
 
+function createEvaluationDelimiterApiResponse() {
+  const latex = "I = \\left[ \\frac{t^2}{2} \\right]_0^1 = \\frac12";
+  const chunk = {
+    id: "evaluation-delimiter-chunk",
+    display: latex,
+    latex,
+    text: latex,
+    role: "equation",
+  };
+  return {
+    title: "Evaluation delimiter rendering",
+    problem: "Evaluate the antiderivative at the bounds.",
+    originalProblem: "Evaluate the antiderivative at the bounds.",
+    expression: "\\int_0^1 t\\,dt",
+    finalAnswer: "\\frac12",
+    finalAnswerLatex: "\\frac12",
+    steps: [{
+      id: "evaluation-delimiter-step",
+      label: "Evaluate at the bounds",
+      math: latex,
+      summary: "Evaluate the antiderivative at the upper and lower bounds.",
+      chunks: [chunk],
+      expressions: [{
+        id: "evaluation-delimiter-expression",
+        latex,
+        role: "equation",
+        tokens: [],
+      }],
+      lines: [{
+        id: "evaluation-delimiter-line",
+        kind: "math",
+        role: "solution_step",
+        text: "",
+        latex,
+        tokens: [chunk],
+      }],
+    }],
+    usage: { kind: "explanation", tier: "test", remaining: 999, limit: 999 },
+    saved: false,
+    source: "playwright evaluation delimiter fixture",
+    demoMode: true,
+  };
+}
+
 function createHierarchicalTokenApiResponse() {
   const annotated = annotateMathExplanation({
     title: "Hierarchical token targets",
@@ -951,6 +995,86 @@ test("local semantic layer creates subtoken targets without solver annotations",
   await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("x");
 });
 
+test("quick tooltip owns hover across portal insertion and stale source clears", async ({ page }) => {
+  const lazyRequests = [];
+  await installLocalSemanticLayerFixture(page, {
+    lazyRequests,
+    longLazyContent: true,
+    lazyDelayMs: 50,
+  });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect hover lifetime.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const xToken = page.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
+  await expect(xToken).toBeVisible();
+  const xBox = await xToken.boundingBox();
+  expect(xBox).not.toBeNull();
+  await moveSemanticPointer(page, xBox.x + xBox.width / 2, xBox.y + xBox.height / 2);
+
+  const tooltip = page.locator(".omni-quick-tooltip");
+  await expect(tooltip).toBeVisible();
+  await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex)
+    .toBe("x");
+  await expect(tooltip).toContainText(/long hover explanation/i);
+  const xSemanticId = await xToken.getAttribute("data-semantic-id");
+  await expect(tooltip).toHaveAttribute("data-tooltip-semantic-id", xSemanticId);
+
+  await xToken.evaluate((node, pointer) => {
+    const source = node.closest("[data-inspectable='math-token']");
+    const quickTooltip = document.querySelector(".omni-quick-tooltip");
+    source?.dispatchEvent(new MouseEvent("mouseout", {
+      bubbles: true,
+      relatedTarget: quickTooltip,
+      clientX: pointer.x,
+      clientY: pointer.y,
+    }));
+  }, { x: xBox.x + xBox.width / 2, y: xBox.y + xBox.height / 2 });
+  await page.waitForTimeout(350);
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveAttribute("data-tooltip-semantic-id", xSemanticId);
+
+  await tooltip.evaluate((node, pointer) => {
+    const source = document.querySelector("[data-inspectable='math-subtoken'][data-token-latex='x']")
+      ?.closest("[data-inspectable='math-token']");
+    node.dispatchEvent(new MouseEvent("mouseout", {
+      bubbles: true,
+      relatedTarget: source,
+      clientX: pointer.x,
+      clientY: pointer.y,
+    }));
+  }, { x: xBox.x + xBox.width / 2, y: xBox.y + xBox.height / 2 });
+  await page.waitForTimeout(350);
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveAttribute("data-tooltip-semantic-id", xSemanticId);
+
+  await xToken.evaluate((node, pointer) => {
+    const source = node.closest("[data-inspectable='math-token']");
+    source?.dispatchEvent(new MouseEvent("mouseout", {
+      bubbles: true,
+      relatedTarget: document.body,
+      clientX: pointer.x,
+      clientY: pointer.y,
+    }));
+  }, { x: xBox.x + xBox.width / 2, y: xBox.y + xBox.height / 2 });
+  const fortyFive = page.locator("[data-inspectable='math-subtoken'][data-token-latex='45']").first();
+  const fortyFiveBox = await fortyFive.boundingBox();
+  expect(fortyFiveBox).not.toBeNull();
+  await moveSemanticPointer(
+    page,
+    fortyFiveBox.x + fortyFiveBox.width / 2,
+    fortyFiveBox.y + fortyFiveBox.height / 2
+  );
+  const fortyFiveSemanticId = await fortyFive.getAttribute("data-semantic-id");
+  await expect(tooltip).toHaveAttribute("data-tooltip-semantic-id", fortyFiveSemanticId);
+  await page.waitForTimeout(350);
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveAttribute("data-tooltip-semantic-id", fortyFiveSemanticId);
+
+  await page.mouse.move(4, 4);
+  await expect(tooltip).toHaveCount(0);
+});
+
 test("one typed submission produces one initial solve request despite rapid duplicate actions", async ({ page }) => {
   let solveRequests = 0;
   let releaseSolve;
@@ -1001,6 +1125,15 @@ test("debug hover performance counters prove pointer movement uses cached semant
   await target.hover({ force: true });
   await page.waitForTimeout(300);
 
+  const stableRenderState = await target.evaluate((node) => {
+    const owner = node.closest("[data-inspectable='math-token']");
+    return {
+      sourceDomInstance: owner?.getAttribute("data-source-dom-instance") || null,
+      measurementRevisions: [...(owner?.querySelectorAll(".math-semantic-hitbox[data-measurement-revision]") || [])]
+        .map((hitbox) => hitbox.getAttribute("data-measurement-revision")),
+    };
+  });
+
   const debugEnabled = await page.evaluate(() => Boolean(window.__OMNIMATH_HOVER_PERF__));
   test.skip(!debugEnabled, "Set VITE_DEBUG_MATH_HOVER=1 or VITE_DEBUG_MATH_HOVER_PERF=1 to enable investigation counters.");
   await page.evaluate(() => {
@@ -1008,6 +1141,7 @@ test("debug hover performance counters prove pointer movement uses cached semant
     window.__OMNIMATH_HOVER_PERF__.counters = {};
     window.__OMNIMATH_HOVER_PERF__.last = {};
     window.__OMNIMATH_HOVER_PERF__.events = [];
+    window.__OMNIMATH_PERF__?.reset?.();
   });
 
   await target.evaluate((node) => {
@@ -1028,9 +1162,26 @@ test("debug hover performance counters prove pointer movement uses cached semant
   expect(counters.annotatedMouseMove || 0).toBeGreaterThanOrEqual(10);
   expect(counters.pointerResolve || 0).toBeGreaterThanOrEqual(10);
   expect(counters.getBoundingClientRectCalls || 0).toBe(0);
+  expect(counters.querySelectorAllCalls || 0).toBe(0);
   expect(counters.pointerLayoutReadCount || 0).toBe(0);
   expect(counters.geometryMeasurement || 0).toBe(0);
+  expect(counters.mathChunkRender || 0).toBe(0);
   expect(counters.sameTargetMoveSkipped || 0).toBeGreaterThanOrEqual(8);
+
+  const postMoveState = await target.evaluate((node) => {
+    const owner = node.closest("[data-inspectable='math-token']");
+    return {
+      sourceDomInstance: owner?.getAttribute("data-source-dom-instance") || null,
+      measurementRevisions: [...(owner?.querySelectorAll(".math-semantic-hitbox[data-measurement-revision]") || [])]
+        .map((hitbox) => hitbox.getAttribute("data-measurement-revision")),
+    };
+  });
+  expect(postMoveState).toEqual(stableRenderState);
+
+  const appPerfCounters = await page.evaluate(() => window.__OMNIMATH_PERF__?.counters || {});
+  expect(appPerfCounters["semantic-tree.generate"] || 0).toBe(0);
+  expect(appPerfCounters["semantic-tree.flatten-targets"] || 0).toBe(0);
+  expect(appPerfCounters["semantic.geometry.measurement"] || 0).toBe(0);
 
   const overlayPointerEvents = await page.evaluate(() => (
     [...document.querySelectorAll(".math-semantic-hitbox[data-token-id]")]
@@ -1055,6 +1206,102 @@ test("debug hover performance counters prove pointer movement uses cached semant
   const invalidationCounters = await page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.counters || {});
   expect(invalidationCounters.geometryInvalidated || 0).toBeGreaterThanOrEqual(5);
   expect(invalidationCounters.geometryMeasurement || 0).toBe(1);
+});
+
+test("shared scroll coordinator translates cached geometry without semantic reconstruction", async ({ page }) => {
+  await installLocalSemanticLayerFixture(page);
+  await page.setViewportSize({ width: 760, height: 420 });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect local semantic hover performance.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const firstTarget = page.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
+  const lowerTarget = page.locator(".step-card", { has: page.getByRole("button", { name: /Arctangent argument/i }) })
+    .locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
+  await expect(firstTarget).toBeVisible();
+  await expect(lowerTarget).toHaveCount(1);
+  await page.waitForTimeout(350);
+
+  const debugEnabled = await page.evaluate(() => Boolean(window.__OMNIMATH_HOVER_PERF__));
+  test.skip(!debugEnabled, "Set VITE_DEBUG_MATH_HOVER=1 or VITE_DEBUG_MATH_HOVER_PERF=1 to enable investigation counters.");
+  const baseline = await firstTarget.evaluate((node) => ({
+    owner: node.closest("[data-math-chunk-owner]")?.getAttribute("data-source-dom-instance"),
+    revision: node.getAttribute("data-measurement-revision"),
+  }));
+  const sharedListenerState = await page.evaluate(() => ({
+    maxSubscribers: window.__OMNIMATH_SCROLL_COORDINATOR__?.maxSubscribersPerTarget || 0,
+    sharedTargets: window.__OMNIMATH_SCROLL_COORDINATOR__?.sharedTargets || 0,
+  }));
+  expect(sharedListenerState.maxSubscribers).toBeGreaterThan(1);
+  expect(sharedListenerState.sharedTargets).toBeGreaterThan(0);
+
+  await page.evaluate(() => {
+    window.__OMNIMATH_HOVER_PERF__.reset();
+    window.__OMNIMATH_SCROLL_COORDINATOR__?.reset?.();
+    window.__OMNIMATH_PERF__?.reset?.();
+  });
+  for (const top of [160, 320, 480, 240, 0]) {
+    await page.evaluate((value) => window.scrollTo(0, value), top);
+    await page.waitForTimeout(40);
+  }
+
+  const counters = await page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.counters || {});
+  const coordinator = await page.evaluate(() => ({
+    physicalScrollCallbacks: window.__OMNIMATH_SCROLL_COORDINATOR__?.physicalScrollCallbacks || 0,
+    subscriberNotifications: window.__OMNIMATH_SCROLL_COORDINATOR__?.subscriberNotifications || 0,
+  }));
+  const appCounters = await page.evaluate(() => window.__OMNIMATH_PERF__?.counters || {});
+  expect(counters.geometryTranslation || 0).toBeGreaterThan(0);
+  expect(counters.geometryReconstruction || 0).toBe(0);
+  expect(counters.geometryMeasurement || 0).toBe(0);
+  expect(counters.getClientRectsCalls || 0).toBe(0);
+  expect(counters.querySelectorAllCalls || 0).toBe(0);
+  expect(counters.mathChunkRender || 0).toBe(0);
+  expect(appCounters["semantic-tree.generate"] || 0).toBe(0);
+  expect(appCounters["semantic-tree.flatten-targets"] || 0).toBe(0);
+  expect(appCounters["react.commit"] || 0).toBe(0);
+  expect(coordinator.physicalScrollCallbacks).toBeLessThan(coordinator.subscriberNotifications);
+
+  const afterScroll = await firstTarget.evaluate((node) => ({
+    owner: node.closest("[data-math-chunk-owner]")?.getAttribute("data-source-dom-instance"),
+    revision: node.getAttribute("data-measurement-revision"),
+  }));
+  expect(afterScroll).toEqual(baseline);
+  await firstTarget.hover({ force: true });
+  await expect(firstTarget).toHaveAttribute("data-active-target", "true");
+
+  const transformedScale = await page.evaluate(() => {
+    const target = document.querySelector("[data-inspectable='math-subtoken'][data-token-latex='x']");
+    const transformedAncestor = target?.closest(".step-card");
+    const owner = target?.closest("[data-math-chunk-owner]");
+    const beforeWidth = owner?.getBoundingClientRect().width || 0;
+    if (transformedAncestor) {
+      transformedAncestor.style.transform = "scale(0.9)";
+      transformedAncestor.style.transformOrigin = "top left";
+    }
+    const afterWidth = owner?.getBoundingClientRect().width || 0;
+    window.scrollTo(0, 120);
+    window.dispatchEvent(new Event("scroll"));
+    return { beforeWidth, afterWidth };
+  });
+  expect(transformedScale.afterWidth).toBeLessThan(transformedScale.beforeWidth);
+  await expect.poll(() => page.evaluate(() => (
+    window.__OMNIMATH_HOVER_PERF__?.last?.geometryTransformInvalidated?.reason || ""
+  ))).toBe("transform-change");
+  await expect.poll(() => page.evaluate(() => (
+    window.__OMNIMATH_HOVER_PERF__?.last?.geometryReconstruction?.reason || ""
+  ))).toBe("transform-change");
+  await lowerTarget.scrollIntoViewIfNeeded();
+  await lowerTarget.hover({ force: true });
+  await expect(lowerTarget).toHaveAttribute("data-active-target", "true");
+
+  const listenerCountBeforeUnmount = await page.evaluate(() => (
+    window.__OMNIMATH_SCROLL_COORDINATOR__?.physicalListeners || 0
+  ));
+  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (
+    window.__OMNIMATH_SCROLL_COORDINATOR__?.physicalListeners || 0
+  ))).toBeLessThan(listenerCountBeforeUnmount);
 });
 
 test("aggregate semantic hover and quick tooltip stay stable at viewport edges", async ({ page }) => {
@@ -3616,6 +3863,303 @@ test("long vector-field equations scroll inside math containers without page ove
   await expect(page.locator(".omni-floating-window")).toHaveCount(0);
 
   await assertLayoutIntegrity(page);
+});
+
+test("spaced evaluation delimiters do not collapse to an arrow-only step", async ({ page }) => {
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createEvaluationDelimiterApiResponse()),
+    });
+  });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Evaluate the antiderivative at the bounds.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Evaluate at the bounds/i }) });
+  await expect(step).toBeVisible();
+  await expect(step.locator(".omni-equation-chain-separator")).toHaveCount(0);
+  await expect(step.locator("[data-math-render-error='true']")).toHaveCount(0);
+  await expect(step.locator(".katex")).not.toHaveCount(0);
+  await expect(step).toContainText(/I/);
+  await expect(step).toContainText(/1/);
+  await expect(step).not.toContainText("=>");
+});
+
+test("bare trig applications keep command boundaries through client annotation and KaTeX", async ({ page }) => {
+  const latex = "I = -2 \\int_0^{\\pi/2} (t \\ln(\\sin t) - \\int \\ln(\\sin t) \\, dt) \\tan t \\, dt";
+  const token = { id: "bare-trig-token", display: latex, latex, text: latex, role: "equation" };
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Bare trig command rendering",
+        problem: "Preserve bare trig command boundaries.",
+        originalProblem: "Preserve bare trig command boundaries.",
+        expression: "\\int_0^{\\pi/2} \\sin t\\,dt",
+        finalAnswer: latex,
+        finalAnswerLatex: latex,
+        steps: [{
+          id: "bare-trig-step",
+          label: "Preserve bare trig commands",
+          math: latex,
+          summary: "Keep each function command separate from its argument.",
+          chunks: [token],
+          expressions: [{ id: "bare-trig-expression", latex, role: "equation", tokens: [] }],
+          lines: [{ id: "bare-trig-line", kind: "math", latex, tokens: [token] }],
+        }],
+        usage: { kind: "explanation", tier: "test", remaining: 999, limit: 999 },
+        saved: false,
+        source: "playwright bare trig fixture",
+        demoMode: true,
+      }),
+    });
+  });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Preserve bare trig command boundaries.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Preserve bare trig commands/i }) });
+  await expect(step).toBeVisible();
+  await expect(step.locator("[data-math-render-error='true']")).toHaveCount(0);
+  await expect(step.locator(".katex")).not.toHaveCount(0);
+  const renderedLatex = await step.locator("[data-inspectable='math-token']").first().getAttribute("data-token-latex");
+  expect(renderedLatex).toContain("\\sin t");
+  expect(renderedLatex).toContain("\\tan t");
+  expect(renderedLatex).not.toMatch(/\\(?:sint|tant)\b/u);
+});
+
+test("semantic hitboxes remain interactive across internal horizontal scrolling", async ({ page }) => {
+  await page.setViewportSize({ width: 720, height: 900 });
+  const semanticRequests = [];
+  const latex = "L=\\sin a+\\cos b+\\tan c+\\ln(d^2+1)+\\sqrt{e^2+f^2}+\\frac{g^2+h^2}{1+i^2}+\\exp j+\\arctan k+\\cot z";
+  const token = { id: "horizontal-scroll-token", display: latex, latex, text: latex, role: "equation" };
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Horizontal semantic scrolling",
+        problem: "Inspect a long equation.",
+        originalProblem: "Inspect a long equation.",
+        expression: latex,
+        finalAnswer: latex,
+        finalAnswerLatex: latex,
+        steps: [{
+          id: "horizontal-scroll-step",
+          label: "Inspect the long equation",
+          math: latex,
+          summary: "Every term remains interactive while scrolling.",
+          chunks: [token],
+          expressions: [{ id: "horizontal-scroll-expression", latex, role: "equation", tokens: [] }],
+          lines: [{ id: "horizontal-scroll-line", kind: "math", latex, tokens: [token] }],
+        }],
+        usage: { kind: "explanation", tier: "test", remaining: 999, limit: 999 },
+        saved: false,
+        source: "playwright horizontal scroll fixture",
+        demoMode: true,
+      }),
+    });
+  });
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) await page.route(endpoint, async (route) => {
+    semanticRequests.push({ endpoint, body: route.request().postDataJSON() });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createLazyExplanationResponse()),
+    });
+  });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect a long equation.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Inspect the long equation/i }) });
+  await expect(step).toBeVisible();
+  const scrollContainer = step.locator(".math-render-shell-block").first();
+  await expect.poll(() => scrollContainer.evaluate((node) => node.scrollWidth > node.clientWidth + 20)).toBe(true);
+
+  const semanticTokens = step.locator("[data-inspectable='math-subtoken']");
+  const leftToken = semanticTokens.first();
+  const rightToken = semanticTokens.last();
+  await expect(step.locator(".math-semantic-hitbox").first()).toBeAttached({ timeout: 30_000 });
+  await expect.poll(() => semanticTokens.count()).toBeGreaterThan(1);
+  const initialTargetCount = await step.locator("[data-inspectable='math-subtoken']").count();
+  const initialTargetIds = await step.locator("[data-inspectable='math-subtoken']").evaluateAll((nodes) => (
+    nodes.map((node) => node.getAttribute("data-token-id"))
+  ));
+  const initialUniqueTargetIds = [...new Set(initialTargetIds)].sort();
+  expect(initialUniqueTargetIds.length).toBeGreaterThan(0);
+  const semanticTargetGroups = await step.locator("[data-inspectable='math-subtoken']").evaluateAll((nodes) => {
+    const groups = new Map();
+    for (const node of nodes) {
+      const semanticId = node.getAttribute("data-semantic-id");
+      const current = groups.get(semanticId) || {
+        semanticId,
+        latex: node.getAttribute("data-token-latex"),
+        role: node.getAttribute("data-token-role"),
+        count: 0,
+      };
+      current.count += 1;
+      groups.set(semanticId, current);
+    }
+    return [...groups.values()];
+  });
+  const fragmentedTargets = semanticTargetGroups
+    .filter((target) => target.count > 1)
+    .map(({ latex: targetLatex, role, count }) => ({ latex: targetLatex, role, count }))
+    .sort((left, right) => left.latex.localeCompare(right.latex));
+  expect(fragmentedTargets).toEqual([
+    { latex: "\\arctan", role: "functionName", count: 6 },
+    { latex: "\\cos", role: "functionName", count: 3 },
+    { latex: "\\cot", role: "functionName", count: 3 },
+    { latex: "\\exp", role: "functionName", count: 3 },
+    { latex: "\\ln", role: "functionName", count: 2 },
+    { latex: "\\sin", role: "functionName", count: 3 },
+    { latex: "\\tan", role: "functionName", count: 3 },
+  ]);
+  expect(initialTargetCount).toBeGreaterThan(initialUniqueTargetIds.length);
+  expect(semanticTargetGroups.filter((target) => target.latex === "c")).toEqual([
+    expect.objectContaining({ role: "argument", count: 1 }),
+  ]);
+  expect(semanticTargetGroups.filter((target) => target.latex === "i")).toEqual([
+    expect.objectContaining({ role: "base", count: 1 }),
+  ]);
+
+  const sinFragments = step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\sin']");
+  await expect(sinFragments).toHaveCount(3);
+  const sinSemanticId = await sinFragments.first().getAttribute("data-semantic-id");
+  for (let index = 0; index < await sinFragments.count(); index += 1) {
+    const box = await sinFragments.nth(index).boundingBox();
+    expect(box).not.toBeNull();
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", sinSemanticId);
+  }
+  await expect.poll(() => semanticRequests.filter((request) => request.endpoint.endsWith("explain-token")).at(-1)?.body?.semanticId)
+    .toBe(sinSemanticId);
+  const lastSinBox = await sinFragments.last().boundingBox();
+  await contextClickSemanticPointer(page, lastSinBox.x + lastSinBox.width / 2, lastSinBox.y + lastSinBox.height / 2);
+  await expect(page.locator(".omni-floating-window")).toHaveAttribute("data-semantic-id", sinSemanticId);
+  await expect.poll(() => semanticRequests.filter((request) => request.endpoint.endsWith("explain-pin")).at(-1)?.body?.semanticId)
+    .toBe(sinSemanticId);
+  await page.getByRole("button", { name: /Close explanation/i }).click();
+  await expect(page.locator(".omni-floating-window")).toHaveCount(0);
+  const firstSinBox = await sinFragments.first().boundingBox();
+  await page.mouse.move(firstSinBox.x + firstSinBox.width / 2, firstSinBox.y + firstSinBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(lastSinBox.x + lastSinBox.width / 2, lastSinBox.y + lastSinBox.height / 2, { steps: 4 });
+  await page.mouse.up();
+  await expect(step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\sin'].omni-token-selected")).toHaveCount(3);
+  await expect.poll(() => semanticRequests.filter((request) => request.endpoint.endsWith("explain-token")).at(-1)?.body?.semanticSelection?.leafIds || [])
+    .toEqual([sinSemanticId]);
+  await page.mouse.click(6, 6);
+  await page.mouse.move(6, 6);
+
+  const initialContainerBox = await scrollContainer.boundingBox();
+  const initialLeftBox = await leftToken.boundingBox();
+  const initialRightBox = await rightToken.boundingBox();
+  expect(initialContainerBox).not.toBeNull();
+  expect(initialLeftBox).not.toBeNull();
+  expect(initialRightBox).not.toBeNull();
+  expect(initialLeftBox.x).toBeLessThan(initialContainerBox.x + initialContainerBox.width);
+  expect(initialRightBox.x).toBeGreaterThan(initialContainerBox.x + initialContainerBox.width);
+
+  await page.waitForTimeout(300);
+  await page.evaluate(() => {
+    window.__OMNIMATH_HOVER_PERF__?.reset?.();
+    window.__OMNIMATH_SCROLL_COORDINATOR__?.reset?.();
+    window.__OMNIMATH_PERF__?.reset?.();
+  });
+
+  const maxScrollLeft = await scrollContainer.evaluate((node) => {
+    const maximum = node.scrollWidth - node.clientWidth;
+    node.scrollLeft = maximum;
+    node.dispatchEvent(new Event("scroll"));
+    return maximum;
+  });
+  expect(maxScrollLeft).toBeGreaterThan(20);
+  await page.waitForTimeout(100);
+
+  const revealedContainerBox = await scrollContainer.boundingBox();
+  const revealedRightBox = await rightToken.boundingBox();
+  expect(revealedRightBox.x).toBeGreaterThanOrEqual(revealedContainerBox.x - 2);
+  expect(revealedRightBox.x + revealedRightBox.width).toBeLessThanOrEqual(
+    revealedContainerBox.x + revealedContainerBox.width + 2,
+  );
+  const rightAlignment = await rightToken.evaluate((hitbox) => {
+    const semanticId = hitbox.getAttribute("data-semantic-id");
+    const owner = hitbox.closest("[data-math-chunk-owner]");
+    const renderedNode = [...owner.querySelectorAll(`[data-semantic-id="${CSS.escape(semanticId)}"]`)]
+      .find((node) => !node.closest(".math-semantic-overlay-layer"));
+    const hitboxRect = hitbox.getBoundingClientRect();
+    const domRect = renderedNode?.getBoundingClientRect();
+    return domRect ? {
+      left: Math.abs(hitboxRect.left - domRect.left),
+      top: Math.abs(hitboxRect.top - domRect.top),
+      width: Math.abs(hitboxRect.width - domRect.width),
+      height: Math.abs(hitboxRect.height - domRect.height),
+    } : null;
+  });
+  expect(rightAlignment).not.toBeNull();
+  expect(rightAlignment.left).toBeLessThanOrEqual(2);
+  expect(rightAlignment.top).toBeLessThanOrEqual(2);
+  expect(rightAlignment.width).toBeLessThanOrEqual(3);
+  expect(rightAlignment.height).toBeLessThanOrEqual(3);
+
+  await page.mouse.move(
+    revealedRightBox.x + revealedRightBox.width / 2,
+    revealedRightBox.y + revealedRightBox.height / 2,
+  );
+  await expect(rightToken).toHaveAttribute("data-active-target", "true");
+  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__OMNIMATH_HOVER_PERF__?.reset?.();
+    window.__OMNIMATH_SCROLL_COORDINATOR__?.reset?.();
+    window.__OMNIMATH_PERF__?.reset?.();
+  });
+
+  for (const scrollLeft of [0, maxScrollLeft, 0, maxScrollLeft, 0]) {
+    await scrollContainer.evaluate((node, value) => {
+      node.scrollLeft = value;
+      node.dispatchEvent(new Event("scroll"));
+    }, scrollLeft);
+    await page.waitForTimeout(50);
+    await expect(step.locator("[data-inspectable='math-subtoken']")).toHaveCount(initialTargetCount);
+    const ids = await step.locator("[data-inspectable='math-subtoken']").evaluateAll((nodes) => (
+      nodes.map((node) => node.getAttribute("data-token-id"))
+    ));
+    expect([...new Set(ids)].sort()).toEqual(initialUniqueTargetIds);
+  }
+
+  const scrollPerf = await page.evaluate(() => ({
+    hover: window.__OMNIMATH_HOVER_PERF__?.counters || null,
+    app: window.__OMNIMATH_PERF__?.counters || {},
+    coordinator: window.__OMNIMATH_SCROLL_COORDINATOR__
+      ? {
+          physicalScrollCallbacks: window.__OMNIMATH_SCROLL_COORDINATOR__.physicalScrollCallbacks,
+          subscriberNotifications: window.__OMNIMATH_SCROLL_COORDINATOR__.subscriberNotifications,
+        }
+      : null,
+  }));
+  if (scrollPerf.hover) {
+    expect(scrollPerf.hover.geometryTranslation || 0).toBeGreaterThan(0);
+    expect(scrollPerf.hover.geometryReconstruction || 0).toBe(0);
+    expect(scrollPerf.hover.geometryMeasurement || 0).toBe(0);
+    expect(scrollPerf.hover.getClientRectsCalls || 0).toBe(0);
+    expect(scrollPerf.hover.querySelectorAllCalls || 0).toBe(0);
+    expect(scrollPerf.hover.mathChunkRender || 0).toBe(0);
+    expect(scrollPerf.app["semantic-tree.generate"] || 0).toBe(0);
+  }
+  expect(scrollPerf.coordinator.physicalScrollCallbacks).toBeGreaterThan(0);
+
+  const returnedLeftBox = await leftToken.boundingBox();
+  await page.mouse.move(
+    returnedLeftBox.x + returnedLeftBox.width / 2,
+    returnedLeftBox.y + returnedLeftBox.height / 2,
+  );
+  await expect(leftToken).toHaveAttribute("data-active-target", "true");
 });
 
 test("low-confidence image review can continue with canonical extracted text", async ({ page }) => {

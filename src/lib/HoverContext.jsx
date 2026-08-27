@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { getConceptById, getConceptForChunk, getConceptsForStep, getRelatedConceptIds } from "@/data/conceptGraph";
 import {
@@ -10,6 +10,7 @@ import {
 } from "@/lib/tooltipPosition";
 import { userFacingText, userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { assertSemanticIdentityConsistency, createSemanticIdentity } from "@/lib/hoverTargetIdentity";
+import { reconcileLogicalHoverOwnership, shouldExecuteHoverClear } from "@/lib/hoverOwnership";
 import {
   getTargetsIntersectingRect,
   rectIntersectsRect,
@@ -18,7 +19,9 @@ import {
   unionSemanticRects,
 } from "@/lib/semanticHitboxes";
 
-const HoverContext = createContext(null);
+const HoverSemanticContext = createContext(null);
+const HoverTooltipContext = createContext(null);
+const HoverActionsContext = createContext(null);
 
 // difficultyMode: "beginner" | "intermediate" | "advanced" | "exam" | "intuition" | "professor"
 const DIFFICULTY_MAX_LEVEL = { beginner: 1, intermediate: 2, advanced: 3, exam: 1, intuition: 2, professor: 3 };
@@ -127,13 +130,14 @@ function clampPosition(x, y, size = WINDOW_SIZE, padding = 12) {
 }
 
 function getEventAnchor(event) {
-  const eventElement = event?.currentTarget instanceof Element
+  const explicitSource = event?.sourceElement instanceof Element ? event.sourceElement : null;
+  const eventElement = explicitSource || (event?.currentTarget instanceof Element
     ? event.currentTarget
     : event?.target instanceof Element
       ? event.target.closest("[data-explainable='true']")
-      : null;
+      : null);
   const element = eventElement?.closest?.("[data-inspectable='math-token']") || eventElement;
-  const rect = element?.getBoundingClientRect?.();
+  const rect = event?.anchorRect || element?.getBoundingClientRect?.();
   return {
     element,
     rect: getRectSnapshot(rect),
@@ -154,10 +158,6 @@ function getEventPosition(event, index = 0, size = WINDOW_SIZE) {
   const x = canOpenRight ? baseX + 20 + offset : baseX - size.width - 18 - offset;
   const y = canOpenBelow ? baseY + 18 + offset : baseY - Math.min(size.height, 180) - 18 - offset;
   return clampPosition(x, y, size);
-}
-
-function samePointer(left = null, right = null) {
-  return Boolean(left && right) && left.x === right.x && left.y === right.y;
 }
 
 function sameRect(left = null, right = null) {
@@ -439,6 +439,12 @@ function isEditableTarget(target) {
     || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName);
 }
 
+function isQuickTooltipTarget(target) {
+  return typeof Element !== "undefined"
+    && target instanceof Element
+    && Boolean(target.closest(".omni-quick-tooltip"));
+}
+
 function tokenIdFromEventTarget(event) {
   const target = event?.target;
   if (target instanceof Element) {
@@ -459,7 +465,6 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const normalizedInitialWindows = initialWindows.map((window) => ({ ...window, pinned: true }));
   const [activeChunkId, setActiveChunkId] = useState(null);
   const [activeChunkData, setActiveChunkData] = useState(null);
-  const [activePointer, setActivePointer] = useState(null);
   const [explanationLevel, setExplanationLevel] = useState(0);
   const [activeStepId, setActiveStepId] = useState(null);
   const [activeConceptId, setActiveConceptId] = useState(null);
@@ -473,6 +478,15 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const selectionStateRef = useRef(selectionState);
   selectionStateRef.current = selectionState;
   const timerRefs = useRef({ short: null, medium: null, deep: null, preview: null, clear: null });
+  const hoverRevisionRef = useRef(0);
+  const previousActiveTokenRef = useRef(null);
+  const activeChunkIdRef = useRef(activeChunkId);
+  activeChunkIdRef.current = activeChunkId;
+  const activeStepIdRef = useRef(activeStepId);
+  activeStepIdRef.current = activeStepId;
+  const hoverLensRef = useRef(hoverLens);
+  hoverLensRef.current = hoverLens;
+  const logicalHoverOwnerRef = useRef(null);
   const hoverPointerRef = useRef(null);
   const hoverAnchorRef = useRef({ element: null, rect: null, size: DEFAULT_QUICK_TOOLTIP_SIZE });
   const tokenRegistryRef = useRef(new Map());
@@ -516,28 +530,70 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     return undefined;
   }, [activeChunkId, activeStepId, hoverLens, selectionState]);
 
-  const cancelHoverClear = useCallback(() => {
+  const logHoverLifecycle = useCallback((event, details = {}) => {
+    if (!DEBUG_MATH_HOVER) return;
+    const entry = {
+      at: Date.now(),
+      event,
+      pointer: hoverPointerRef.current,
+      activeTokenId: activeChunkIdRef.current,
+      activeStepId: activeStepIdRef.current,
+      logicalHoverOwner: logicalHoverOwnerRef.current,
+      hoverRevision: hoverRevisionRef.current,
+      ...details,
+    };
+    if (typeof window !== "undefined") {
+      const events = window["__OMNIMATH_HOVER_EVENTS__"] || [];
+      events.push(entry);
+      if (events.length > 300) events.splice(0, events.length - 300);
+      window["__OMNIMATH_HOVER_EVENTS__"] = events;
+    }
+    console.info("[omnimath:hover-lifecycle]", entry);
+  }, []);
+
+  const cancelHoverClear = useCallback((reason = "hover-retained") => {
     if (timerRefs.current.clear) {
       clearTimeout(timerRefs.current.clear);
       timerRefs.current.clear = null;
+      logHoverLifecycle("hover-clear-cancelled", { reason });
     }
-  }, []);
+  }, [logHoverLifecycle]);
 
-  const clearActiveHover = useCallback(() => {
+  const clearActiveHover = useCallback((reason = "explicit-clear", expectedRevision = null) => {
+    if (expectedRevision !== null && hoverRevisionRef.current !== expectedRevision) {
+      logHoverLifecycle("hover-clear-discarded", {
+        reason: "stale-hover-revision",
+        requestedReason: reason,
+        expectedRevision,
+      });
+      return false;
+    }
+    logHoverLifecycle("hover-clear", { reason, expectedRevision });
     Object.values(timerRefs.current).forEach((timer) => {
       if (timer) clearTimeout(timer);
     });
     timerRefs.current = { short: null, medium: null, deep: null, preview: null, clear: null };
+    hoverRevisionRef.current += 1;
+    logicalHoverOwnerRef.current = null;
     setActiveChunkId(null);
     setActiveChunkData(null);
-    setActivePointer(null);
     hoverPointerRef.current = null;
     hoverAnchorRef.current = { element: null, rect: null, size: DEFAULT_QUICK_TOOLTIP_SIZE };
     setHoverLens(null);
     setExplanationLevel(0);
     setActiveStepId(null);
     setActiveConceptId(null);
-  }, []);
+    return true;
+  }, [logHoverLifecycle]);
+
+  useEffect(() => {
+    if (previousActiveTokenRef.current === activeChunkId) return;
+    logHoverLifecycle("active-token-changed", {
+      previousTokenId: previousActiveTokenRef.current,
+      nextTokenId: activeChunkId,
+    });
+    previousActiveTokenRef.current = activeChunkId;
+  }, [activeChunkId, logHoverLifecycle]);
 
   const registerToken = useCallback((token, stepId, ownerId = "") => {
     if (!token?.id || !stepId) return () => {};
@@ -654,15 +710,28 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
           rects: [rect],
           visualSelectionKey: `${target.id}:${rectIndex}:${selectionRectKey(rect)}`,
         }))));
-    const selectedTokenByKey = new Map(selectedLeaves.map((token) => [token.visualSelectionKey || token.id, token]));
-    const fallbackTokens = (Array.isArray(fallbackToken) ? fallbackToken : [fallbackToken]).filter(Boolean);
-    for (const token of fallbackTokens) {
-      const key = token?.visualSelectionKey || `${token.id}:${selectionRectKey(token.rects?.[0])}`;
-      if (token?.id && !selectedTokenByKey.has(key)) {
-        selectedTokenByKey.set(key, token);
+    const selectedTokenById = new Map();
+    const addSelectedToken = (token) => {
+      if (!token?.id) return;
+      const current = selectedTokenById.get(token.id);
+      if (!current) {
+        selectedTokenById.set(token.id, token);
+        return;
       }
-    }
-    const selectedTokens = sortTargetsByRenderedOrder([...selectedTokenByKey.values()]);
+      const rectsByKey = new Map(
+        [...(current.rects || []), ...(token.rects || [])]
+          .filter(Boolean)
+          .map((rect) => [selectionRectKey(rect), rect])
+      );
+      selectedTokenById.set(token.id, {
+        ...current,
+        rects: [...rectsByKey.values()],
+      });
+    };
+    selectedLeaves.forEach(addSelectedToken);
+    const fallbackTokens = (Array.isArray(fallbackToken) ? fallbackToken : [fallbackToken]).filter(Boolean);
+    fallbackTokens.forEach(addSelectedToken);
+    const selectedTokens = sortTargetsByRenderedOrder([...selectedTokenById.values()]);
     if (selectedTokens.length === 0) return null;
 
     const selectedText = selectedTokens.length > 0
@@ -767,20 +836,99 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     setSelectionState(next);
   }, []);
 
-  const scheduleActiveHoverClear = useCallback(() => {
-    cancelHoverClear();
+  const reconcileHoverOwnership = useCallback((reason = "layout-reconciliation") => {
+    let stepTargets = activeStepIdRef.current
+      ? [...(measuredLeafRegistryRef.current.get(activeStepIdRef.current)?.values() || [])]
+      : [];
+    if (
+      activeChunkIdRef.current
+      && hoverAnchorRef.current.rect
+      && !stepTargets.some((target) => target?.id === activeChunkIdRef.current)
+    ) {
+      const owner = hoverAnchorRef.current.element?.closest?.("[data-math-chunk-owner]")
+        || hoverAnchorRef.current.element;
+      stepTargets = [
+        ...stepTargets,
+        {
+          id: activeChunkIdRef.current,
+          ownerId: owner?.getAttribute?.("data-math-chunk-owner") || null,
+          rects: [hoverAnchorRef.current.rect],
+          rectSource: "captured-hover-anchor",
+        },
+      ];
+    }
+    const currentLens = hoverLensRef.current;
+    const result = reconcileLogicalHoverOwnership({
+      pointer: hoverPointerRef.current,
+      activeTokenId: activeChunkIdRef.current,
+      activeSemanticId: currentLens?.semanticId || currentLens?.referenceId || null,
+      sourceElement: hoverAnchorRef.current.element,
+      measuredTargets: stepTargets,
+    });
+    if (result.sourceElement && result.sourceElement !== hoverAnchorRef.current.element) {
+      hoverAnchorRef.current = {
+        ...hoverAnchorRef.current,
+        element: result.sourceElement,
+      };
+    }
+    if (result.retained) {
+      logicalHoverOwnerRef.current = result.owner;
+      cancelHoverClear(`reconciled:${reason}:${result.owner}`);
+    }
+    logHoverLifecycle("hover-ownership-reconciled", {
+      reason,
+      result: result.retained ? "retained" : "departed",
+      reconciliationReason: result.reason,
+      reconciledOwner: result.owner,
+      pointer: result.pointer,
+      tokenStableId: activeChunkIdRef.current,
+      sourceDomIdentity: result.sourceElement?.getAttribute?.("data-source-dom-instance") || null,
+      measuredOwnerId: result.measuredTarget?.ownerId || null,
+      measuredRectCount: result.measuredTarget?.rects?.length || 0,
+    });
+    return result;
+  }, [cancelHoverClear, logHoverLifecycle]);
+
+  const reportHoverLifecycle = useCallback((event, details = {}) => {
+    logHoverLifecycle(event, details);
+  }, [logHoverLifecycle]);
+
+  const scheduleActiveHoverClear = useCallback((reason = "pointer-left-hover-region") => {
+    cancelHoverClear("replace-clear-schedule");
     if (timerRefs.current.preview) {
       clearTimeout(timerRefs.current.preview);
       timerRefs.current.preview = null;
     }
+    const scheduledRevision = hoverRevisionRef.current;
+    logHoverLifecycle("hover-clear-scheduled", {
+      reason,
+      scheduledRevision,
+      delayMs: HOVER_CLEAR_DELAY_MS,
+    });
     timerRefs.current.clear = setTimeout(() => {
-      clearActiveHover();
+      timerRefs.current.clear = null;
+      const reconciliation = reconcileHoverOwnership(`before-clear:${reason}`);
+      const decision = shouldExecuteHoverClear({
+        scheduledRevision,
+        currentRevision: hoverRevisionRef.current,
+        reconciliation,
+      });
+      if (!decision.execute) {
+        logHoverLifecycle("hover-clear-cancelled", {
+          reason: decision.reason,
+          requestedReason: reason,
+          scheduledRevision,
+        });
+        return;
+      }
+      logHoverLifecycle("hover-clear-fired", { reason, scheduledRevision, decisionReason: decision.reason });
+      clearActiveHover(reason, scheduledRevision);
     }, HOVER_CLEAR_DELAY_MS);
-  }, [cancelHoverClear, clearActiveHover]);
+  }, [cancelHoverClear, clearActiveHover, logHoverLifecycle, reconcileHoverOwnership]);
 
   useEffect(() => {
     if (settings?.interaction?.hoverLens === false) {
-      clearActiveHover();
+      clearActiveHover("hover-lens-disabled");
     }
   }, [clearActiveHover, settings?.interaction?.hoverLens]);
 
@@ -796,6 +944,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     measuredLeafRegistryRef.current.clear();
     if (DEBUG_MATH_HOVER && typeof window !== "undefined") {
       delete window["__OMNIMATH_HOVER_STATE__"];
+      delete window["__OMNIMATH_HOVER_EVENTS__"];
     }
   }, []);
 
@@ -806,7 +955,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   }, [settings?.learning?.explanationDepth]);
 
   const startTimers = useCallback((mode) => {
-    cancelHoverClear();
+    cancelHoverClear("hover-depth-timers-started");
     const max = DIFFICULTY_MAX_LEVEL[mode] ?? 3;
     const baseDelay = getHoverDelay(settings);
     setExplanationLevel(0);
@@ -825,16 +974,13 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   }, []);
 
   const showHoverLens = useCallback((factory, event, size = DEFAULT_QUICK_TOOLTIP_SIZE) => {
-    cancelHoverClear();
+    cancelHoverClear("hover-entered");
     const anchor = getEventAnchor(event);
     hoverAnchorRef.current = { ...anchor, size };
+    logicalHoverOwnerRef.current = "source";
     if (event) {
       const pointer = { clientX: event.clientX, clientY: event.clientY };
       hoverPointerRef.current = pointer;
-      setActivePointer((current) => {
-        const next = { x: pointer.clientX, y: pointer.clientY };
-        return samePointer(current, next) ? current : next;
-      });
     }
     const pointer = hoverPointerRef.current;
     const previewEvent = pointer
@@ -855,8 +1001,10 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     });
   }, [cancelHoverClear]);
 
+  const hasHoverLens = Boolean(hoverLens);
+
   useEffect(() => {
-    if (!hoverLens) return undefined;
+    if (!hasHoverLens) return undefined;
     const handleViewportChange = () => {
       updateHoverLensFromAnchor(hoverAnchorRef.current.size || DEFAULT_QUICK_TOOLTIP_SIZE);
     };
@@ -866,9 +1014,17 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
       window.removeEventListener("scroll", handleViewportChange, true);
       window.removeEventListener("resize", handleViewportChange);
     };
-  }, [hoverLens, updateHoverLensFromAnchor]);
+  }, [hasHoverLens, updateHoverLensFromAnchor]);
 
   const handleChunkEnter = useCallback((chunk, stepId, event) => {
+    logicalHoverOwnerRef.current = "source";
+    logHoverLifecycle("hover-enter", {
+      tokenId: chunk?.id || null,
+      stepId,
+      pointerType: event?.pointerType || "mouse",
+      pointer: { clientX: event?.clientX, clientY: event?.clientY },
+      sourceDomIdentity: event?.sourceElement?.getAttribute?.("data-source-dom-instance") || null,
+    });
     const currentSelectionState = selectionStateRef.current;
     if (currentSelectionState.isSelecting) {
       if (currentSelectionState.selectionMode !== "geometry") {
@@ -883,7 +1039,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
       if (!hoveredSelectedToken && !hoveringSelectionPreview) {
         clearTokenSelection();
       } else {
-      if (activeChunkId === selection.id && hoverLens) {
+      if (activeChunkIdRef.current === selection.id && hoverLensRef.current) {
         cancelHoverClear();
         return;
       }
@@ -897,7 +1053,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
           }
         : event;
       flushSync(() => {
-        clearActiveHover();
+        clearActiveHover("selection-hover-replaced");
         const semanticIdentity = createSemanticIdentity({
           id: selection.id,
           referenceId: selection.id,
@@ -958,7 +1114,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
       sourceText: semanticIdentity.sourceText,
     };
     flushSync(() => {
-      clearActiveHover();
+      clearActiveHover("token-hover-replaced");
       setActiveChunkId(contextualChunk.id);
       setActiveChunkData(contextualChunk);
       setActiveStepId(stepId);
@@ -970,18 +1126,20 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
       );
     });
     startTimers(difficultyMode);
-  }, [activeChunkId, cancelHoverClear, clearActiveHover, clearTokenSelection, difficultyMode, getStepContext, hoverLens, selectionState.activeSelection, selectionState.isSelecting, selectionState.selectionMode, selectionState.selectionStartTokenId, settings, settings?.learning?.defaultLensLevel, showHoverLens, startTimers, updateSelectionRange]);
+  }, [cancelHoverClear, clearActiveHover, clearTokenSelection, difficultyMode, getStepContext, logHoverLifecycle, settings, settings?.learning?.defaultLensLevel, showHoverLens, startTimers, updateSelectionRange]);
 
   const handleChunkMove = useCallback((event) => {
     cancelHoverClear();
-    if (selectionStateRef.current.activeSelection?.tokenIds?.length > 1 && hoverLens?.referenceType === "selection") {
+    logicalHoverOwnerRef.current = isQuickTooltipTarget(event?.target) ? "tooltip" : "source";
+    if (selectionStateRef.current.activeSelection?.tokenIds?.length > 1 && hoverLensRef.current?.referenceType === "selection") {
       return;
     }
     const nextPointer = { clientX: event.clientX, clientY: event.clientY };
     hoverPointerRef.current = nextPointer;
-    setActivePointer((current) => {
-      const next = { x: nextPointer.clientX, y: nextPointer.clientY };
-      return samePointer(current, next) ? current : next;
+    logHoverLifecycle("hover-move", {
+      reason: "pointermove",
+      pointer: nextPointer,
+      tokenStableId: activeChunkIdRef.current,
     });
     setHoverLens((current) => {
       if (!current) return current;
@@ -999,11 +1157,31 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
       }
       return { ...current, x: position.x, y: position.y, anchor: rect };
     });
-  }, [cancelHoverClear, hoverLens?.referenceType]);
+  }, [cancelHoverClear, logHoverLifecycle]);
 
-  const handleChunkLeave = useCallback(() => {
-    scheduleActiveHoverClear();
-  }, [scheduleActiveHoverClear]);
+  const handleChunkLeave = useCallback((event) => {
+    if (Number.isFinite(Number(event?.clientX)) && Number.isFinite(Number(event?.clientY))) {
+      hoverPointerRef.current = { clientX: Number(event.clientX), clientY: Number(event.clientY) };
+    }
+    const relatedTarget = event?.relatedTarget || null;
+    if (isQuickTooltipTarget(relatedTarget)) {
+      logicalHoverOwnerRef.current = "tooltip";
+      logHoverLifecycle("hover-leave", {
+        reason: "ownership-transferred-to-tooltip",
+        relatedTarget: "quick-tooltip",
+      });
+      cancelHoverClear("ownership-transferred-to-tooltip");
+      return;
+    }
+    logicalHoverOwnerRef.current = "pending-clear";
+    logHoverLifecycle("hover-leave", {
+      reason: "pointer-left-source-token",
+      relatedTarget: typeof Element !== "undefined" && relatedTarget instanceof Element
+        ? relatedTarget.className || relatedTarget.tagName
+        : null,
+    });
+    scheduleActiveHoverClear("pointer-left-source-token");
+  }, [cancelHoverClear, logHoverLifecycle, scheduleActiveHoverClear]);
 
   const selectChunk = useCallback((chunk, stepId) => {
     const concept = getConceptForChunk(chunk);
@@ -1016,7 +1194,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     if (event?.button !== 0 || isEditableTarget(event?.target)) return;
     event.preventDefault();
     event.stopPropagation();
-    clearActiveHover();
+    clearActiveHover("token-selection-started");
     const next = {
       isSelecting: true,
       selectionStartTokenId: chunk.id,
@@ -1159,7 +1337,6 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     if (selectionEvent) {
       const pointer = { clientX: selectionEvent.clientX, clientY: selectionEvent.clientY };
       hoverPointerRef.current = pointer;
-      setActivePointer({ x: pointer.clientX, y: pointer.clientY });
     }
     flushSync(() => {
       setActiveChunkId(selection.id);
@@ -1203,7 +1380,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
         ? buildGeometrySelection(stepId, selectionState.selectionRect, selectionState.fallbackToken)
         : buildSelection(stepId, selectionState.selectionStartTokenId, selectionState.selectionEndTokenId));
       if (selection) {
-        clearActiveHover();
+        clearActiveHover("selection-pinned");
         logSemanticSelection(settings, "selection-pinned", {
           stepId,
           selectedSemanticRange: selection.semanticSelection,
@@ -1220,7 +1397,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
         return;
       }
     }
-    clearActiveHover();
+    clearActiveHover("token-pinned");
     const context = getStepContext(stepId);
     const semanticIdentity = createSemanticIdentity({ ...chunk, stepId, context });
     const pinnedChunk = {
@@ -1266,7 +1443,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const handleStepEnter = useCallback((step, event) => {
     if (selectionState.isSelecting) return;
     flushSync(() => {
-      clearActiveHover();
+      clearActiveHover("step-hover-replaced");
       setActiveStepId(step.id);
       const stepConcepts = getConceptsForStep(step);
       setActiveConceptId(stepConcepts[0]?.id || null);
@@ -1282,7 +1459,6 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const handleStepMove = useCallback((event) => {
     cancelHoverClear();
     hoverPointerRef.current = { clientX: event.clientX, clientY: event.clientY };
-    setActivePointer({ x: event.clientX, y: event.clientY });
     setHoverLens((current) => {
       if (!current || current.referenceType !== "step") return current;
       const anchor = getEventAnchor(event);
@@ -1294,12 +1470,16 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     });
   }, [cancelHoverClear]);
 
-  const handleStepLeave = useCallback(() => {
-    scheduleActiveHoverClear();
-  }, [scheduleActiveHoverClear]);
+  const handleStepLeave = useCallback((event) => {
+    if (isQuickTooltipTarget(event?.relatedTarget)) {
+      cancelHoverClear("step-ownership-transferred-to-tooltip");
+      return;
+    }
+    scheduleActiveHoverClear("pointer-left-step");
+  }, [cancelHoverClear, scheduleActiveHoverClear]);
 
   const addPinnedStepLens = useCallback((step, event) => {
-    clearActiveHover();
+    clearActiveHover("step-pinned");
     setPinnedLenses((prev) => (
       prev.some((window) => samePinnedReference(window, "step", step.id, step.id))
         ? prev
@@ -1318,7 +1498,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
 
   const handleConceptEnter = useCallback((conceptId, event) => {
     flushSync(() => {
-      clearActiveHover();
+      clearActiveHover("concept-hover-replaced");
       setActiveConceptId(conceptId);
       showHoverLens(
         (previewEvent) => createConceptWindow(conceptId, previewEvent, false, 0, settings?.learning?.defaultLensLevel),
@@ -1332,7 +1512,6 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const handleConceptMove = useCallback((event) => {
     cancelHoverClear();
     hoverPointerRef.current = { clientX: event.clientX, clientY: event.clientY };
-    setActivePointer({ x: event.clientX, y: event.clientY });
     setHoverLens((current) => {
       if (!current || current.referenceType !== "concept") return current;
       const anchor = getEventAnchor(event);
@@ -1344,12 +1523,16 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     });
   }, [cancelHoverClear]);
 
-  const handleConceptLeave = useCallback(() => {
-    scheduleActiveHoverClear();
-  }, [scheduleActiveHoverClear]);
+  const handleConceptLeave = useCallback((event) => {
+    if (isQuickTooltipTarget(event?.relatedTarget)) {
+      cancelHoverClear("concept-ownership-transferred-to-tooltip");
+      return;
+    }
+    scheduleActiveHoverClear("pointer-left-concept");
+  }, [cancelHoverClear, scheduleActiveHoverClear]);
 
   const addPinnedConceptLens = useCallback((conceptId, event) => {
-    clearActiveHover();
+    clearActiveHover("concept-pinned");
     setPinnedLenses((prev) => (
       prev.some((window) => samePinnedReference(window, "concept", conceptId))
         ? prev
@@ -1375,16 +1558,34 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   }, [closeExplanationWindow]);
 
   const clearHoverLens = useCallback(() => {
-    clearActiveHover();
+    clearActiveHover("consumer-requested-clear");
   }, [clearActiveHover]);
 
-  const holdHoverLens = useCallback(() => {
-    cancelHoverClear();
+  const holdHoverLens = useCallback((event) => {
+    if (Number.isFinite(Number(event?.clientX)) && Number.isFinite(Number(event?.clientY))) {
+      hoverPointerRef.current = { clientX: Number(event.clientX), clientY: Number(event.clientY) };
+    }
+    logicalHoverOwnerRef.current = "tooltip";
+    cancelHoverClear("pointer-entered-tooltip");
   }, [cancelHoverClear]);
 
-  const releaseHoverLens = useCallback(() => {
-    scheduleActiveHoverClear();
-  }, [scheduleActiveHoverClear]);
+  const releaseHoverLens = useCallback((event) => {
+    if (Number.isFinite(Number(event?.clientX)) && Number.isFinite(Number(event?.clientY))) {
+      hoverPointerRef.current = { clientX: Number(event.clientX), clientY: Number(event.clientY) };
+    }
+    const relatedTarget = event?.relatedTarget || null;
+    if (
+      typeof Element !== "undefined"
+      && relatedTarget instanceof Element
+      && relatedTarget.closest("[data-explainable='true']")
+    ) {
+      logicalHoverOwnerRef.current = "source";
+      cancelHoverClear("ownership-returned-to-source-token");
+      return;
+    }
+    logicalHoverOwnerRef.current = "pending-clear";
+    scheduleActiveHoverClear("pointer-left-tooltip");
+  }, [cancelHoverClear, scheduleActiveHoverClear]);
 
   const clearSelectedConcept = useCallback(() => {
     setSelectedChunkData(null);
@@ -1449,7 +1650,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     const handleMouseDown = (event) => {
       if (isEditableTarget(event.target)) return;
       if (event.target instanceof Element && event.target.closest("[data-explainable='true'], .omni-floating-window, .omni-quick-tooltip")) return;
-      clearActiveHover();
+      clearActiveHover("document-pointer-down-outside-hover-region");
       clearTokenSelection();
     };
     document.addEventListener("mousedown", handleMouseDown, true);
@@ -1459,82 +1660,172 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const displayChunkData = activeChunkData;
   const displayLevel = explanationLevel;
   const inspectedConceptId = activeConceptId || selectedConceptId;
-  const relatedConceptIds = inspectedConceptId ? getRelatedConceptIds(inspectedConceptId) : [];
-  const openReferenceIds = pinnedLenses.map((window) => window.referenceId);
+  const relatedConceptIds = useMemo(
+    () => (inspectedConceptId ? getRelatedConceptIds(inspectedConceptId) : []),
+    [inspectedConceptId]
+  );
+  const openReferenceIds = useMemo(
+    () => pinnedLenses.map((window) => window.referenceId),
+    [pinnedLenses]
+  );
   const pinnedReferenceIds = openReferenceIds;
-  const pinnedChunkIds = pinnedLenses
-    .filter((window) => window.referenceType === "token")
-    .map((window) => window.referenceId);
+  const pinnedChunkIds = useMemo(
+    () => pinnedLenses
+      .filter((window) => window.referenceType === "token")
+      .map((window) => window.referenceId),
+    [pinnedLenses]
+  );
   const explanationWindows = pinnedLenses;
 
-  return (
-    <HoverContext.Provider
-      value={{
-        activeChunkId,
-        activeChunkData: displayChunkData,
-        explanationLevel: displayLevel,
-        activeStepId,
-        activeConceptId,
-        activePointer,
-        selectionState,
-        selectedTokenIds: selectionState.selectedTokenIds,
-        selectedText: selectionState.selectedText,
-        semanticSelection: selectionState.semanticSelection,
-        selectedSemanticRange: selectionState.selectedSemanticRange,
-        selectedStepId: selectionState.selectedStepId,
-        selectedChunkData,
-        selectedChunkStepId,
-        selectedConceptId,
-        inspectedConceptId,
-        relatedConceptIds,
-        pinnedChunkIds,
-        pinnedReferenceIds,
-        difficultyMode,
-        hoverLens,
-        settings,
-        pinnedLenses,
-        explanationWindows,
-        openReferenceIds,
-        setDifficultyMode,
-        handleChunkEnter,
-        handleChunkMove,
-        handleChunkLeave,
-        selectChunk,
-        clearSelectedConcept,
-        addPinnedChunkLens,
-        addPinnedStepLens,
-        addPinnedConceptLens,
-        handleChunkRightClick,
+  const semanticValue = useMemo(() => ({
+    activeChunkId,
+    activeChunkData: displayChunkData,
+    activeStepId,
+    activeConceptId,
+    selectionState,
+    selectedTokenIds: selectionState.selectedTokenIds,
+    selectedText: selectionState.selectedText,
+    semanticSelection: selectionState.semanticSelection,
+    selectedSemanticRange: selectionState.selectedSemanticRange,
+    selectedStepId: selectionState.selectedStepId,
+    selectedChunkData,
+    selectedChunkStepId,
+    selectedConceptId,
+    inspectedConceptId,
+    relatedConceptIds,
+    pinnedChunkIds,
+    pinnedReferenceIds,
+    difficultyMode,
+    pinnedLenses,
+    explanationWindows,
+    openReferenceIds,
+  }), [
+    activeChunkId,
+    activeConceptId,
+    activeStepId,
+    difficultyMode,
+    displayChunkData,
+    explanationWindows,
+    inspectedConceptId,
+    openReferenceIds,
+    pinnedChunkIds,
+    pinnedLenses,
+    pinnedReferenceIds,
+    relatedConceptIds,
+    selectedChunkData,
+    selectedChunkStepId,
+    selectedConceptId,
+    selectionState,
+  ]);
+
+  const tooltipValue = useMemo(() => ({
+    hoverLens,
+    explanationLevel: displayLevel,
+  }), [displayLevel, hoverLens]);
+
+  const actionsValue = useMemo(() => ({
+    settings,
+    setDifficultyMode,
+    handleChunkEnter,
+    handleChunkMove,
+    handleChunkLeave,
+    selectChunk,
+    clearSelectedConcept,
+    addPinnedChunkLens,
+    addPinnedStepLens,
+    addPinnedConceptLens,
+    handleChunkRightClick,
     registerToken,
     registerMeasuredTargets,
-        beginTokenSelection,
-        extendTokenSelection,
-        finishTokenSelection,
-        clearTokenSelection,
-        handleStepEnter,
-        handleStepMove,
-        handleStepLeave,
-        handleStepRightClick,
-        handleConceptEnter,
-        handleConceptMove,
-        handleConceptLeave,
-        handleConceptRightClick,
-        holdHoverLens,
-        releaseHoverLens,
-        clearHoverLens,
-        closeExplanationWindow,
-        toggleWindowPin,
-        setWindowDepth,
-        moveExplanationWindow,
-      }}
-    >
-      {children}
-    </HoverContext.Provider>
+    reconcileHoverOwnership,
+    reportHoverLifecycle,
+    beginTokenSelection,
+    extendTokenSelection,
+    finishTokenSelection,
+    clearTokenSelection,
+    handleStepEnter,
+    handleStepMove,
+    handleStepLeave,
+    handleStepRightClick,
+    handleConceptEnter,
+    handleConceptMove,
+    handleConceptLeave,
+    handleConceptRightClick,
+    holdHoverLens,
+    releaseHoverLens,
+    clearHoverLens,
+    closeExplanationWindow,
+    toggleWindowPin,
+    setWindowDepth,
+    moveExplanationWindow,
+  }), [
+    addPinnedChunkLens,
+    addPinnedConceptLens,
+    addPinnedStepLens,
+    beginTokenSelection,
+    clearHoverLens,
+    clearSelectedConcept,
+    clearTokenSelection,
+    closeExplanationWindow,
+    extendTokenSelection,
+    finishTokenSelection,
+    handleChunkEnter,
+    handleChunkLeave,
+    handleChunkMove,
+    handleChunkRightClick,
+    handleConceptEnter,
+    handleConceptLeave,
+    handleConceptMove,
+    handleConceptRightClick,
+    handleStepEnter,
+    handleStepLeave,
+    handleStepMove,
+    handleStepRightClick,
+    holdHoverLens,
+    moveExplanationWindow,
+    reconcileHoverOwnership,
+    registerMeasuredTargets,
+    registerToken,
+    releaseHoverLens,
+    reportHoverLifecycle,
+    selectChunk,
+    settings,
+    setWindowDepth,
+    toggleWindowPin,
+  ]);
+
+  return (
+    <HoverActionsContext.Provider value={actionsValue}>
+      <HoverSemanticContext.Provider value={semanticValue}>
+        <HoverTooltipContext.Provider value={tooltipValue}>
+          {children}
+        </HoverTooltipContext.Provider>
+      </HoverSemanticContext.Provider>
+    </HoverActionsContext.Provider>
   );
 }
 
+export function useHoverSemanticState() {
+  const context = useContext(HoverSemanticContext);
+  if (!context) throw new Error("useHoverSemanticState must be used inside HoverProvider");
+  return context;
+}
+
+export function useHoverTooltipState() {
+  const context = useContext(HoverTooltipContext);
+  if (!context) throw new Error("useHoverTooltipState must be used inside HoverProvider");
+  return context;
+}
+
+export function useHoverActions() {
+  const context = useContext(HoverActionsContext);
+  if (!context) throw new Error("useHoverActions must be used inside HoverProvider");
+  return context;
+}
+
 export function useHover() {
-  const ctx = useContext(HoverContext);
-  if (!ctx) throw new Error("useHover must be used inside HoverProvider");
-  return ctx;
+  const semantic = useHoverSemanticState();
+  const tooltip = useHoverTooltipState();
+  const actions = useHoverActions();
+  return { ...semantic, ...tooltip, ...actions };
 }

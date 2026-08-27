@@ -1,0 +1,117 @@
+{
+  "caseId": "live-terra-sol-symbol-provenance-replay",
+  "source": "Deterministic reconstruction of the verbatim math excerpts supplied from the live OmniMath runtime log; no provider response is replayed.",
+  "observedFragments": {
+    "namedIntegral": "\\mathcal I\\ \\text{denotes the given integral}",
+    "parameterDomain": "a,b>0,\\quad a\\ne b",
+    "polylogarithmDefinition": "\\operatorname{Li}_2(z):=\\sum_{n=1}^{\\infty}\\frac{z^n}{n^2}=-\\int_0^z\\frac{\\ln(1-u)}{u}\\,du,\\qquad 0\\le z\\le1",
+    "derivativeVariable": "\\frac{d}{du}\\left(\\operatorname{Li}_2(u)+u^2\\right)=0",
+    "fourierDomain": "y^2=\\frac{\\pi^2}{3}+4\\sum_{n=1}^{\\infty}\\frac{(-1)^n\\cos(ny)}{n^2},\\qquad -\\pi\\le y\\le\\pi"
+  },
+  "problem": {
+    "latex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "expectedFinalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2",
+    "expectedNumericValue": 0.7546938294602481
+  },
+  "currentVFailureReconstruction": {
+    "source": "Deterministic reconstruction from the supplied failure excerpt; the original provider capture is not present in the workspace.",
+    "problem": "u",
+    "candidate": {
+      "title": "Rational change-of-variable provenance replay",
+      "expression": "u",
+      "steps": [
+        {
+          "id": "v-s1",
+          "heading": "Change of variable",
+          "math": "u=(1-v)/(1+v)",
+          "summary": "Make the rational substitution."
+        },
+        {
+          "id": "v-s2",
+          "heading": "Continue in the new variable",
+          "math": "v^2+u",
+          "summary": "Use v after its introduction."
+        }
+      ],
+      "finalAnswerLatex": "1"
+    }
+  },
+  "candidates": [
+    {
+      "modelRole": "repair",
+      "model": "gpt-5.6-terra",
+      "title": "Terra symbol-provenance excerpt replay",
+      "expression": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+      "problemLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+      "steps": [
+        {
+          "id": "terra-s1",
+          "heading": "Name the target",
+          "math": "\\mathcal I\\quad\\text{denotes the given integral}",
+          "summary": "Introduce a name for the target integral."
+        },
+        {
+          "id": "terra-s2",
+          "heading": "Declare parameters",
+          "math": "a,b>0,\\quad a\\ne b,\\qquad a+b>0",
+          "summary": "Declare the parameters before using them in a consequence."
+        },
+        {
+          "id": "terra-s3",
+          "heading": "Define the dilogarithm",
+          "math": "\\operatorname{Li}_2(z):=\\sum_{n=1}^{\\infty}\\frac{z^n}{n^2}=-\\int_0^z\\frac{\\ln(1-u)}{u}\\,du,\\qquad 0\\le z\\le1",
+          "summary": "Define Li2 by its convergent series and integral before use."
+        },
+        {
+          "id": "terra-s4",
+          "heading": "State the candidate value",
+          "math": "\\mathcal I=\\frac{\\pi}{2}\\ln^2 2",
+          "summary": "State the numerically correct value without reproducing the omitted connecting derivation."
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2",
+      "numericCheck": "0.7546938294602481"
+    },
+    {
+      "modelRole": "escalation",
+      "model": "gpt-5.6-sol",
+      "title": "Sol symbol-provenance excerpt replay",
+      "expression": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+      "problemLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+      "steps": [
+        {
+          "id": "sol-s1",
+          "heading": "Name the target",
+          "math": "\\mathcal I\\quad\\text{denotes the given integral}",
+          "summary": "Introduce the target notation."
+        },
+        {
+          "id": "sol-s2",
+          "heading": "Define the dilogarithm",
+          "math": "\\operatorname{Li}_2(z):=\\sum_{n=1}^{\\infty}\\frac{z^n}{n^2}=-\\int_0^z\\frac{\\ln(1-u)}{u}\\,du,\\qquad 0\\le z\\le1",
+          "summary": "Define Li2 before using it in later identities."
+        },
+        {
+          "id": "sol-s3",
+          "heading": "Differentiate Euler's identity",
+          "math": "\\frac{d}{du}\\left(\\operatorname{Li}_2(u)+\\operatorname{Li}_2(1-u)+\\ln u\\ln(1-u)\\right)=0,\\qquad \\lim_{u\\to0^+}\\left(\\operatorname{Li}_2(u)+\\operatorname{Li}_2(1-u)+\\ln u\\ln(1-u)\\right)=\\frac{\\pi^2}{6}",
+          "summary": "Use one locally bound derivative and limit variable."
+        },
+        {
+          "id": "sol-s4",
+          "heading": "Use a Fourier identity",
+          "math": "y^2=\\frac{\\pi^2}{3}+4\\sum_{n=1}^{\\infty}\\frac{(-1)^n\\cos(ny)}{n^2},\\qquad -\\pi\\le y\\le\\pi",
+          "summary": "State the identity together with the domain that declares y."
+        },
+        {
+          "id": "sol-s5",
+          "heading": "State the candidate value",
+          "math": "\\mathcal I=\\frac{\\pi}{2}\\ln^2 2",
+          "summary": "State the numerically correct value without reproducing the omitted connecting derivation."
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2",
+      "numericCheck": "0.7546938294602481"
+    }
+  ]
+}

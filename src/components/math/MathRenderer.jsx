@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
 import { splitEquationChainLatex } from "@/lib/equationChains";
-import { createMathNode, mathNodeToLatex, normalizeLatexTransport, safeMathString, traceMathStage } from "@/lib/mathNode";
+import { canonicalLatexForKatex, createMathNode, mathNodeToLatex, normalizeLatexTransport, safeMathString, traceMathStage } from "@/lib/mathNode";
 import { measureOmniSync } from "@/lib/performanceDiagnostics";
-import { createSemanticKatexTrust, serializeSemanticTreeToLatex } from "@/lib/semanticMathRenderer";
 
 const LATEX_COMMAND_PATTERN = /\\(?:iiint|iint|int|nabla|cdot|times|mathbf|frac|left|right|sqrt|sum|lim|sin|cos|tan|ln|log|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/;
 const MATH_SYMBOL_PATTERN = /[=<>^_+\-*/]|\d\s*[a-zA-Z]|[a-zA-Z]\s*\(|\b(?:dV|dx|dy|dz)\b/;
@@ -327,7 +326,6 @@ export default function MathRenderer({
   fallbackText = "",
   componentName = "MathRenderer",
   forceMath = true,
-  semanticTree = null,
   interactive = false,
 }) {
   const hostRef = useRef(null);
@@ -336,64 +334,9 @@ export default function MathRenderer({
   const normalizedMath = useMemo(() => normalizeMathRendererInput(rawMath), [rawMath]);
   const sanitizedMath = useMemo(() => sanitizeLatex(normalizedMath), [normalizedMath]);
   const shouldRenderKatex = forceMath || looksLikeMathExpression(normalizedMath);
-  const semanticRender = useMemo(() => {
-    if (!interactive || !semanticTree) return null;
-    const rendered = import.meta.env.DEV
-      ? measureOmniSync("semantic-tree.serialize-for-katex", () => serializeSemanticTreeToLatex(semanticTree), {
-        componentName,
-        displayMode,
-        nodeCount: semanticTree?.flatNodes?.length || 0,
-      })
-      : serializeSemanticTreeToLatex(semanticTree);
-    if (rendered.annotatedNodeCount > 0 && rendered.latex) {
-      try {
-        if (import.meta.env.DEV) {
-          measureOmniSync("katex.renderToString.semantic-validation", () => katex.renderToString(rendered.latex, {
-            throwOnError: true,
-            strict: /** @type {const} */ ("ignore"),
-            displayMode,
-            trust: createSemanticKatexTrust(),
-          }), {
-            componentName,
-            latexLength: rendered.latex.length,
-          });
-        } else {
-          katex.renderToString(rendered.latex, {
-            throwOnError: true,
-            strict: /** @type {const} */ ("ignore"),
-            displayMode,
-            trust: createSemanticKatexTrust(),
-          });
-        }
-        return rendered;
-      } catch (error) {
-        if (import.meta.env.DEV) {
-          console.warn("[omnimath:semantic-render-fallback]", {
-            componentName,
-            reason: error?.message || "invalid-semantic-latex",
-            canonicalNodeCount: rendered.canonicalTree?.flatNodes?.length || 0,
-          });
-        }
-        return null;
-      }
-    }
-    if (import.meta.env.DEV) {
-      console.warn("[omnimath:semantic-render-fallback]", {
-        componentName,
-        reason: rendered.error || "no-semantic-annotations",
-        canonicalNodeCount: rendered.canonicalTree?.flatNodes?.length || 0,
-        invalidRangeDiagnostics: rendered.diagnostics || rendered.rangeValidation?.errors || [],
-      });
-    }
-    return null;
-  }, [componentName, displayMode, interactive, semanticTree]);
-  const semanticKatexTrust = useMemo(
-    () => (semanticRender ? createSemanticKatexTrust() : undefined),
-    [semanticRender]
-  );
   const renderMath = useMemo(
-    () => (semanticRender?.latex || (shouldRenderKatex ? sanitizeKatexInput(sanitizedMath) : sanitizedMath)),
-    [sanitizedMath, semanticRender, shouldRenderKatex]
+    () => (shouldRenderKatex ? canonicalLatexForKatex(sanitizedMath) : sanitizedMath),
+    [sanitizedMath, shouldRenderKatex]
   );
   const [renderError, setRenderError] = useState("");
 
@@ -412,7 +355,8 @@ export default function MathRenderer({
       sentToKatex: shouldRenderKatex,
       displayMode,
       interactive,
-      semanticAnnotatedNodeCount: semanticRender?.annotatedNodeCount || 0,
+      semanticAnnotatedNodeCount: 0,
+      canonicalLatexPreserved: renderMath === sanitizedMath,
     });
 
     if (!shouldRenderKatex) {
@@ -441,7 +385,6 @@ export default function MathRenderer({
         throwOnError: true,
         strict: /** @type {const} */ ("ignore"),
         displayMode,
-        ...(semanticKatexTrust ? { trust: semanticKatexTrust } : {}),
       };
       if (import.meta.env.DEV) {
         measureOmniSync("katex.renderToString.render-path", () => katex.renderToString(renderMath, {
@@ -467,43 +410,6 @@ export default function MathRenderer({
       host.removeAttribute("data-math-fallback");
       host.removeAttribute("data-semantic-render-fallback");
     } catch (error) {
-      if (semanticRender && shouldRenderKatex && !malformedInput) {
-        const plainMath = sanitizeKatexInput(sanitizedMath);
-        try {
-          if (import.meta.env.DEV) {
-            measureOmniSync("katex.render.dom-plain-fallback", () => katex.render(plainMath, host, {
-              throwOnError: true,
-              strict: "ignore",
-              displayMode,
-            }), {
-              componentName,
-              displayMode,
-              latexLength: plainMath.length,
-            });
-          } else {
-            katex.render(plainMath, host, {
-              throwOnError: true,
-              strict: "ignore",
-              displayMode,
-            });
-          }
-          host.removeAttribute("data-math-fallback");
-          host.setAttribute("data-semantic-render-fallback", "plain-katex");
-          if (import.meta.env.DEV) {
-            console.warn("[omnimath:semantic-render-plain-fallback]", {
-              componentName,
-              semanticAnnotatedNodeCount: semanticRender.annotatedNodeCount,
-              semanticError: error?.message || "Unknown KaTeX error",
-              plainKatexInput: plainMath,
-            });
-          }
-          return () => {
-            host.replaceChildren();
-          };
-        } catch {
-          host.removeAttribute("data-semantic-render-fallback");
-        }
-      }
       const message = error?.message || "Unknown KaTeX error";
       setRenderError(message);
       host.textContent = "";
@@ -517,7 +423,7 @@ export default function MathRenderer({
         katexInput: renderMath,
         displayMode,
         interactive,
-        semanticAnnotatedNodeCount: semanticRender?.annotatedNodeCount || 0,
+        semanticAnnotatedNodeCount: 0,
         message,
         error,
       });
@@ -526,7 +432,7 @@ export default function MathRenderer({
     return () => {
       host.replaceChildren();
     };
-  }, [componentName, displayMode, fallback, interactive, normalizedMath, rawMath, renderMath, sanitizedMath, semanticKatexTrust, semanticRender, shouldRenderKatex]);
+  }, [componentName, displayMode, fallback, interactive, normalizedMath, rawMath, renderMath, sanitizedMath, shouldRenderKatex]);
 
   const Tag = displayMode ? "div" : "span";
 

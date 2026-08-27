@@ -1,4 +1,10 @@
-import { normalizeLatexForKatex, normalizeLatexTransport, shouldPreserveLatex, traceMathStage } from "./mathNode.js";
+import {
+  hasMalformedLatexCommandSpacing,
+  normalizeLatexForKatex,
+  normalizeLatexTransport,
+  shouldPreserveLatex,
+  traceMathStage,
+} from "./mathNode.js";
 
 const GREEK_COMMANDS = new Map([
   ["alpha", "\\alpha"],
@@ -35,6 +41,9 @@ const FUNCTION_NAMES = new Set([
   "arcsin",
   "arccos",
   "arctan",
+  "sinh",
+  "cosh",
+  "tanh",
   "sin",
   "cos",
   "tan",
@@ -199,9 +208,22 @@ function normalizeEscapedLatexInput(value = "") {
 function normalizeLatexFunctionSpacing(text) {
   let output = String(text || "");
   for (const name of SORTED_FUNCTION_NAMES) {
+    const longerCommandGuard = ["sin", "cos", "tan"].includes(name) ? "(?!h\\b)" : "";
     output = output
-      .replace(new RegExp(`\\\\${name}(?=([a-zA-Z0-9]))`, "g"), `\\${name} `)
+      .replace(new RegExp(`\\\\${name}${longerCommandGuard}(?=([a-zA-Z0-9]))`, "g"), `\\${name} `)
       .replace(new RegExp(`(?<!\\\\)\\b${name}(?=([a-zA-Z0-9]))`, "gi"), `${name} `);
+  }
+  return output;
+}
+
+function restoreIntroducedFunctionBoundaries(text) {
+  let output = String(text || "");
+  for (const name of SORTED_FUNCTION_NAMES) {
+    const longerCommandGuard = ["sin", "cos", "tan"].includes(name) ? "(?!h\\b)" : "";
+    output = output.replace(
+      new RegExp(`\\\\${name}${longerCommandGuard}(?=[A-Za-z0-9])`, "g"),
+      `\\${name} `,
+    );
   }
   return output;
 }
@@ -233,6 +255,17 @@ function spaceAfterTextCommands(value = "") {
 
 function normalizeLatexSpacingCommands(value = "") {
   return String(value || "").replace(/\\\s+(?=\S)/g, "\\,");
+}
+
+function removeMathWhitespace(value = "") {
+  const commandBoundary = "@@OMNI_COMMAND_BOUNDARY@@";
+  return String(value || "")
+    .replace(
+      /(\\[A-Za-z]+)\s+(?=[A-Za-z])/g,
+      `$1${commandBoundary}`,
+    )
+    .replace(/\s+/g, "")
+    .replaceAll(commandBoundary, " ");
 }
 
 function protectTextCommands(value = "") {
@@ -279,7 +312,7 @@ export function normalizeDisplayText(value = "") {
     .trim();
 }
 
-export function normalizeMathText(value = "") {
+export function normalizeMathText(value = "", { preserveFunctionBoundaries = false } = {}) {
   const protectedText = protectTextCommands(normalizeEscapedLatexInput(value));
   let text = protectedText.text
     .replace(/\r?\n+/g, " ")
@@ -307,7 +340,10 @@ export function normalizeMathText(value = "") {
   }
 
   text = normalizeLatexSpacingCommands(text.replace(/\^\(([^)]+)\)/g, "^{$1}"));
-  return spaceAfterTextCommands(protectedText.restore(text.replace(/\s+/g, "")))
+  const compact = preserveFunctionBoundaries
+    ? removeMathWhitespace(text)
+    : text.replace(/\s+/g, "");
+  return spaceAfterTextCommands(protectedText.restore(compact))
     .replace(/\\(quad|qquad)(?=\\text\{)/g, "\\$1 ");
 }
 
@@ -329,6 +365,7 @@ function displayText(latex) {
 }
 
 function readFunctionArgument(text, startIndex) {
+  while (/\s/.test(text[startIndex] || "")) startIndex += 1;
   if (!text.slice(startIndex)) return null;
 
   if (text[startIndex] === "{") return readBraced(text, startIndex);
@@ -632,10 +669,7 @@ function splitTopLevelProducts(text) {
 function compactStructuralLatex(value = "") {
   const text = String(value || "").replace(/\\\s+/g, "\\,");
   if (/\\text\{/.test(text)) return text;
-  return text
-    .replace(/\s+/g, "")
-    .replace(/\\(langle|rangle)(?=[A-Za-z0-9])/g, "\\$1 ")
-    .replace(/\\(times|cdot)(?=[A-Za-z0-9\\])/g, "\\$1 ");
+  return removeMathWhitespace(text);
 }
 
 function splitTopLevelVectorOperations(text) {
@@ -815,7 +849,7 @@ function parseRadical(text) {
 }
 
 function parseFunction(text) {
-  const spaced = normalizeLatexFunctionSpacing(text).replace(/\s+/g, "");
+  const spaced = removeMathWhitespace(normalizeLatexFunctionSpacing(text));
   if (spaced !== text) return parseFunction(spaced);
 
   const knownFunction = readKnownFunctionCall(text);
@@ -918,13 +952,22 @@ function normalizeMathValue(value = "") {
   const input = normalizeEscapedLatexInput(value);
   return shouldPreserveLatex(input)
     ? normalizeLatexTransport(input)
-    : normalizeMathText(input);
+    : normalizeMathText(input, { preserveFunctionBoundaries: true });
+}
+
+function renderImplicitFactorLatex(value, depth) {
+  const normalized = normalizeMathText(value, { preserveFunctionBoundaries: true });
+  const parenthesized = readParenthesized(normalized, 0);
+  if (parenthesized && parenthesized.endIndex === normalized.length) {
+    return `\\left(${renderLatexForKatex(parenthesized.value, depth + 1)}\\right)`;
+  }
+  return renderLatexForKatex(value, depth + 1);
 }
 
 function renderImplicitProduct(parts, depth) {
   return parts.reduce((output, part, index) => {
     const value = part.value || part;
-    const rendered = renderLatexForKatex(value, depth + 1);
+    const rendered = renderImplicitFactorLatex(value, depth);
     if (index === 0) return rendered;
     if (part.separator === "\\cdot" || part.separator === "·") return `${output}\\cdot ${rendered}`;
     if (part.separator === "\\;" || part.separator === "\\,") return `${output}${part.separator}${rendered}`;
@@ -990,8 +1033,8 @@ function renderLatexForKatex(value, depth = 0) {
     return normalizeLatexForKatex(normalizeEscapedLatexInput(value));
   }
 
-  if (depth > 12) return normalizeMathText(value);
-  const normalized = normalizeMathText(value);
+  if (depth > 12) return normalizeMathText(value, { preserveFunctionBoundaries: true });
+  const normalized = normalizeMathText(value, { preserveFunctionBoundaries: true });
   if (!normalized) return "";
 
   const derivative = renderDerivativeLatex(normalized, depth);
@@ -1069,12 +1112,15 @@ export function renderMathLatex(value = "") {
   }
 
   try {
-    const rendered = renderLatexForKatex(normalizeLatexFunctionSpacing(input));
+    let rendered = renderLatexForKatex(normalizeLatexFunctionSpacing(input));
+    if (!hasMalformedLatexCommandSpacing(input) && hasMalformedLatexCommandSpacing(rendered)) {
+      rendered = restoreIntroducedFunctionBoundaries(rendered);
+    }
     traceMathStage("Markdown conversion", value, rendered, "plain text math repair");
     return rendered;
   } catch (error) {
     console.error("Failed to normalize render math:", { value, error });
-    return normalizeMathText(normalizeEscapedLatexInput(value));
+    return normalizeMathText(normalizeEscapedLatexInput(value), { preserveFunctionBoundaries: true });
   }
 }
 
@@ -1452,7 +1498,7 @@ function tokenToLineToken(token, fallbackId) {
 
 function normalizeLineToken(token, fallbackId) {
   if (!token || typeof token !== "object") {
-    const display = normalizeMathText(token || "");
+    const display = normalizeMathValue(token || "");
     const explanation = explainToken("other", display, "line-token");
     return {
       id: fallbackId,

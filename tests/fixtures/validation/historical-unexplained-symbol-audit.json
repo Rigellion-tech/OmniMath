@@ -1,0 +1,61 @@
+{
+  "scope": "Every unexplained_generated_symbol finding recorded in logs/failed-solves at audit time.",
+  "classifications": [
+    {
+      "file": "2026-07-18T15-27-59-296Z_solve-extracted-problem_repro-integral-mrqisvz2_repair.json",
+      "symbol": "t",
+      "classification": "false_positive_due_to_missing_introduction_recognition",
+      "representativePattern": "t=\\arctan x and x=\\tan t in the substitution step",
+      "rationale": "The change of variable explicitly introduces t, but the historical validator did not propagate all rendered introduction fields."
+    },
+    {
+      "file": "2026-07-18T16-08-28-762Z_solve-extracted-problem_manual-integral-mrqk9aaj_initial.json",
+      "symbol": "n",
+      "classification": "true_positive",
+      "representativePattern": "an inner-integral identity uses n in a later step after n was only a local sum index",
+      "rationale": "The candidate does not declare n as a persistent parameter before the standalone identity."
+    },
+    {
+      "file": "2026-07-18T16-09-03-977Z_solve-extracted-problem_manual-integral-mrqk9aaj_repair.json",
+      "symbol": "\\theta",
+      "classification": "false_positive_due_to_missing_introduction_recognition",
+      "representativePattern": "x=\\tan\\theta in the first substitution step",
+      "rationale": "Theta is explicitly introduced by the change of variable and used afterward."
+    },
+    {
+      "file": "2026-07-18T16-09-03-977Z_solve-extracted-problem_manual-integral-mrqk9aaj_repair.json",
+      "symbol": "n",
+      "classification": "true_positive",
+      "representativePattern": "integration-by-parts steps use n after its local summation scope",
+      "rationale": "The derivation needs an explicit for-each-n parameter declaration; a prior sum binder must not leak."
+    },
+    {
+      "file": "2026-07-27T17-39-13-477Z_solve-extracted-problem_integral-live-ms3ifndh_repair.json",
+      "symbol": "B",
+      "classification": "ambiguous",
+      "representativePattern": "B_{2n} is described in prose as Bernoulli numbers but is not formally defined",
+      "rationale": "A reader can identify the standard sequence, but accepting every prose name would hide undefined coefficient families."
+    },
+    {
+      "file": "2026-07-27T17-39-13-477Z_solve-extracted-problem_integral-live-ms3ifndh_repair.json",
+      "symbol": "n",
+      "classification": "presentation_only",
+      "representativePattern": "B_{2n} appears in a split line and inline summary whose containing full equation has sum_{n=1}",
+      "rationale": "The full step binds n; only presentation slices lost the operator context."
+    },
+    {
+      "file": "2026-07-27T17-53-04-604Z_solve-extracted-problem_integral-live-ms3iykf8_initial.json",
+      "symbol": "G",
+      "classification": "false_positive_due_to_missing_introduction_recognition",
+      "representativePattern": "where G is Catalan's constant",
+      "rationale": "The prose/math declaration explicitly names the constant before the final answer."
+    },
+    {
+      "file": "2026-07-27T17-53-22-010Z_solve-extracted-problem_integral-live-ms3iykf8_repair.json",
+      "symbol": "G",
+      "classification": "false_positive_due_to_missing_introduction_recognition",
+      "representativePattern": "Catalan's constant G",
+      "rationale": "The named-constant phrase explicitly identifies G in the same step."
+    }
+  ]
+}

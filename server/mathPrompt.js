@@ -59,13 +59,18 @@ ${conversationBlock}${sourceInstruction}
 Generate only the solved problem in the compact JSON schema plus a tiny list of high-value hover anchors. Do not generate hover explanations, pin explanations, related concepts, rule tags, token metadata, subtokens, or alternative methods.
 
 Quality rules:
+- Solve the mathematics carefully before writing the response, then check the final answer against the derivation.
+- Prefer correct, conventional, elementary derivations over clever or fragile symbolic detours when an elementary route is reasonably available.
+- Introduce every new symbol before or at first use, explicitly defining substitutions and transformed variables.
+- Avoid unnecessary auxiliary symbols. Use special functions only when genuinely useful, and define them or give enough context to understand the step.
+- Do not assert a nontrivial identity without enough derivation to make it understandable.
+- Keep steps self-contained, sequential, and consistent: every displayed equation must follow from the preceding step.
 - The steps array must contain 3-8 meaningful items for most solved problems. Never return more than 8 unless the problem truly requires it.
 - Prefer 3-5 steps for simple problems, 4-7 for moderate problems, and 5-8 for advanced vector calculus.
 - For equation solving, each displayed steps[].latex must be a direct algebraic transformation of the equation currently being solved.
 - Explanatory facts and identity checks belong in steps[].reasoning, not as standalone displayed equations.
 - Never insert a displayed equation that is only a fact about coefficients, such as a constant term matching a square or a linear coefficient matching twice the square root, unless that equation is itself the problem being solved.
 - For perfect-square quadratics, prefer the shortest transformation chain: original equation, factored square equation, linear equation, final answer.
-- Example style for a perfect-square quadratic: steps[].latex should move from the original equation, to the factored square equation, to the linear equation, to the final answer. Put coefficient-matching facts only in reasoning.
 - Do not display identity-conversion steps that only restate a completed-square identity as separate steps; use them only as reasoning for the factoring transformation.
 - Each step must correspond to a mathematical transformation or theorem application: theorem application, parameterization, symmetry, coordinate transformation, integral evaluation, or verification.
 - Consecutive algebra manipulations must be merged into one conceptual step.
@@ -77,14 +82,11 @@ Quality rules:
 - Do not create anchors for isolated differentials, single variables, basic operators, parentheses, random English words, or rule labels such as Power/Product/Chain/Leibniz.
 - Anchor latex must be an exact meaningful subexpression from the step latex when possible.
 - Never include filler headings such as "Define integral", "State the integral", "Apply math", or a standalone differential like "dx".
-- For Stokes/Green/curl problems, identify the oriented boundary and use \\iint_S (\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS=\\oint_C\\mathbf F\\cdot d\\mathbf r when applicable.
-- For the paraboloid z=9-x^2-y^2 above z=0 with upward orientation, use C: x^2+y^2=9, z=0, counterclockwise viewed from above.
-- For an upper cap or upward orientation, the positive boundary orientation is counterclockwise viewed from above.
-- For Green's theorem on the ellipse x^2/4+y^2/9=1, use x=2r\\cos\\theta, y=3r\\sin\\theta, 0\\le r\\le1, 0\\le\\theta\\le2\\pi, with Jacobian 6r.
-- Never discard derivative terms from non-polynomial fractions such as \\frac{\\cos(xy)}{1+x^2+y^2}. If a term vanishes by symmetry, explicitly prove the parity over the transformed domain.
+- For oriented-boundary theorems, identify the boundary and orientation before applying the theorem.
+- Never discard derivative terms from non-polynomial expressions. If a term vanishes by symmetry, show the relevant parity and domain symmetry.
 - Do not claim "odd", "oscillatory", or "cancels by symmetry" unless the integrand and domain parity are shown in the same step.
 - If the resulting Green's theorem disk integral has no elementary closed form, state the non-elementary integral instead of hallucinating a simple value.
-- Do not introduce undefined placeholders such as G(r,\theta), H(x), "symmetric function", or "defined above" unless that placeholder is explicitly defined in the same displayed formula with the full real expression.
+- Do not introduce undefined placeholder functions or refer to a definition that was not actually provided.
 - finalAnswerLatex must contain the actual final integral expression or a numeric/exact value. It must not depend on undefined placeholder functions.
 - Standalone-final-expression contract for finalAnswerLatex:
   - It must be exactly one standalone mathematical expression.

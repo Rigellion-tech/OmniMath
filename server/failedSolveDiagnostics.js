@@ -128,6 +128,18 @@ function firstMathematicalIssue(issues = []) {
   return issues.find((issue) => !/^(?:unexplained_generated_symbol|strict_generated_latex|missing_final_answer|malformed_set_valued_answer|unsupported_numeric_final_answer_syntax|detached_relation_leading_fragment)/u.test(issue)) || null;
 }
 
+function evaluationMatchesIssue(evaluation = {}, issue = "") {
+  return [evaluation.issue, evaluation.name, evaluation.validatorName]
+    .filter(Boolean)
+    .some((candidate) => candidate === issue || candidate.startsWith(`${issue}:`) || issue.startsWith(`${candidate}:`));
+}
+
+function diagnosticFailureKind(issue = "") {
+  if (/numerical_final_answer_mismatch|sign_contradiction|numeric.*inconsisten/iu.test(issue)) return "numeric_inconsistency";
+  if (/strict_generated_latex|invalid_latex|malformed|missing_final_answer|step_renderable_content|detached_relation/iu.test(issue)) return "syntax";
+  return "unsupported_reasoning";
+}
+
 function buildArtifact({
   requestId = "",
   endpoint = "",
@@ -163,6 +175,15 @@ function buildArtifact({
     ...(exactFailedRule ? [exactFailedRule] : []),
   ].filter(Boolean);
   const issueCodes = [...new Set(validationIssueCodes)];
+  const failedEvaluations = (Array.isArray(error?.solutionRuleEvaluations)
+    ? error.solutionRuleEvaluations
+    : Array.isArray(validation.ruleEvaluations)
+      ? validation.ruleEvaluations
+      : []).filter((evaluation) => evaluation?.result === "fail");
+  const firstFailedMathematicalRule = firstMathematicalIssue(solutionIssues);
+  const decisiveIssue = firstFailedMathematicalRule || solutionIssues[0] || exactFailedRule;
+  const decisiveEvaluation = failedEvaluations.find((evaluation) => evaluationMatchesIssue(evaluation, decisiveIssue)) || null;
+  const candidateProvenance = result?._omniCandidateProvenance || validation.candidateProvenance || {};
   const promotedDiagnostics = {
     numericFinalAnswerAnalysis: safeJsonClone(validation.numericFinalAnswerAnalysis || validationContext.numericFinalAnswerAnalysis || null),
     signAnalysisResult: safeJsonClone(validation.signAnalysisResult || validationContext.signAnalysisResult || null),
@@ -180,15 +201,35 @@ function buildArtifact({
     metadata: {
       timestamp: new Date().toISOString(),
       requestId,
+      operationId: candidateProvenance.operationId || `${endpoint}:${requestId}`,
+      solveId: candidateProvenance.solveId || requestId,
+      candidateId: candidateProvenance.candidateId || `${requestId}:${candidateProvenance.solveStage || stage}`,
+      solveStage: candidateProvenance.solveStage || stage,
+      originatingProblemHash: candidateProvenance.originatingProblemHash || null,
       endpoint,
       failureStage: stage,
       purpose: diagnostics.purpose || validation.purpose || null,
-      model: diagnostics.model || validation.model || null,
+      model: candidateProvenance.model || diagnostics.model || validation.model || null,
       modelRole: diagnostics.modelRole || validation.modelRole || null,
+      routingDecision: diagnostics.initialRouting?.routingDecision || validation.initialRouting?.routingDecision || null,
+      routingReason: diagnostics.initialRouting?.routingReason || validation.initialRouting?.routingReason || null,
+      selectedInitialModelRole: diagnostics.initialRouting?.selectedInitialModelRole || validation.initialRouting?.selectedInitialModelRole || null,
+      selectedInitialModel: diagnostics.initialRouting?.selectedInitialModel || validation.initialRouting?.selectedInitialModel || null,
+      routeSource: diagnostics.initialRouting?.routeSource || validation.initialRouting?.routeSource || null,
       responseModel: diagnostics.responseModel || null,
       temperature: diagnostics.temperature ?? validation.temperature ?? null,
       top_p: diagnostics.topP ?? diagnostics.top_p ?? validation.top_p ?? null,
       reasoningEffort: diagnostics.reasoningEffort ?? validation.reasoningEffort ?? null,
+      maxOutputTokens: diagnostics.maxOutputTokens ?? validation.maxOutputTokens ?? null,
+      actualReasoningTokens: diagnostics.actualReasoningTokens ?? validation.actualReasoningTokens ?? null,
+      actualVisibleOutputTokens: diagnostics.actualVisibleOutputTokens ?? validation.actualVisibleOutputTokens ?? null,
+      responseTruncated: diagnostics.responseTruncated ?? validation.responseTruncated ?? false,
+      truncationWithZeroVisibleOutput: diagnostics.truncationWithZeroVisibleOutput
+        ?? validation.truncationWithZeroVisibleOutput
+        ?? false,
+      compactRetryReasoningLevel: diagnostics.compactRetryReasoningLevel
+        ?? validation.compactRetryReasoningLevel
+        ?? null,
       samplingOmitted: diagnostics.samplingOmitted ?? validation.samplingOmitted ?? null,
       reasoningOmittedReason: diagnostics.reasoningOmittedReason || validation.reasoningOmittedReason || null,
       promptHash: promptHash || diagnostics.promptHash || null,
@@ -249,7 +290,9 @@ function buildArtifact({
       extractedNumericApproximation: finalAnswerNumericAnalysis?.extractedNumericApproximation ?? null,
       summationBindingProvenance: (promotedDiagnostics.symbolOriginDiagnostics?.boundSymbolProvenance || [])
         .filter((binding) => binding.command === "sum"),
-      firstFailedMathematicalRule: firstMathematicalIssue(solutionIssues),
+      firstFailedMathematicalRule,
+      firstDecisiveFailedMathematicalClaim: truncateString(decisiveEvaluation?.failureEvidence || "", 2000).text,
+      failureKind: diagnosticFailureKind(decisiveIssue || ""),
       numericFinalAnswerAnalysis: promotedDiagnostics.numericFinalAnswerAnalysis,
       signAnalysisResult: promotedDiagnostics.signAnalysisResult,
       finalAnswerConsistencyResult: promotedDiagnostics.finalAnswerConsistencyResult,
@@ -266,6 +309,10 @@ function buildArtifact({
       repeatedMethodDetected: validation.repairFeedback?.repeatedMethodDetected ?? false,
       initialValidationPassed: validation.initialValidationPassed ?? null,
       repairAttempted: validation.repairAttempted ?? null,
+      failureClassification: validation.failureClassification || null,
+      qualityRepairAttempted: validation.qualityRepairAttempted ?? validation.repairAttempted ?? null,
+      compactRetryAttempted: validation.compactRetryAttempted ?? null,
+      freshEscalationAttempted: validation.freshEscalationAttempted ?? null,
       repairValidationPassed: validation.repairValidationPassed ?? null,
     },
     errors: serializeError(error),

@@ -326,28 +326,66 @@ describe("solver routing", () => {
   it("routes simple algebra to the standard tier", () => {
     const route = chooseSolverRoleForProblem({ canonicalLatex: "x+1=2" });
 
+    assert.equal(route.tier, "standard");
     assert.equal(route.role, "solver");
     assert.equal(route.reason, "default_standard");
   });
 
-  it("routes improper integrals and series conservatively", () => {
+  it("keeps ordinary one-dimensional calculus on the standard tier", () => {
+    const route = chooseSolverRoleForProblem({ canonicalLatex: "\\int_0^1 x^2\\,dx" });
+
+    assert.deepEqual(route, {
+      role: "solver",
+      tier: "standard",
+      reason: "one_dimensional_integral",
+    });
+  });
+
+  it("lets the standard solver attempt improper integrals before repair", () => {
     assert.deepEqual(
       classifyProblemComplexity({ canonicalLatex: "\\int_0^\\infty e^{-x}\\,dx" }),
-      { tier: "repair", reason: "improper_integral" }
+      { tier: "standard", reason: "improper_integral_standard_first" }
     );
+    assert.deepEqual(
+      chooseSolverRoleForProblem({ canonicalLatex: "\\int_0^\\infty e^{-x}\\,dx" }),
+      { role: "solver", tier: "standard", reason: "improper_integral_standard_first" }
+    );
+  });
+
+  it("preserves direct repair routing for infinite series", () => {
     assert.deepEqual(
       classifyProblemComplexity({ canonicalLatex: "\\sum_{n=1}^\\infty\\frac{1}{n^2}" }),
       { tier: "repair", reason: "infinite_series" }
     );
   });
 
-  it("routes prior mathematical failures to escalation without paid classification", () => {
+  it("does not route prior mathematical validator findings away from Luna", () => {
     const route = chooseSolverRoleForProblem({
       canonicalLatex: "\\int_0^1 x\\,dx",
       priorIssues: ["numerical_final_answer_mismatch"],
     });
 
-    assert.equal(route.role, "escalation");
-    assert.equal(route.reason, "prior_mathematical_validation_failure");
+    assert.equal(route.role, "solver");
+    assert.equal(route.reason, "solver_first:prior_mathematical_validation_failure");
+  });
+
+  it("routes the known improper-integral regression fixture to the standard solver first", () => {
+    const route = chooseSolverRoleForProblem({
+      canonicalLatex: "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    });
+
+    assert.deepEqual(route, {
+      role: "solver",
+      tier: "standard",
+      reason: "improper_integral_standard_first",
+    });
+  });
+
+  it("keeps higher-complexity classifications on the solver-first model role", () => {
+    const route = chooseSolverRoleForProblem({ canonicalLatex: "\\oint_C F\\cdot dr" });
+
+    assert.equal(route.role, "solver");
+    assert.equal(route.tier, "escalation");
+    assert.equal(route.reason, "solver_first:vector_or_multivariable_calculus");
   });
 });

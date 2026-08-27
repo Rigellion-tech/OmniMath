@@ -129,6 +129,97 @@ describe("mathAnnotator", () => {
     assert.equal(renderMathLatex("x^2+y^2+z^2 \\le 16"), "x^{2}+y^{2}+z^{2}\\le16");
   });
 
+  it("preserves cdot command boundaries throughout hierarchical token construction", () => {
+    const latex = "\\int_0^{\\pi/2} \\frac{\\ln(1+\\tan^2 t) \\cdot t}{\\tan t(1+\\tan^2 t)} \\cdot \\sec^2 t \\,dt";
+    const expression = annotateExpression({ id: "expr-cdot-boundary", latex });
+    const tokenLatexValues = flattenTokens(expression.tokens).map((token) => token.latex);
+
+    assert.equal(expression.latex, latex);
+    assert.equal(tokenLatexValues.some((value) => /\\cdott\b/u.test(value)), false);
+    assert.equal(tokenLatexValues.some((value) => value.includes("\\cdot t")), true);
+
+    for (const valid of ["\\cdot t", "\\cdot x", "\\cdot n", "\\cdots", "\\cdotp"]) {
+      const annotated = annotateExpression({ id: `expr-${valid.slice(1)}`, latex: valid });
+      assert.equal(annotated.latex, valid);
+      assert.doesNotThrow(() => katex.renderToString(renderMathLatex(valid), { throwOnError: true }));
+    }
+  });
+
+  it("preserves control-word boundaries in nested function arguments", () => {
+    const cases = [
+      {
+        latex: "du=\\cos\\theta d\\theta",
+        expectedBoundary: "\\theta d\\theta",
+      },
+      {
+        latex: "u=\\sin\\theta, \\quad du=\\cos\\theta\\,d\\theta",
+        expectedBoundary: "\\theta,\\quad du",
+      },
+    ];
+    const malformedBoundary = /\\(?:thetad|quaddu)\b/u;
+
+    for (const [caseIndex, { latex, expectedBoundary }] of cases.entries()) {
+      const expression = annotateExpression({
+        id: `expr-nested-boundary-${caseIndex}`,
+        latex,
+        problemId: "nested-command-boundaries",
+      });
+      const tokenLatexValues = flattenTokens(expression.tokens).map((token) => token.latex);
+
+      assert.equal(expression.latex, latex);
+      assert.equal(tokenLatexValues.some((value) => malformedBoundary.test(value)), false);
+      assert.equal(tokenLatexValues.some((value) => value.includes(expectedBoundary)), true);
+
+      for (const value of tokenLatexValues) {
+        const katexInput = renderMathLatex(value);
+        assert.equal(malformedBoundary.test(katexInput), false, value);
+        assert.doesNotThrow(() => katex.renderToString(katexInput, {
+          throwOnError: true,
+          strict: "ignore",
+        }));
+      }
+    }
+
+    for (const valid of [
+      "\\theta",
+      "\\theta_d",
+      "\\theta^d",
+      "\\quad",
+      "\\qquad",
+      "\\quad x",
+      "\\quad du",
+      "\\mathrm{d}u",
+      "\\operatorname{length}u",
+    ]) {
+      const rendered = renderMathLatex(valid);
+      assert.equal(malformedBoundary.test(rendered), false, valid);
+      assert.doesNotThrow(() => katex.renderToString(rendered, { throwOnError: true }));
+    }
+  });
+
+  it("preserves grouped factors after Greek control words during render conversion", () => {
+    const cases = [
+      ["\\Gamma(n+1)", "\\Gamma\\left(n+1\\right)"],
+      ["\\Gamma(n)", "\\Gamma\\left(n\\right)"],
+      ["\\Gamma(z)", "\\Gamma\\left(z\\right)"],
+      ["\\Gamma\\left(n+1\\right)", "\\Gamma\\left(n+1\\right)"],
+      ["\\Gamma{(n+1)}", "\\Gamma{(n+1)}"],
+      ["\\Gamma_n", "\\Gamma_n"],
+      ["\\Gamma^2", "\\Gamma^{2}"],
+      ["\\Gamma + n", "\\Gamma+n"],
+      ["\\Delta(k+1)", "\\Delta\\left(k+1\\right)"],
+    ];
+
+    for (const [input, expected] of cases) {
+      const rendered = renderMathLatex(input);
+      assert.equal(rendered, expected);
+      assert.equal(/\\Gamman\b/u.test(rendered), false);
+      assert.doesNotThrow(() => katex.renderToString(rendered, { throwOnError: true }));
+    }
+
+    assert.equal(renderMathLatex("(x+1)(x-1)"), "\\left(x+1\\right)\\left(x-1\\right)");
+  });
+
   it("preserves already-valid nested latex for KaTeX rendering", () => {
     const input = "\\int_{0}^{\\frac{\\pi}{4}}\\sin\\phi\\left(4^{5}-\\left(\\frac{2\\sqrt{3}}{\\cos\\phi}\\right)^5\\right)\\,d\\phi";
     const renderedLatex = renderMathLatex(input);

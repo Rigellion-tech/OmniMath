@@ -527,6 +527,11 @@ function splitImplicitProduct(text) {
     const split = splitAt(0, leadingCall.end, leadingCall.end);
     if (split) return split;
   }
+  const leadingFunctionFactor = readLeadingFunctionFactor(compact);
+  if (leadingFunctionFactor && leadingFunctionFactor.end > 0 && leadingFunctionFactor.end < compact.length) {
+    const split = splitAt(0, leadingFunctionFactor.end, leadingFunctionFactor.end);
+    if (split) return split;
+  }
   const symbolRoot = compact.match(/^([a-zA-Z]|\\(?:theta|phi|rho|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega))(\\sqrt(?:\{.+\}|[a-zA-Z0-9].*))$/);
   if (symbolRoot && hasBalancedGroups(symbolRoot[1]) && hasBalancedGroups(symbolRoot[2])) {
     const split = splitAt(0, symbolRoot[1].length, symbolRoot[1].length);
@@ -747,6 +752,46 @@ function readIntegralHead(text = "") {
     scripts,
     endIndex: scriptInfo.endIndex,
     tail: source.slice(scriptInfo.endIndex),
+  };
+}
+
+function readLeadingFunctionFactor(text = "") {
+  const source = String(text || "");
+  let name = readNameToken(source, 0);
+  if (!name || !isLikelyFunctionName(name)) name = readKnownFunctionPrefix(source);
+  if (!name || !isLikelyFunctionName(name)) return null;
+
+  const scriptInfo = readScriptsAfter(source, name.length);
+  const argumentStart = skipLeadingSpacing(source, scriptInfo.endIndex);
+  if (argumentStart >= source.length) return null;
+  const delimitedArgument = readDelimited(source, argumentStart);
+  if (delimitedArgument) {
+    return {
+      name,
+      nameStart: 0,
+      nameEnd: name.length,
+      scripts: scriptInfo.scripts,
+      argument: delimitedArgument,
+      end: delimitedArgument.end,
+    };
+  }
+
+  const nestedFunction = readLeadingFunctionFactor(source.slice(argumentStart));
+  const argumentEnd = nestedFunction
+    ? argumentStart + nestedFunction.end
+    : readAtomicFactorEnd(source, argumentStart);
+  if (argumentEnd <= argumentStart) return null;
+  return {
+    name,
+    nameStart: 0,
+    nameEnd: name.length,
+    scripts: scriptInfo.scripts,
+    argument: {
+      value: source.slice(argumentStart, argumentEnd),
+      start: argumentStart,
+      end: argumentEnd,
+    },
+    end: argumentEnd,
   };
 }
 
@@ -1046,26 +1091,11 @@ function parseGenericFunctionCall(builder, text, parentId, depth, start, role) {
   const call = readLeadingFunctionCall(text);
   if (call && call.end !== text.length) return null;
   if (!call) {
-    let name = readNameToken(text, 0);
-    let scriptInfo = readScriptsAfter(text, name.length);
-    let argumentLatex = text.slice(scriptInfo.endIndex);
-    if (
-      (!argumentLatex || argumentLatex === text)
-      && name.startsWith("\\")
-      && !FUNCTION_COMMANDS.has(name.slice(1))
-    ) {
-      name = readKnownFunctionPrefix(text);
-      scriptInfo = readScriptsAfter(text, name.length);
-      argumentLatex = text.slice(scriptInfo.endIndex);
-    }
-    if (!name || !isLikelyFunctionName(name)) {
-      name = readKnownFunctionPrefix(text);
-      scriptInfo = readScriptsAfter(text, name.length);
-      argumentLatex = text.slice(scriptInfo.endIndex);
-    }
-    if (!name || !isLikelyFunctionName(name)) return null;
-    if (!argumentLatex || argumentLatex === text) return null;
-    if (!hasBalancedGroups(argumentLatex)) return null;
+    const factor = readLeadingFunctionFactor(text);
+    if (!factor || factor.end !== text.length) return null;
+    const name = factor.name;
+    const scriptInfo = { scripts: factor.scripts };
+    const argumentLatex = factor.argument.value;
     const node = builder.createNode({ type: "functionCall", role: role === "expression" || role === "term" || role === "factor" ? "function" : role, latex: text, parentId, depth, start, end: start + text.length });
     const childIds = [builder.createNode({
       type: "function",
@@ -1089,7 +1119,7 @@ function parseGenericFunctionCall(builder, text, parentId, depth, start, role) {
       }).id);
       childIds.push(parseExpression(builder, script.value, node.id, depth + 1, start + script.start, scriptRole)?.id);
     }
-    const argument = parseExpression(builder, argumentLatex, node.id, depth + 1, start + scriptInfo.endIndex, "argument");
+    const argument = parseExpression(builder, argumentLatex, node.id, depth + 1, start + factor.argument.start, "argument");
     node.childIds = [childIds, argument?.id].flat().filter(Boolean);
     return node;
   }
@@ -1314,14 +1344,6 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
     }
   }
 
-  const subscriptIndex = findTopLevelOperator(text, ["_"]);
-  if (
-    subscriptIndex > 0
-    && /^((?:[a-zA-Z]|\\mathbf\{?[a-zA-Z]\}?|\\(?:theta|phi|rho|alpha|beta|gamma|delta|lambda|mu|sigma|omega)))(?:_\{?[^{}]+\}?)$/.test(text)
-  ) {
-    return builder.createNode({ type: "subscript", role: role === "expression" ? "variable" : role, latex: text, parentId, depth, start, end: start + text.length });
-  }
-
   const differentialMatches = findDifferentials(text);
   const integralHead = readIntegralHead(text);
   if (integralHead) {
@@ -1399,6 +1421,14 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
     const exponent = parseExpression(builder, exponentScript.value, node.id, depth + 1, start + exponentScript.start, "exponent");
     node.childIds = [base?.id, caret.id, exponent?.id].filter(Boolean);
     return node;
+  }
+
+  const subscriptIndex = findTopLevelOperator(text, ["_"]);
+  if (
+    subscriptIndex > 0
+    && /^((?:[a-zA-Z]|\\mathbf\{?[a-zA-Z]\}?|\\(?:theta|phi|rho|alpha|beta|gamma|delta|lambda|mu|sigma|omega)))(?:_\{?[^{}]+\}?)$/.test(text)
+  ) {
+    return builder.createNode({ type: "subscript", role: role === "expression" ? "variable" : role, latex: text, parentId, depth, start, end: start + text.length });
   }
 
   const tokenMeta = tokenTypeForLatex(text);

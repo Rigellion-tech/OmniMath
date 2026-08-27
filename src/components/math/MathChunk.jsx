@@ -1,14 +1,17 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import InlineMath from "./InlineMath";
 import { getConceptForChunk } from "@/data/conceptGraph";
-import { useHover } from "@/lib/HoverContext";
+import { useHoverActions, useHoverSemanticState } from "@/lib/HoverContext";
 import { attachLocalSemanticExplanation, cleanSemanticTarget } from "@/lib/mathHitboxes";
 import { buildSemanticTree, flattenSemanticTreeForTargets } from "@/lib/mathSemanticTree";
 import { userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { endOmniMeasure, measureOmniSync, startOmniMeasure } from "@/lib/performanceDiagnostics";
 import { hasSerializableSemanticRanges, normalizeCanonicalSemanticTree } from "@/lib/semanticMathRenderer";
+import { flushMathScrollTranslations, subscribeToMathScroll } from "@/lib/mathScrollCoordinator";
 import {
+  auditSemanticHoverCoverage,
   filterLeafRects,
+  dedupeSemanticTargetsById,
   isAggregateHoverTarget,
   isBoundaryCompatibleTextMatch,
   isCompactPowerParent,
@@ -17,13 +20,16 @@ import {
   isHoverEligibleTarget,
   isLeafSemanticTarget,
   isSelectableLeafTarget,
+  localSemanticRectToViewportRect,
   medianRectHeight,
   normalizeSemanticRect,
+  preserveSemanticRectFragments,
   rectArea,
   rectContainsPoint,
   refineDifferentialHighlightGeometry,
   resolveSemanticTarget,
   unionSemanticRects,
+  viewportRectToLocalSemanticRect,
 } from "@/lib/semanticHitboxes";
 import { cn } from "@/lib/utils";
 
@@ -53,6 +59,7 @@ const DEBUG_MATH_HOVER_PERF = import.meta.env.DEV
     || import.meta.env.VITE_DEBUG_MATH_HOVER === "1"
   );
 const BOUND_TARGET_ROLES = new Set(["upperBound", "lowerBound", "bound"]);
+let mathChunkDomInstanceSequence = 0;
 
 function semanticHoverPerfStore() {
   if (!DEBUG_MATH_HOVER_PERF || typeof window === "undefined") return null;
@@ -560,23 +567,8 @@ function visibleKatexPrimitiveRectsInElement(root, scopeElement) {
 }
 
 function clusterSemanticRects(rects = [], medianHeight = 18) {
-  const sorted = sortRectsByVisualOrder(rects.map(normalizeSemanticRect).filter(Boolean));
-  if (sorted.length <= 1) return sorted;
-  const clusters = [];
-  let current = sorted[0];
-  for (const rect of sorted.slice(1)) {
-    const sameLine = Math.abs(rectCenter(current).y - rectCenter(rect).y) <= Math.max(6, medianHeight * 0.85);
-    const closeGap = rect.left - current.right <= Math.max(5, medianHeight * 0.45);
-    const overlaps = rect.left <= current.right + 1 && rect.right >= current.left - 1;
-    if (sameLine && (closeGap || overlaps)) {
-      current = unionSemanticRects([current, rect]) || current;
-      continue;
-    }
-    clusters.push(current);
-    current = rect;
-  }
-  clusters.push(current);
-  return clusters;
+  void medianHeight;
+  return preserveSemanticRectFragments(rects);
 }
 
 function semanticRectQuality(target = {}, rects = [], paintedRects = [], options = {}) {
@@ -641,6 +633,12 @@ function attachMeasurementRoot(target = {}, rootRect = null) {
 const MIN_SEMANTIC_RECT_DIMENSION = 0.5;
 const OUTSIDE_ROOT_TOLERANCE_PX = 6;
 
+function isPotentialScrollContainer(element = null) {
+  if (!element || typeof window === "undefined") return false;
+  const style = window.getComputedStyle?.(element);
+  return /(auto|scroll|overlay)/.test(`${style?.overflow || ""} ${style?.overflowX || ""} ${style?.overflowY || ""}`);
+}
+
 function scrollableAncestorsForSnapshot(root = null, visualRoot = null) {
   if (typeof window === "undefined") return [];
   const owners = [root, visualRoot].filter(Boolean);
@@ -651,10 +649,7 @@ function scrollableAncestorsForSnapshot(root = null, visualRoot = null) {
     while (current && current !== document.body && current !== document.documentElement) {
       if (!seen.has(current)) {
         seen.add(current);
-        const style = window.getComputedStyle?.(current);
-        const hasScrollableOverflow = /(auto|scroll|overlay)/.test(`${style?.overflow || ""} ${style?.overflowX || ""} ${style?.overflowY || ""}`);
-        const canScroll = current.scrollWidth > current.clientWidth + 1 || current.scrollHeight > current.clientHeight + 1;
-        if (hasScrollableOverflow && canScroll) ancestors.push(current);
+        if (isPotentialScrollContainer(current)) ancestors.push(current);
       }
       current = current.parentElement;
     }
@@ -694,6 +689,10 @@ function readSnapshotScrollState(root = null, visualRoot = null) {
         || "scroll-container",
       left: element.scrollLeft || 0,
       top: element.scrollTop || 0,
+      clientWidth: element.clientWidth || 0,
+      clientHeight: element.clientHeight || 0,
+      scrollWidth: element.scrollWidth || 0,
+      scrollHeight: element.scrollHeight || 0,
     }));
   if (typeof window === "undefined") {
     return {
@@ -715,24 +714,6 @@ function readSnapshotScrollState(root = null, visualRoot = null) {
     visualTop: visualRoot?.scrollTop || 0,
     scrollAncestors,
   };
-}
-
-function sameSnapshotScrollState(left = null, right = null) {
-  if (!left || !right) return false;
-  const leftAncestors = safeList(left.scrollAncestors);
-  const rightAncestors = safeList(right.scrollAncestors);
-  return left.windowX === right.windowX
-    && left.windowY === right.windowY
-    && left.rootLeft === right.rootLeft
-    && left.rootTop === right.rootTop
-    && left.visualLeft === right.visualLeft
-    && left.visualTop === right.visualTop
-    && leftAncestors.length === rightAncestors.length
-    && leftAncestors.every((entry, index) => (
-      entry.owner === rightAncestors[index]?.owner
-      && entry.left === rightAncestors[index]?.left
-      && entry.top === rightAncestors[index]?.top
-    ));
 }
 
 function semanticRectSignature(rect = null) {
@@ -883,28 +864,11 @@ function sortRectsByVisualOrder(rects = []) {
 }
 
 function mergeContiguousSemanticRects(rects = []) {
-  const sorted = sortRectsByVisualOrder(rects).map(normalizeSemanticRect).filter(Boolean);
-  if (sorted.length <= 1) return sorted;
-  const merged = [];
-  let current = sorted[0];
-  for (const next of sorted.slice(1)) {
-    if (rectsAreVisuallyAdjacent(current, next)) {
-      current = unionSemanticRects([current, next]) || current;
-    } else {
-      merged.push(current);
-      current = next;
-    }
-  }
-  merged.push(current);
-  return merged;
+  return preserveSemanticRectFragments(rects);
 }
 
 function normalizeDeterministicLeafRects(rects = [], target = {}) {
-  const role = target.role || target.kind || target.type || "";
-  if (role === "functionName") {
-    const merged = unionSemanticRects(rects);
-    return merged ? [merged] : [];
-  }
+  void target;
   return mergeContiguousSemanticRects(rects);
 }
 
@@ -1370,10 +1334,7 @@ function measureAnnotatedSemanticTargets({
       containerRect,
     }), semanticTarget);
     const rects = sortRectsByVisualOrder(leaf
-      ? (leafRects.length > 0 && (
-        rectsTotalArea(leafRects) <= Math.max(1, rectsTotalArea(paintedLeafRects)) * 2.4
-        || paintedLeafRects.length === 0
-      ) ? leafRects : paintedLeafRects)
+      ? (paintedLeafRects.length > 0 ? paintedLeafRects : leafRects)
       : (clusteredPaintedRects.length > 0 ? clusteredPaintedRects : rawRects)
     );
     const paintedRects = clusteredPaintedRects.length > 0 ? clusteredPaintedRects : rects;
@@ -1424,6 +1385,8 @@ function measureAnnotatedSemanticTargets({
       leavesByText.set(key, group);
     }
     const claimedFallbackMatchKeys = new Set();
+    const claimedFallbackElements = new Set();
+    const claimedFallbackTextRanges = [];
     for (const target of eligibleMissingLeaves.sort((left, right) => (
       Number(left.sourceRange?.start ?? left.order ?? 0) - Number(right.sourceRange?.start ?? right.order ?? 0)
       || Number(left.order ?? 0) - Number(right.order ?? 0)
@@ -1482,7 +1445,13 @@ function measureAnnotatedSemanticTargets({
       const rawMatches = sortMatchesByRenderedOrder(
         getTextRangeMatches(textIndex, targetText),
         Math.max(1, fallbackMedianHeight * 1.35 || 18)
-      );
+      ).filter((match) => (
+        !safeList(match.elements).some((element) => claimedFallbackElements.has(element))
+        && !claimedFallbackTextRanges.some((range) => (
+          match.foundAt < range.end
+          && match.foundAt + targetText.length > range.start
+        ))
+      ));
       const preferred = rawMatches[occurrenceIndex] || null;
       const preferredKey = preferred ? textMatchKey(preferred) : "";
       const splitSignedFallback = (!preferred || claimedFallbackMatchKeys.has(preferredKey))
@@ -1546,6 +1515,13 @@ function measureAnnotatedSemanticTargets({
         continue;
       }
       claimedFallbackMatchKeys.add(finalKey);
+      safeList(finalFallback.elements).forEach((element) => claimedFallbackElements.add(element));
+      if (Number.isFinite(finalFallback.foundAt)) {
+        claimedFallbackTextRanges.push({
+          start: finalFallback.foundAt,
+          end: finalFallback.foundAt + targetText.length,
+        });
+      }
       annotateMeasuredElements(finalFallback.elements, target.id);
       const patched = {
         ...target,
@@ -1886,6 +1862,7 @@ function elementSemanticText(element) {
 }
 
 function queryElements(root, selector) {
+  recordSemanticHoverCounter("querySelectorAllCalls", 1);
   return typeof root?.querySelectorAll === "function" ? [...root.querySelectorAll(selector)] : [];
 }
 
@@ -2450,29 +2427,16 @@ function buildSemanticLeafDiagnostics({
 }
 
 function dedupeOverlayTargets(targets = []) {
-  const byKey = new Map();
-  for (const target of targets) {
-    const rect = target.rects?.[0];
-    const key = [
-      target.latex || target.display || target.text || "",
-      target.role || target.kind || target.type || "",
-      rect ? Math.round(rect.left) : "",
-      rect ? Math.round(rect.top) : "",
-      rect ? Math.round(rect.width) : "",
-      rect ? Math.round(rect.height) : "",
-    ].join("|");
-    const current = byKey.get(key);
-    if (!current) {
-      byKey.set(key, target);
-      continue;
-    }
-    const currentHasSource = Boolean(current.sourceRange);
-    const nextHasSource = Boolean(target.sourceRange);
-    if (nextHasSource && !currentHasSource) {
-      byKey.set(key, target);
-    }
-  }
-  return [...byKey.values()];
+  return dedupeSemanticTargetsById(targets);
+}
+
+function domElementDebugLabel(elements = []) {
+  return safeList(elements).map((element) => {
+    const description = describeDomElement(element);
+    if (!description) return "unknown";
+    const classes = String(description.className || "").trim().split(/\s+/).filter(Boolean).slice(0, 2).join(".");
+    return `${description.tag || "node"}${classes ? `.${classes}` : ""}${description.semanticId ? `#${description.semanticId}` : ""}`;
+  }).join(",") || "none";
 }
 
 function duplicateEntries(values = []) {
@@ -2711,7 +2675,7 @@ function candidateDebugPayload(target = {}, rect = null, pointer = {}, score = n
     dom: safeTarget?.debugDom || null,
     semanticDepth: safeTarget?.depth ?? null,
     rect: rectSnapshot(normalizedRect),
-    rectangleArea: rectArea(normalizedRect),
+    rectangleArea: normalizedRect ? rectArea(normalizedRect) : 0,
     paintedRects: safeList(safeTarget?.paintedRects).map(rectSnapshot).filter(Boolean),
     paintedArea: safeTarget?.paintedArea ?? null,
     geometryQuality: safeTarget?.geometryQuality || null,
@@ -2818,11 +2782,28 @@ function recordGeometrySnapshotDiagnostic(snapshot = {}, details = {}) {
     reason: snapshot.reason || "",
     phase: snapshot.phase || details.phase || "",
     coordinateSpace: snapshot.coordinateSpace || "viewport",
+    coordinateSpaceOrigin: snapshot.coordinateSpaceOrigin || null,
+    scrollState: snapshot.scrollState || null,
     rootRect: snapshot.rootRect || null,
     visualRect: snapshot.visualRect || null,
     acceptedTargets: safeList(snapshot.childTargets).map(geometryTargetDebugPayload),
     rejectedTargets: safeList(snapshot.rejectedTargets).map(geometryTargetDebugPayload),
-    overlayTargets: safeList(snapshot.overlayTargets).map(geometryTargetDebugPayload),
+    overlayTargets: safeList(snapshot.overlayTargets).map((target) => ({
+      ...geometryTargetDebugPayload(target),
+      registered: snapshot.targetById?.has?.(target.id) || false,
+      interactable: target.geometryValid !== false && safeList(target.rects).length > 0,
+      localHitboxRects: safeList(target.rects)
+        .map((rect) => viewportRectToLocalSemanticRect(
+          rect,
+          snapshot.coordinateSpaceOrigin?.rect || snapshot.rootRect,
+          {
+            originWidth: snapshot.coordinateSpaceOrigin?.width,
+            originHeight: snapshot.coordinateSpaceOrigin?.height,
+          },
+        ))
+        .filter(Boolean)
+        .map(rectSnapshot),
+    })),
   });
   diagnosticWindow.__OMNIMATH_LAST_GEOMETRY_SNAPSHOT__ = diagnostic;
   diagnosticWindow.__OMNIMATH_GEOMETRY_SNAPSHOTS__ = [
@@ -3073,6 +3054,9 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
     relatedConceptIds = [],
     pinnedChunkIds = [],
     openReferenceIds = [],
+    selectedTokenIds = [],
+  } = useHoverSemanticState();
+  const {
     handleChunkEnter = noop,
     handleChunkMove = noop,
     handleChunkLeave = noop,
@@ -3082,8 +3066,7 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
     beginTokenSelection = noop,
     extendTokenSelection = noop,
     finishTokenSelection = noop,
-    selectedTokenIds = [],
-  } = useHover() || {};
+  } = useHoverActions();
   const concept = getConceptForChunk(safePart);
   const isActive = activeChunkId === safePart.id;
   const isConceptActive = concept?.id && concept.id === inspectedConceptId;
@@ -3315,7 +3298,8 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
   );
 }
 
-function MathChunk({ chunk, stepId }) {
+function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
+  recordSemanticHoverPerf("mathChunkRender", { stepId, chunkId: chunk?.id || "" });
   const tokenRef = useRef(null);
   const mathVisualRef = useRef(null);
   const semanticTargetsRef = useRef([]);
@@ -3330,6 +3314,11 @@ function MathChunk({ chunk, stepId }) {
   const lastResolvedHoverIdRef = useRef(null);
   const lastMovedHoverIdRef = useRef(null);
   const pointerResolveRetryFrameRef = useRef(0);
+  const sourceDomInstanceRef = useRef("");
+  if (!sourceDomInstanceRef.current) {
+    mathChunkDomInstanceSequence += 1;
+    sourceDomInstanceRef.current = `math-chunk-${mathChunkDomInstanceSequence}`;
+  }
   const handleAnnotatedMoveRef = useRef((_event) => {});
   const [overlayTargets, setOverlayTargets] = useState([]);
   const safeChunk = useMemo(
@@ -3358,6 +3347,9 @@ function MathChunk({ chunk, stepId }) {
     relatedConceptIds = [],
     pinnedChunkIds = [],
     openReferenceIds = [],
+    selectedTokenIds = [],
+  } = hoverSemantic;
+  const {
     handleChunkEnter = noop,
     handleChunkMove = noop,
     handleChunkLeave = noop,
@@ -3365,13 +3357,14 @@ function MathChunk({ chunk, stepId }) {
     selectChunk = noop,
     registerToken = noop,
     registerMeasuredTargets = noop,
+    reconcileHoverOwnership = noop,
+    reportHoverLifecycle = noop,
     beginTokenSelection = noop,
     extendTokenSelection = noop,
     finishTokenSelection = noop,
     clearHoverLens = noop,
-    selectedTokenIds = [],
     settings,
-  } = useHover() || {};
+  } = hoverActions;
 
   const concept = getConceptForChunk(safeChunk);
   const isActive = activeChunkId === safeChunk.id;
@@ -3535,13 +3528,19 @@ function MathChunk({ chunk, stepId }) {
         overlayTargetCount: nextOverlayTargets.length,
       })
       : null;
+    const coordinateOptions = rootCoordinateOptions(tokenRef.current, rootRect);
     const preparedTargets = targets
-      .map((target) => prepareSnapshotTarget(target, rootRect, semanticNodeById, safeChunk.id));
+      .map((target) => prepareSnapshotTarget(target, rootRect, semanticNodeById, safeChunk.id))
+      .map((target) => cacheTargetRootLocalGeometry(target, rootRect, coordinateOptions));
     const acceptedTargets = preparedTargets.filter((target) => target.geometryValid);
     const rejected = [
       ...preparedTargets.filter((target) => !target.geometryValid),
       ...safeList(rejectedTargets).map((target) => ({
-        ...prepareSnapshotTarget(target, rootRect, semanticNodeById, safeChunk.id),
+        ...cacheTargetRootLocalGeometry(
+          prepareSnapshotTarget(target, rootRect, semanticNodeById, safeChunk.id),
+          rootRect,
+          coordinateOptions,
+        ),
         geometryValid: false,
       })),
     ];
@@ -3573,10 +3572,23 @@ function MathChunk({ chunk, stepId }) {
       targetById,
       rectEntries,
       rejectedTargets: rejected,
-      overlayTargets: nextOverlayTargets,
+      overlayTargets: nextOverlayTargets.map((target) => (
+        cacheTargetRootLocalGeometry(target, rootRect, coordinateOptions)
+      )),
       signature,
       createdAt: Date.now(),
       coordinateSpace: "viewport",
+      coordinateSpaceOrigin: {
+        rect: rectSnapshot(rootRect),
+        width: coordinateOptions.originWidth,
+        height: coordinateOptions.originHeight,
+        scrollLeft: coordinateOptions.scrollLeft,
+        scrollTop: coordinateOptions.scrollTop,
+        scaleX: coordinateOptions.scaleX,
+        scaleY: coordinateOptions.scaleY,
+      },
+      visualRootLocalRect: viewportRectToLocalSemanticRect(visualRect, rootRect, coordinateOptions),
+      translationRevision: previous.translationRevision || 0,
     };
     geometrySnapshotRef.current = snapshot;
     semanticTargetsRef.current = acceptedTargets;
@@ -3618,6 +3630,13 @@ function MathChunk({ chunk, stepId }) {
       chunkId: safeChunk.id,
       measurementRevision,
       semanticNodeCount: semanticNodes.length,
+    });
+    recordSemanticHoverPerf("geometryReconstruction", {
+      reason: geometryReconstructionReason(phase),
+      phase,
+      stepId,
+      chunkId: safeChunk.id,
+      measurementRevision,
     });
     const root = tokenRef.current;
     const visualRoot = mathVisualRef.current;
@@ -3798,18 +3817,22 @@ function MathChunk({ chunk, stepId }) {
           }
         }
 
+        const originSize = {
+          originWidth: root.offsetWidth || rootRect.width,
+          originHeight: root.offsetHeight || rootRect.height,
+          scrollLeft: root.scrollLeft || 0,
+          scrollTop: root.scrollTop || 0,
+        };
         setOverlayTargets(finalOverlayTargets.map((target) => ({
           ...target,
           measurementRevision,
           isLeafTarget: isLeafSemanticTarget(target),
           rectSource: target.rectSource || "unknown",
-          rects: target.rects.map((rect) => ({
-            left: rect.left - rootRect.left,
-            top: rect.top - rootRect.top,
-            width: rect.width,
-            height: rect.height,
-          })),
+          rects: target.rects
+            .map((rect) => viewportRectToLocalSemanticRect(rect, rootRect, originSize))
+            .filter(Boolean),
         })));
+        reconcileHoverOwnership(`source-geometry:${phase}`);
       }
 
       recordSemanticHoverPerf("geometryMeasurementComplete", {
@@ -3831,16 +3854,6 @@ function MathChunk({ chunk, stepId }) {
         });
       }
       return semanticTargetsRef.current;
-    }
-
-    if (import.meta.env.DEV) {
-      console.warn("[omnimath:semantic-hitbox-legacy-fallback]", {
-        phase,
-        stepId,
-        chunkId: safeChunk.id,
-        semanticNodeCount: semanticNodes.length,
-        reason: "no-annotated-semantic-dom-nodes",
-      });
     }
 
     const textIndex = collectTextNodes(katexRoot);
@@ -3875,6 +3888,7 @@ function MathChunk({ chunk, stepId }) {
     const textMatchAllocationById = new Map();
     const claimedTextMatchKeys = new Set();
     const claimedStructuralCandidateKeys = new Set();
+    const claimedLeafElements = new Set();
     const measurementDiagnosticsById = new Map();
     const sourceLeafGroups = new Map();
     for (const node of occurrenceOrderedLeafNodes.filter((leaf) => leaf.sourceRange)) {
@@ -3982,7 +3996,9 @@ function MathChunk({ chunk, stepId }) {
         };
       }
       claimedStructuralCandidateKeys.add(winner.key);
-      annotateMeasuredElements(winner.candidate.elements || [winner.candidate.element].filter(Boolean), node.id);
+      const winnerElements = winner.candidate.elements || [winner.candidate.element].filter(Boolean);
+      winnerElements.forEach((element) => claimedLeafElements.add(element));
+      annotateMeasuredElements(winnerElements, node.id);
       const rawRects = winner.candidate.rects?.length ? winner.candidate.rects : [winner.candidate.rect];
       const filteredRects = filterLeafRects(rawRects, node, {
         medianLeafHeight: leafMedianHeight,
@@ -3992,7 +4008,7 @@ function MathChunk({ chunk, stepId }) {
         rects: filteredRects,
         rectSource: options.rectSource || "katex-structure",
         hitboxRole: options.hitboxRole || null,
-        elements: winner.candidate.elements || [winner.candidate.element].filter(Boolean),
+        elements: winnerElements,
         chosenDomKey: winner.key,
         domMatchCount: scored.length,
         usedAllocatedMatch: !winner.score || !claimedStructuralCandidateKeys.has(winner.key),
@@ -4242,6 +4258,7 @@ function MathChunk({ chunk, stepId }) {
           }),
         }))
         .filter((match) => match.rects.length > 0)
+        .filter((match) => !safeList(match.elements).some((element) => claimedLeafElements.has(element)))
         .filter((match) => !claimedTextMatchKeys.has(match.matchKey) || match.matchKey === allocatedMatchKey)
         .sort((left, right) => (
           Number(right.matchKey === allocatedMatchKey) - Number(left.matchKey === allocatedMatchKey)
@@ -4252,6 +4269,7 @@ function MathChunk({ chunk, stepId }) {
 
       if (textMatches[0]) {
         claimedTextMatchKeys.add(textMatches[0].matchKey);
+        safeList(textMatches[0].elements).forEach((element) => claimedLeafElements.add(element));
         annotateMeasuredElements(textMatches[0].elements, node.id);
         return {
           rects: mergeNegativeNumberRects(textMatches[0].rects),
@@ -4686,6 +4704,17 @@ function MathChunk({ chunk, stepId }) {
         visualRect,
         rootRect,
       });
+      if (DEBUG_MATH_HOVER_DIAGNOSTICS) {
+        const hoverCoverage = auditSemanticHoverCoverage({
+          stepId,
+          sourceLatex: canonicalSemanticTree?.displayLatex || semanticLatexInput,
+          recognizedTokens: semanticNodes,
+          descriptors: leafNodes.filter(isHoverEligibleTarget),
+          registeredTargets: selectableTargets,
+          renderedTargets: finalOverlayTargets.filter((target) => !target.isRejectedGeometry && !target.isUncoveredGlyph),
+        });
+        console.info("[omnimath:hover-coverage]", hoverCoverage);
+      }
       if (debugOverlay || DEBUG_MATH_HOVER_DIAGNOSTICS) {
         console.info("[omnimath:semantic-node-rects]", {
           phase,
@@ -4838,18 +4867,22 @@ function MathChunk({ chunk, stepId }) {
         });
       }
 
+      const originSize = {
+        originWidth: root.offsetWidth || rootRect.width,
+        originHeight: root.offsetHeight || rootRect.height,
+        scrollLeft: root.scrollLeft || 0,
+        scrollTop: root.scrollTop || 0,
+      };
       setOverlayTargets(finalOverlayTargets.map((target) => ({
         ...target,
         measurementRevision,
         isLeafTarget: isLeafSemanticTarget(target),
         rectSource: target.rectSource || "unknown",
-        rects: target.rects.map((rect) => ({
-          left: rect.left - rootRect.left,
-          top: rect.top - rootRect.top,
-          width: rect.width,
-          height: rect.height,
-        })),
+        rects: target.rects
+          .map((rect) => viewportRectToLocalSemanticRect(rect, rootRect, originSize))
+          .filter(Boolean),
       })));
+      reconcileHoverOwnership(`source-geometry:${phase}`);
     }
 
     recordSemanticHoverPerf("geometryMeasurementComplete", {
@@ -4860,17 +4893,126 @@ function MathChunk({ chunk, stepId }) {
       elapsedMs: Math.round(((typeof performance !== "undefined" ? performance.now() : Date.now()) - measurementStartedAt) * 100) / 100,
       targetCount: semanticTargetsRef.current.length,
       overlayTargetCount: targets.length,
-      legacyFallbackUsed: true,
+      domMappingMode: "canonical-katex-dom",
     });
     if (import.meta.env.DEV) {
       endOmniMeasure(geometryPerfToken, {
-        result: "legacy-fallback",
+        result: "canonical-katex-dom",
         targetCount: semanticTargetsRef.current.length,
         overlayTargetCount: targets.length,
       });
     }
     return semanticTargetsRef.current;
-  }, [canonicalSemanticTree, commitGeometrySnapshot, registerMeasuredTargets, replaceGeometrySnapshot, safeChunk, semanticNodeById, semanticNodes, settings?.interaction?.debugSemanticHitboxes, stepId]);
+  }, [canonicalSemanticTree, commitGeometrySnapshot, reconcileHoverOwnership, registerMeasuredTargets, replaceGeometrySnapshot, safeChunk, semanticNodeById, semanticNodes, settings?.interaction?.debugSemanticHitboxes, stepId]);
+
+  const translateSemanticGeometry = useCallback(({ changedTargets = [] } = {}) => {
+    const translationStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const translationPerfToken = import.meta.env.DEV
+      ? startOmniMeasure("semantic.geometry.translation", {
+        stepId,
+        chunkId: safeChunk.id,
+        changedContainerCount: changedTargets.length,
+      })
+      : null;
+    const snapshot = geometrySnapshotRef.current;
+    const root = tokenRef.current;
+    if (!snapshot?.valid || !root?.isConnected || snapshot.domOwner !== root) {
+      measureSemanticTargets("explicit-fallback");
+      if (import.meta.env.DEV) endOmniMeasure(translationPerfToken, { result: "explicit-fallback" });
+      return false;
+    }
+
+    recordSemanticHoverCounter("getBoundingClientRectCalls", 1, { reason: "scroll-translation-root" });
+    const currentRootRect = normalizeSemanticRect(root.getBoundingClientRect());
+    if (!currentRootRect) {
+      measureSemanticTargets("explicit-fallback");
+      if (import.meta.env.DEV) endOmniMeasure(translationPerfToken, { result: "missing-root-rect" });
+      return false;
+    }
+    const coordinateOptions = rootCoordinateOptions(root, currentRootRect);
+    const cachedOrigin = snapshot.coordinateSpaceOrigin || {};
+    const layoutSizeChanged = Math.abs((cachedOrigin.width || 0) - coordinateOptions.originWidth) > 0.5
+      || Math.abs((cachedOrigin.height || 0) - coordinateOptions.originHeight) > 0.5;
+    const scaleChanged = Math.abs((cachedOrigin.scaleX || 1) - coordinateOptions.scaleX) > 0.001
+      || Math.abs((cachedOrigin.scaleY || 1) - coordinateOptions.scaleY) > 0.001;
+    if (layoutSizeChanged || scaleChanged) {
+      recordSemanticHoverPerf("geometryTransformInvalidated", {
+        reason: scaleChanged ? "transform-change" : "resize",
+        stepId,
+        chunkId: safeChunk.id,
+        scaleX: coordinateOptions.scaleX,
+        scaleY: coordinateOptions.scaleY,
+        cachedScaleX: cachedOrigin.scaleX || 1,
+        cachedScaleY: cachedOrigin.scaleY || 1,
+      });
+      measureSemanticTargets(scaleChanged ? "transform-change" : "resize");
+      if (import.meta.env.DEV) endOmniMeasure(translationPerfToken, {
+        result: scaleChanged ? "transform-change" : "resize",
+      });
+      return false;
+    }
+
+    const translatedTargets = snapshot.targets.map((target) => (
+      translateTargetFromRootLocal(target, currentRootRect, coordinateOptions)
+    ));
+    const targetById = new Map(translatedTargets.map((target) => [target.id, target]));
+    const childTargets = translatedTargets.filter((target) => target.id !== safeChunk.id);
+    const rectEntries = childTargets.flatMap((target) => (
+      safeList(target.rects).map((rect) => ({ target, rect }))
+    ));
+    const translatedOverlayTargets = safeList(snapshot.overlayTargets).map((target) => (
+      translateTargetFromRootLocal(target, currentRootRect, coordinateOptions)
+    ));
+    const translatedVisualRect = snapshot.visualRootLocalRect
+      ? localSemanticRectToViewportRect(snapshot.visualRootLocalRect, currentRootRect, coordinateOptions)
+      : snapshot.visualRect;
+    const translatedSnapshot = {
+      ...snapshot,
+      rootRect: rectSnapshot(currentRootRect),
+      visualRect: rectSnapshot(translatedVisualRect),
+      targets: translatedTargets,
+      childTargets,
+      targetById,
+      rectEntries,
+      overlayTargets: translatedOverlayTargets,
+      scrollState: null,
+      coordinateSpaceOrigin: {
+        rect: rectSnapshot(currentRootRect),
+        width: coordinateOptions.originWidth,
+        height: coordinateOptions.originHeight,
+        scrollLeft: coordinateOptions.scrollLeft,
+        scrollTop: coordinateOptions.scrollTop,
+        scaleX: coordinateOptions.scaleX,
+        scaleY: coordinateOptions.scaleY,
+      },
+      translationRevision: (snapshot.translationRevision || 0) + 1,
+      translatedAt: Date.now(),
+    };
+    geometrySnapshotRef.current = translatedSnapshot;
+    semanticTargetsRef.current = translatedTargets;
+
+    const selectableTargets = childTargets.filter(isSelectableLeafTarget);
+    measuredTargetCleanupRef.current?.();
+    measuredTargetCleanupRef.current = registerMeasuredTargets(stepId, selectableTargets, safeChunk.id);
+    recordSemanticHoverPerf("geometryTranslation", {
+      reason: "translate",
+      stepId,
+      chunkId: safeChunk.id,
+      changedContainerCount: changedTargets.length,
+      targetCount: translatedTargets.length,
+      translationRevision: translatedSnapshot.translationRevision,
+      scaleX: coordinateOptions.scaleX,
+      scaleY: coordinateOptions.scaleY,
+      cachedScaleX: cachedOrigin.scaleX || 1,
+      cachedScaleY: cachedOrigin.scaleY || 1,
+      elapsedMs: Math.round(((typeof performance !== "undefined" ? performance.now() : Date.now()) - translationStartedAt) * 100) / 100,
+    });
+    if (import.meta.env.DEV) endOmniMeasure(translationPerfToken, {
+      result: "translated",
+      targetCount: translatedTargets.length,
+    });
+    return true;
+  }, [measureSemanticTargets, registerMeasuredTargets, safeChunk.id, stepId]);
 
   const resolvePointerToken = useCallback((event) => {
     const resolveStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -4888,6 +5030,7 @@ function MathChunk({ chunk, stepId }) {
       measurementRevision: measurementRevisionRef.current,
     });
     if (!event) return null;
+    flushMathScrollTranslations();
     const snapshot = geometrySnapshotRef.current;
     const staleSnapshotReason = !snapshot?.valid
       ? snapshot?.reason || "semantic-hitboxes-not-ready"
@@ -4901,9 +5044,7 @@ function MathChunk({ chunk, stepId }) {
               ? "snapshot-dom-owner-stale"
               : !tokenRef.current?.isConnected
                 ? "snapshot-dom-detached"
-                : !sameSnapshotScrollState(snapshot.scrollState, readSnapshotScrollState(tokenRef.current, mathVisualRef.current))
-                  ? "snapshot-scroll-stale"
-                  : snapshot.childTargets.length === 0
+                : snapshot.childTargets.length === 0
                     ? "no-child-targets"
                     : "";
     if (staleSnapshotReason) {
@@ -5101,7 +5242,14 @@ function MathChunk({ chunk, stepId }) {
   const activateResolvedHoverTarget = useCallback((token, event, { move = true } = {}) => {
     if (!token) return false;
     const tokenEvent = token.rects?.[0]
-      ? { clientX: event.clientX, clientY: event.clientY, anchorRect: token.rects[0] }
+      ? {
+          clientX: event.clientX,
+          clientY: event.clientY,
+          anchorRect: token.rects[0],
+          sourceElement: tokenRef.current,
+          target: event.target,
+          currentTarget: tokenRef.current,
+        }
       : event;
     lastResolvedHoverIdRef.current = token.id;
     extendTokenSelection(token, stepId);
@@ -5361,6 +5509,23 @@ function MathChunk({ chunk, stepId }) {
 
   useEffect(() => registerToken(safeChunk, stepId, safeChunk.id), [registerToken, safeChunk, stepId]);
 
+  useEffect(() => {
+    const element = tokenRef.current;
+    reportHoverLifecycle("source-dom-mounted", {
+      tokenStableId: safeChunk.id,
+      stepId,
+      sourceDomIdentity: sourceDomInstanceRef.current,
+      connected: Boolean(element?.isConnected),
+    });
+    return () => {
+      reportHoverLifecycle("source-dom-unmounted", {
+        tokenStableId: safeChunk.id,
+        stepId,
+        sourceDomIdentity: sourceDomInstanceRef.current,
+      });
+    };
+  }, [reportHoverLifecycle, safeChunk.id, stepId]);
+
   const debugSemanticHitboxes = DEBUG_SEMANTIC_HITBOXES || settings?.interaction?.debugSemanticHitboxes;
 
   useEffect(() => {
@@ -5435,21 +5600,7 @@ function MathChunk({ chunk, stepId }) {
         ? ""
         : `${window.innerWidth}x${window.innerHeight}@${window.devicePixelRatio || 1}`
     );
-    const scrollSignature = () => (
-      typeof window === "undefined"
-        ? ""
-        : [
-            window.scrollX,
-            window.scrollY,
-            tokenRef.current?.scrollLeft || 0,
-            tokenRef.current?.scrollTop || 0,
-            mathVisualRef.current?.scrollLeft || 0,
-            mathVisualRef.current?.scrollTop || 0,
-            ...scrollableAncestorsForSnapshot(tokenRef.current, mathVisualRef.current)
-              .flatMap((element) => [element.scrollLeft || 0, element.scrollTop || 0]),
-          ].join(":")
-    );
-
+    const initialPhase = measurementRevisionRef.current === 0 ? "initial" : "semantic-change";
     replaceGeometrySnapshot("render-commit");
     measuredTargetCleanupRef.current?.();
     measuredTargetCleanupRef.current = null;
@@ -5458,7 +5609,7 @@ function MathChunk({ chunk, stepId }) {
     dragPhaseLoggedRef.current = false;
     setOverlayTargets([]);
 
-    measureSemanticTargets("layout-effect-commit");
+    measureSemanticTargets(initialPhase);
     postRenderFrame = requestAnimationFrame(() => {
       postRenderFrame = 0;
       const currentSnapshot = geometrySnapshotRef.current;
@@ -5466,7 +5617,7 @@ function MathChunk({ chunk, stepId }) {
         !disposed
         && (!currentSnapshot?.valid || safeList(currentSnapshot?.childTargets).length === 0)
       ) {
-        measureSemanticTargets("post-render-commit");
+        measureSemanticTargets("explicit-fallback");
       }
     });
 
@@ -5481,7 +5632,7 @@ function MathChunk({ chunk, stepId }) {
         const signature = contentRect
           ? `${Math.round(contentRect.width * 100) / 100}x${Math.round(contentRect.height * 100) / 100}`
           : "";
-        scheduleMeasure("resize-observer", signature);
+        scheduleMeasure("resize", signature);
         if (import.meta.env.DEV) endOmniMeasure(observerPerfToken, { signature });
       })
       : null;
@@ -5493,7 +5644,7 @@ function MathChunk({ chunk, stepId }) {
             entryCount: entries.length,
           })
           : null;
-        scheduleMeasure("katex-mutation");
+        scheduleMeasure("katex-dom-change");
         if (import.meta.env.DEV) endOmniMeasure(observerPerfToken);
       })
       : null;
@@ -5503,25 +5654,22 @@ function MathChunk({ chunk, stepId }) {
         ? startOmniMeasure("semantic.geometry.window-resize-callback")
         : null;
       const signature = windowResizeSignature();
-      scheduleMeasure("window-resize", signature);
-      if (import.meta.env.DEV) endOmniMeasure(observerPerfToken, { signature });
-    };
-    const handleScroll = () => {
-      const observerPerfToken = import.meta.env.DEV
-        ? startOmniMeasure("semantic.geometry.scroll-callback")
-        : null;
-      const signature = scrollSignature();
-      scheduleMeasure("scroll", signature);
+      scheduleMeasure("resize", signature);
       if (import.meta.env.DEV) endOmniMeasure(observerPerfToken, { signature });
     };
     const scrollAncestors = scrollableAncestorsForSnapshot(tokenRef.current, mathVisualRef.current);
+    const unsubscribeScroll = subscribeToMathScroll(
+      [
+        window,
+        ...[tokenRef.current, mathVisualRef.current].filter(isPotentialScrollContainer),
+        ...scrollAncestors,
+      ],
+      translateSemanticGeometry,
+      `${stepId}:${safeChunk.id}`,
+    );
     window.addEventListener("resize", handleResize);
-    window.addEventListener("scroll", handleScroll, true);
-    tokenRef.current?.addEventListener?.("scroll", handleScroll, true);
-    mathVisualRef.current?.addEventListener?.("scroll", handleScroll, true);
-    scrollAncestors.forEach((element) => element.addEventListener?.("scroll", handleScroll, true));
     document.fonts?.ready?.then(() => {
-      scheduleMeasure("fonts-ready");
+      scheduleMeasure("resize");
     }).catch(() => {});
     const diagnosticWindow = DEBUG_MATH_HOVER_PERF && typeof window !== "undefined"
       ? /** @type {any} */ (window)
@@ -5548,11 +5696,8 @@ function MathChunk({ chunk, stepId }) {
       }
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
+      unsubscribeScroll();
       window.removeEventListener("resize", handleResize);
-      window.removeEventListener("scroll", handleScroll, true);
-      tokenRef.current?.removeEventListener?.("scroll", handleScroll, true);
-      mathVisualRef.current?.removeEventListener?.("scroll", handleScroll, true);
-      scrollAncestors.forEach((element) => element.removeEventListener?.("scroll", handleScroll, true));
       if (diagnosticStore?.invalidateSemanticGeometryByChunk) {
         delete diagnosticStore.invalidateSemanticGeometryByChunk[safeChunk.id];
         if (Object.keys(diagnosticStore.invalidateSemanticGeometryByChunk).length === 0) {
@@ -5561,7 +5706,7 @@ function MathChunk({ chunk, stepId }) {
         }
       }
     };
-  }, [hasInteractiveTargets, measureSemanticTargets, replaceGeometrySnapshot, safeChunk.id, stepId]);
+  }, [hasInteractiveTargets, measureSemanticTargets, replaceGeometrySnapshot, safeChunk.id, stepId, translateSemanticGeometry]);
 
   useEffect(() => () => {
     measuredTargetCleanupRef.current?.();
@@ -5575,6 +5720,7 @@ function MathChunk({ chunk, stepId }) {
       data-inspectable="math-token"
       data-token-id={safeChunk.id}
       data-math-chunk-owner={safeChunk.id}
+      data-source-dom-instance={sourceDomInstanceRef.current}
       data-token-latex={safeChunk.latex}
       data-token-role={safeChunk.role || (isOperator ? "operator" : "other")}
       data-hover-active="false"
@@ -5640,7 +5786,6 @@ function MathChunk({ chunk, stepId }) {
         <InlineMath
           math={safeChunk.display}
           className="font-serif italic"
-          semanticTree={canonicalSemanticTree}
           interactive={hasInteractiveTargets}
         />
       </span>
@@ -5691,6 +5836,9 @@ function MathChunk({ chunk, stepId }) {
               data-painted-area={target.paintedArea ?? undefined}
               data-measurement-revision={target.measurementRevision}
               data-ancestor-fallback-id={target.ancestorFallbackId || undefined}
+              data-dom-range-key={target.chosenDomKey || undefined}
+              data-dom-node-count={target.elements?.length || 0}
+              data-dom-nodes={domElementDebugLabel(target.elements)}
               onMouseEnter={!target.isRejectedGeometry && !target.isUncoveredGlyph ? handleAnnotatedEnter : undefined}
               onMouseMove={!target.isRejectedGeometry && !target.isUncoveredGlyph ? handleAnnotatedMove : undefined}
               {...(debugSemanticHitboxes
@@ -5709,7 +5857,7 @@ function MathChunk({ chunk, stepId }) {
             >
               {debugSemanticHitboxes && (
                   <span className="math-semantic-hitbox-label">
-                  {`${target.semanticId || target.semanticNodeId || target.id} | ${target.latex || target.display || target.text || ""} | ${target.role || target.kind || target.type || "node"} | ${target.sourceRange ? `${target.sourceRange.start}:${target.sourceRange.end}` : "no-range"} | ${target.rectSource || "unknown"} | ${Math.round(rect.width * 10) / 10}x${Math.round(rect.height * 10) / 10}`}
+                  {`${target.semanticId || target.semanticNodeId || target.id} | ${target.latex || target.display || target.text || ""} | ${target.sourceRange ? `${target.sourceRange.start}:${target.sourceRange.end}` : "no-range"} | DOM:${target.chosenDomKey || "none"} [${domElementDebugLabel(target.elements)}] | ${target.rectSource || "unknown"} | ${Math.round(rect.width * 10) / 10}x${Math.round(rect.height * 10) / 10}`}
                 </span>
               )}
             </span>
@@ -5730,6 +5878,113 @@ function MathChunk({ chunk, stepId }) {
     </span>
   );
 }
+
+function geometryReconstructionReason(phase = "") {
+  if (phase.includes("transform-change")) return "transform-change";
+  if (phase.includes("katex-dom-change") || phase.includes("katex-mutation")) return "katex-dom-change";
+  if (phase.includes("semantic-change")) return "semantic-change";
+  if (phase.includes("registration-change")) return "registration-change";
+  if (phase === "initial") return "initial";
+  if (phase.includes("resize") || phase.includes("fonts-ready")) return "resize";
+  return "explicit-fallback";
+}
+
+function rootCoordinateOptions(root, rootRect) {
+  const originWidth = root?.offsetWidth || rootRect?.width || 0;
+  const originHeight = root?.offsetHeight || rootRect?.height || 0;
+  return {
+    originWidth,
+    originHeight,
+    scrollLeft: root?.scrollLeft || 0,
+    scrollTop: root?.scrollTop || 0,
+    scaleX: originWidth > 0 && rootRect?.width > 0 ? rootRect.width / originWidth : 1,
+    scaleY: originHeight > 0 && rootRect?.height > 0 ? rootRect.height / originHeight : 1,
+  };
+}
+
+/** @param {any} target @returns {any} */
+function cacheTargetRootLocalGeometry(target = {}, rootRect = null, coordinateOptions = {}) {
+  return {
+    ...target,
+    rootLocalRects: safeList(target.rects)
+      .map((rect) => viewportRectToLocalSemanticRect(rect, rootRect, coordinateOptions))
+      .filter(Boolean),
+    rootLocalPaintedRects: safeList(target.paintedRects)
+      .map((rect) => viewportRectToLocalSemanticRect(rect, rootRect, coordinateOptions))
+      .filter(Boolean),
+  };
+}
+
+/** @param {any} target @returns {any} */
+function translateTargetFromRootLocal(target = {}, rootRect = null, coordinateOptions = {}) {
+  const localRects = safeList(target.rootLocalRects);
+  const localPaintedRects = safeList(target.rootLocalPaintedRects);
+  return {
+    ...target,
+    rects: localRects
+      .map((rect) => localSemanticRectToViewportRect(rect, rootRect, coordinateOptions))
+      .filter(Boolean),
+    paintedRects: localPaintedRects
+      .map((rect) => localSemanticRectToViewportRect(rect, rootRect, coordinateOptions))
+      .filter(Boolean),
+  };
+}
+
+function activeTargetBelongsToChunk(chunk = {}, activeChunkId = "") {
+  const chunkId = String(chunk?.id || "");
+  const targetId = String(activeChunkId || "");
+  return Boolean(chunkId && targetId && (
+    targetId === chunkId
+    || targetId.startsWith(`${chunkId}-`)
+  ));
+}
+
+function mathChunkHoverSignature(chunk = {}, state = {}) {
+  const chunkId = chunk?.id || "";
+  const activeChunkId = state.activeChunkId || "";
+  const conceptId = getConceptForChunk(chunk)?.id || "";
+  const ownedActiveId = (
+    activeTargetBelongsToChunk(chunk, activeChunkId)
+    || state.activeChunkData?.ownerId === chunkId
+    || state.activeChunkData?.parentTokenId === chunkId
+  ) ? activeChunkId : "";
+  return [
+    Boolean(activeChunkId && activeChunkId !== chunkId),
+    ownedActiveId,
+    conceptId && conceptId === state.inspectedConceptId,
+    conceptId && safeList(state.relatedConceptIds).includes(conceptId),
+    safeList(state.activeChunkData?.relatedTokenIds).includes(chunkId),
+    safeList(state.pinnedChunkIds).includes(chunkId),
+    safeList(state.openReferenceIds).includes(chunkId),
+    safeList(state.selectedTokenIds).includes(chunkId),
+  ].join("|");
+}
+
+function sameMathChunkViewProps(previous, next) {
+  return previous.chunk === next.chunk
+    && previous.stepId === next.stepId
+    && previous.hoverActions === next.hoverActions
+    && mathChunkHoverSignature(previous.chunk, previous.hoverSemantic)
+      === mathChunkHoverSignature(next.chunk, next.hoverSemantic);
+}
+
+MathChunkView.displayName = "MathChunk";
+const MemoizedMathChunkView = React.memo(MathChunkView, sameMathChunkViewProps);
+
+function MathChunk({ chunk, stepId }) {
+  const hoverSemantic = useHoverSemanticState();
+  const hoverActions = useHoverActions();
+  return (
+    <MemoizedMathChunkView
+      chunk={chunk}
+      stepId={stepId}
+      hoverSemantic={hoverSemantic}
+      hoverActions={hoverActions}
+    />
+  );
+}
+
+MathChunk.displayName = "MathChunkContextBridge";
 
 export function ExplainableToken(props) {
   return <MathChunk {...props} />;

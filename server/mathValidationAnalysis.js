@@ -136,13 +136,25 @@ function normalizeFunctionPowers(value = "") {
 
     if (!/^[0-9]+$/u.test(exponent)) return null;
     while (cursor < text.length && /\s/u.test(text[cursor])) cursor += 1;
-    if (text[cursor] !== "(") return null;
-    const argumentEnd = findMatchingDelimiter(cursor, "(", ")");
-    if (argumentEnd < 0) return null;
-    const argument = text.slice(cursor + 1, argumentEnd).trim();
+    let argument = "";
+    let argumentEnd = cursor;
+    if (text[cursor] === "(") {
+      argumentEnd = findMatchingDelimiter(cursor, "(", ")");
+      if (argumentEnd < 0) return null;
+      argument = text.slice(cursor + 1, argumentEnd).trim();
+      argumentEnd += 1;
+    } else {
+      // TeX permits a single unbraced function argument, including the compact
+      // form \ln^{2}2. Accept only one numeric literal or named constant here;
+      // the safe expression parser still validates the completed expression.
+      const bareArgument = text.slice(cursor).match(/^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+|pi|e)(?![A-Za-z_])/u);
+      if (!bareArgument) return null;
+      argument = bareArgument[0];
+      argumentEnd = cursor + argument.length;
+    }
     if (!argument) return null;
     return {
-      end: argumentEnd + 1,
+      end: argumentEnd,
       replacement: `(${name}(${argument}))^${exponent}`,
     };
   }
@@ -201,6 +213,7 @@ function normalizeLatexExpression(value = "") {
     .replace(/\\exp\b/g, "exp")
     .replace(/\\psi\b/g, "psi")
     .replace(/\\Gamma\b/g, "Gamma")
+    .replace(/\\zeta\b/g, "zeta")
     .replace(/\\infty\b/g, "Infinity")
     .replace(/\s+/g, "");
   return normalizeFunctionPowers(text);
@@ -346,7 +359,7 @@ function tokenizeExpression(value = "") {
   return tokens;
 }
 
-const FUNCTION_NAMES = new Set(["ln", "log", "atan", "arctan", "tan", "cot", "sec", "sin", "cos", "sqrt", "exp", "psi", "Gamma"]);
+const FUNCTION_NAMES = new Set(["ln", "log", "atan", "arctan", "tan", "cot", "sec", "sin", "cos", "sqrt", "exp", "psi", "Gamma", "zeta"]);
 
 function parseExpressionAst(value = "") {
   const tokens = tokenizeExpression(value);
@@ -470,6 +483,13 @@ function psiKnown(value) {
   return NaN;
 }
 
+function zetaKnown(value) {
+  if (Math.abs(value - 2) < 1e-10) return Math.PI ** 2 / 6;
+  if (Math.abs(value - 3) < 1e-10) return 1.2020569031595942;
+  if (Math.abs(value - 4) < 1e-10) return Math.PI ** 4 / 90;
+  return NaN;
+}
+
 function evaluateAst(ast, variables = {}) {
   switch (ast?.type) {
     case "number":
@@ -505,6 +525,7 @@ function evaluateAst(ast, variables = {}) {
       if (ast.name === "sqrt") return Math.sqrt(argument);
       if (ast.name === "exp") return Math.exp(argument);
       if (ast.name === "psi") return psiKnown(argument);
+      if (ast.name === "zeta") return zetaKnown(argument);
       return NaN;
     }
     default:
@@ -1364,7 +1385,11 @@ export function numericalFinalAnswerCheck(problem = "", result = {}) {
   if (shouldSkipRealIntegralAnalysis(`${problem} ${result?.expression || ""}`)) {
     return { ...base, inconclusiveReason: "principal-value, complex, or branch-sensitive integral" };
   }
-  const proposedAnalysis = analyzeNumericExpression(finalAnswer);
+  const inferredConstants = /\\zeta\s*\(\s*3\s*\)/u.test(finalAnswer)
+    && /(^|[^A-Za-z])G(?![A-Za-z])/u.test(finalAnswer)
+    ? { G: 0.915965594177219 }
+    : {};
+  const proposedAnalysis = analyzeNumericExpression(finalAnswer, inferredConstants);
   if (proposedAnalysis.status !== "evaluable") {
     return {
       ...base,
@@ -1753,6 +1778,27 @@ function derivativeMatchesClaim(claim) {
   };
 }
 
+function hasSupportedIntermediateBetaDerivative(text = "") {
+  const compact = safeString(text)
+    .replace(/\\left|\\right/g, "")
+    .replace(/\\[,;!]/g, "")
+    .replace(/\s+/g, "");
+  const logarithmicIntegral = compact.match(/([A-Z]):?=\\int_0\^\{?\\pi\/2\}?\\ln\(\\sin([A-Za-z])\)\\ln\(\\cos\2\)d\2/u);
+  const betaFamily = compact.match(/([A-Z])\(([A-Za-z]),([A-Za-z])\):?=\\int_0\^\{?\\pi\/2\}?\\sin\^\{?\2-1\}?([A-Za-z])\\cos\^\{?\3-1\}?\4d\4/u);
+  if (!logarithmicIntegral || !betaFamily) return false;
+  const [, target] = logarithmicIntegral;
+  const [, family, firstParameter, secondParameter] = betaFamily;
+  const escapedTarget = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedFamily = family.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedFirst = firstParameter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedSecond = secondParameter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const mixedDerivative = new RegExp(
+    `${escapedTarget}=.*\\\\frac\\{\\\\partial\\^2${escapedFamily}\\}\\{\\\\partial${escapedFirst}\\\\partial${escapedSecond}\\}`,
+    "u"
+  );
+  return mixedDerivative.test(compact);
+}
+
 export function verifyCriticalIdentities(result = {}, problem = "") {
   const identityResults = [];
   const claims = extractAntiderivativeClaims(result);
@@ -1805,6 +1851,7 @@ export function verifyCriticalIdentities(result = {}, problem = "") {
     && /differentiat|parameter|F'\(|I'\(|d\/d[a-z]|\\frac\{d\}\{d[a-z]\}/iu.test(text)
     && /arctan|\\arctan|theta|\\theta/iu.test(`${problem} ${result?.expression || ""}`)
     && !/(?:arctan|\\arctan|theta|\\theta).{0,120}(?:parameter|Beta|\\Beta|\\Gamma|Gamma|\\psi|digamma)/iu.test(text)
+    && !hasSupportedIntermediateBetaDerivative(text)
   ) {
     return {
       applicable: true,

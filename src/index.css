@@ -533,6 +533,18 @@
     vertical-align: baseline;
   }
 
+  .math-token-group {
+    flex: 0 0 auto;
+    width: max-content;
+    max-width: none;
+    min-width: max-content;
+  }
+
+  .math-token-group > .math-visual-layer {
+    max-width: none;
+    min-width: max-content;
+  }
+
   .math-token-defer-subtokens::after {
     display: none;
   }

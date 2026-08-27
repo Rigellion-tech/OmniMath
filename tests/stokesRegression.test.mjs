@@ -410,8 +410,8 @@ test("solution validation flags abrupt special function introductions", () => {
       {
         id: "s1",
         label: "Derive the identity",
-        math: "\\frac{1}{1-x}=\\sum_{n=0}^{\\infty}x^n,\\quad \\int_0^1 x^n\\ln^2x\\,dx=\\frac{2}{(n+1)^3}",
-        summary: "Derive the identity from the geometric series.",
+        math: "n\\in\\mathbb N_0,\\quad \\frac{1}{1-x}=\\sum_{n=0}^{\\infty}x^n,\\quad \\int_0^1 x^n\\ln^2x\\,dx=\\frac{2}{(n+1)^3}",
+        summary: "For nonnegative integers n, derive the identity from the geometric series.",
       },
       {
         id: "s2",

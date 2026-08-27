@@ -1,0 +1,84 @@
+{
+  "caseId": "terra-differential-quality-repair-timeout",
+  "source": "latest-supplied-live-runtime-log",
+  "problem": {
+    "text": "Evaluate the integral from 0 to infinity of the quantity ln(1 + x^2) times arctan x divided by x times (1 + x^2) dx.",
+    "latex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx"
+  },
+  "initialSolve": {
+    "title": "Observed Terra differential candidate",
+    "problemLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "steps": [
+      {
+        "id": "substitute",
+        "heading": "Use the tangent substitution",
+        "latex": "x=\\tan t,\\quad t=\\arctan x,\\quad dx=\\sec^2 t\\,dt",
+        "reasoning": "Introduce t before using it in the transformed integral.",
+        "anchors": []
+      },
+      {
+        "id": "dilog-differential",
+        "heading": "Differentiate the dilogarithm term",
+        "latex": "d\\!\\left[\\operatorname{Li}_2(\\sin^2 t)\\right]",
+        "reasoning": "Using the identity derived from the convergent series definition, the displayed polylogarithm differential follows.",
+        "anchors": []
+      },
+      {
+        "id": "final",
+        "heading": "Final answer",
+        "latex": "I=\\frac{\\pi}{2}\\ln^2 2",
+        "reasoning": "A verified evaluation gives the stated positive value.",
+        "anchors": []
+      }
+    ],
+    "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2",
+    "numericCheck": "0.7546938294602481"
+  },
+  "repairTriggerSolve": {
+    "title": "Synthetic free-d repair trigger",
+    "problemLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "steps": [
+      {
+        "id": "substitute",
+        "heading": "Use the tangent substitution",
+        "latex": "x=\\tan t,\\quad t=\\arctan x,\\quad dx=\\sec^2 t\\,dt",
+        "reasoning": "Introduce t before using it in the transformed integral.",
+        "anchors": []
+      },
+      {
+        "id": "free-d-control",
+        "heading": "Use an invalid free variable",
+        "latex": "d[x+1]",
+        "reasoning": "This intentionally uses d as an undefined algebraic symbol.",
+        "anchors": []
+      },
+      {
+        "id": "final",
+        "heading": "Final answer",
+        "latex": "I=\\frac{\\pi}{2}\\ln^2 2",
+        "reasoning": "A verified evaluation gives the stated positive value.",
+        "anchors": []
+      }
+    ],
+    "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2",
+    "numericCheck": "0.7546938294602481"
+  },
+  "repairFailure": {
+    "name": "TimeoutError",
+    "message": "The operation was aborted due to timeout",
+    "timeoutMs": 120000,
+    "timeoutScope": "request"
+  },
+  "expected": {
+    "initialRoutingRole": "repair",
+    "initialModel": "gpt-5.6-terra",
+    "validationIssue": "unexplained_generated_symbol:d",
+    "repairRoutingRole": "repair",
+    "repairModel": "gpt-5.6-terra",
+    "repairSolveMode": "quality-repair",
+    "repairTransportModelPath": "solver",
+    "repairTransportMaxAttempts": 2,
+    "transportAttemptsAfterRepairTimeout": 1,
+    "transportRetriesAfterRepairTimeout": 0
+  }
+}

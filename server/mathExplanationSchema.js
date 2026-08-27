@@ -5,6 +5,11 @@ import {
 } from "./generatedLatexValidation.js";
 import { splitEquationChainLatex } from "../src/lib/equationChains.js";
 import { normalizeLatexForKatex, shouldPreserveLatex, traceMathStage } from "../src/lib/mathNode.js";
+import { sanitizeStringValues, stripTerminalControlSequences } from "../src/lib/textSanitization.js";
+import {
+  inspectLatexControlCharacterStage,
+  recoverDeclaredLatexControlCharacters,
+} from "./latexControlCharacterRecovery.js";
 
 export const difficultyExplanationSchema = {
   type: "object",
@@ -567,7 +572,7 @@ function isString(value) {
 }
 
 function safeString(value) {
-  return typeof value === "string" ? value.trim() : "";
+  return typeof value === "string" ? stripTerminalControlSequences(value).trim() : "";
 }
 
 function stripGeneratedLatexWrappers(value = "") {
@@ -639,6 +644,10 @@ function needsGeneratedLatexRepair(value = "") {
 
 export function sanitizeGeneratedLatex(value = "") {
   const stripped = normalizeEscapedGeneratedLatex(stripGeneratedLatexWrappers(value));
+  if (/\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(stripped)) {
+    traceMathStage("LLM response parsing", value, stripped, "preserved complete LaTeX environment");
+    return stripped;
+  }
   if (shouldPreserveLatex(stripped) && !needsGeneratedLatexRepair(stripped)) {
     const preserved = normalizeLatexForKatex(stripped);
     traceMathStage("LLM response parsing", value, preserved, "preserved immutable LaTeX");
@@ -682,10 +691,6 @@ export function sanitizeGeneratedLatex(value = "") {
     .replace(/(?<!\\)\bint_/gi, "\\int_")
     .replace(/(?<!\\)\biiint_/gi, "\\iiint_")
     .replace(/(?<!\\)\biint_/gi, "\\iint_")
-    .replace(/<\s*/g, "\\left\\langle ")
-    .replace(/\s*>/g, " \\right\\rangle")
-    .replace(/\\langle(?![\s}])/g, "\\langle ")
-    .replace(/(?<![\s{])\\rangle/g, " \\rangle")
     .replace(/\\text\{([^}]*\s)\}(?=[A-Za-z0-9\\])/g, "\\text{$1} ")
     .replace(/\s+/g, " ")
     .trim();
@@ -804,12 +809,21 @@ function repairPerfectSquareSteps(steps = [], perfectSquare = null, finalAnswerL
 }
 
 function renderStepLatexLines(value = "") {
-  const sourceLines = String(value || "")
+  const source = String(value || "").trim();
+  const completeEnvironment = /\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(source);
+  if (completeEnvironment) return [sanitizeGeneratedLatex(source)].filter(Boolean);
+
+  const sourceLines = source
     .split(/\r?\n+/)
     .map((line) => line.trim())
     .filter(Boolean);
   const lines = sourceLines.length > 0 ? sourceLines : [value];
-  return lines.flatMap((line) => splitEquationChainLatex(renderMathLatex(line))).filter(Boolean);
+  return lines.flatMap((line) => {
+    const rendered = /\\[A-Za-z]+[ \t]+[A-Za-z]/u.test(line)
+      ? sanitizeGeneratedLatex(line).replace(/\\(quad|qquad)(?=\\[A-Za-z])/gu, "\\$1 ")
+      : renderMathLatex(line);
+    return splitEquationChainLatex(rendered);
+  }).filter(Boolean);
 }
 
 function createLatexValidationError(issues = []) {
@@ -837,6 +851,12 @@ function createLatexValidationError(issues = []) {
 }
 
 function assertGeneratedLatexFields(fields = []) {
+  if (solveDiagnosticsEnabled()) {
+    console.info("[omnimath:latex-control-character-stage]", inspectLatexControlCharacterStage(
+      fields.map((field) => field.value),
+      "generated_latex_validation_input"
+    ));
+  }
   const issues = collectGeneratedLatexValidationIssues(fields);
   if (issues.length > 0) {
     if (solveDiagnosticsEnabled()) {
@@ -860,6 +880,12 @@ function assertGeneratedLatexFields(fields = []) {
 }
 
 function assertRawGeneratedLatexFields(fields = []) {
+  if (solveDiagnosticsEnabled()) {
+    console.info("[omnimath:latex-control-character-stage]", inspectLatexControlCharacterStage(
+      fields.map((field) => field.value),
+      "assertRawGeneratedLatexFields_input"
+    ));
+  }
   const issues = collectGeneratedLatexValidationIssues(fields.map((field) => ({
     ...field,
     strictParse: false,
@@ -885,18 +911,22 @@ function assertRawGeneratedLatexFields(fields = []) {
   }
 }
 
+function generatedLatexLineFields(value = "", basePath = "latex") {
+  const source = String(value || "");
+  if (/\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(source)) return [];
+  return source.split(/\r?\n+/).map((line, lineIndex) => ({
+    fieldPath: `${basePath}.lines[${lineIndex}]`,
+    value: line,
+  }));
+}
+
 function solveLatexFields({ problemLatex = "", finalAnswerLatex = "", steps = [] } = {}) {
   return [
     { fieldPath: "problemLatex", value: problemLatex },
     { fieldPath: "finalAnswerLatex", value: finalAnswerLatex, finalAnswer: true, strictFinalAnswerContract: true },
     ...steps.flatMap((step, stepIndex) => [
       { fieldPath: `steps[${stepIndex}].latex`, value: step.latex },
-      ...String(step.latex || "")
-        .split(/\r?\n+/)
-        .map((line, lineIndex) => ({
-          fieldPath: `steps[${stepIndex}].lines[${lineIndex}]`,
-          value: line,
-        })),
+      ...generatedLatexLineFields(step.latex, `steps[${stepIndex}]`),
       ...(Array.isArray(step.anchors) ? step.anchors.map((anchor, anchorIndex) => ({
         fieldPath: `steps[${stepIndex}].anchors[${anchorIndex}].latex`,
         value: anchor?.latex,
@@ -911,12 +941,7 @@ function rawSolveLatexFields({ problemLatex = "", finalAnswerLatex = "", steps =
     { fieldPath: "finalAnswerLatex", value: finalAnswerLatex, finalAnswer: true, strictFinalAnswerContract: true },
     ...steps.flatMap((step, stepIndex) => [
       { fieldPath: `steps[${stepIndex}].latex`, value: step?.latex },
-      ...String(step?.latex || "")
-        .split(/\r?\n+/)
-        .map((line, lineIndex) => ({
-          fieldPath: `steps[${stepIndex}].lines[${lineIndex}]`,
-          value: line,
-        })),
+      ...generatedLatexLineFields(step?.latex, `steps[${stepIndex}]`),
       ...(Array.isArray(step?.anchors) ? step.anchors.map((anchor, anchorIndex) => ({
         fieldPath: `steps[${stepIndex}].anchors[${anchorIndex}].latex`,
         value: anchor?.latex,
@@ -926,6 +951,9 @@ function rawSolveLatexFields({ problemLatex = "", finalAnswerLatex = "", steps =
 }
 
 function simplifyDisplayedLatex(value = "") {
+  if (/\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(String(value || ""))) {
+    return String(value || "").trim();
+  }
   let output = String(value || "");
   let previous = "";
   const zeroProductPatterns = [
@@ -1097,25 +1125,41 @@ function normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex } = {}) 
 }
 
 export function assertFastSolveResponse(value, originalProblem = "", { includeProblemStep = false } = {}) {
+  value = sanitizeStringValues(recoverDeclaredLatexControlCharacters(value));
+  originalProblem = stripTerminalControlSequences(originalProblem);
   if (!value || typeof value !== "object") {
     throw createInvalidResponseError("Model returned an invalid solve response.");
   }
 
   const problemLatex = sanitizeGeneratedLatex(value.problemLatex || originalProblem);
-  const finalAnswerLatex = simplifyDisplayedLatex(sanitizeGeneratedLatex(value.finalAnswerLatex));
+  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex);
   const rawSteps = Array.isArray(value.steps) ? value.steps : [];
   if (!isString(value.title) || !problemLatex || rawSteps.length === 0 || !finalAnswerLatex) {
     throw createInvalidResponseError("Model response is missing required solve fields.");
   }
-  assertRawGeneratedLatexFields(rawSolveLatexFields({
-    problemLatex: value.problemLatex,
-    finalAnswerLatex: value.finalAnswerLatex,
-    steps: rawSteps,
-    includeProblemLatex: isString(value.problemLatex),
-  }));
+  const structurallyInvalidStep = rawSteps.some((step) => (
+    !step
+    || typeof step !== "object"
+    || !isString(step.id)
+    || !isString(step.heading)
+    || !isString(step.latex)
+    || typeof step.reasoning !== "string"
+    || !Array.isArray(step.anchors)
+  ));
+  if (structurallyInvalidStep) {
+    throw createInvalidResponseError("Model response contains an invalid solve step.");
+  }
 
-  const steps = normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex });
-  assertGeneratedLatexFields(solveLatexFields({ problemLatex, finalAnswerLatex, steps }));
+  const steps = rawSteps.map((step, index) => ({
+    id: normalizeStepId(step.id, index),
+    heading: safeString(step.heading),
+    latex: sanitizeGeneratedLatex(step.latex),
+    reasoning: safeString(step.reasoning),
+    anchors: step.anchors
+      .filter((anchor) => anchor && typeof anchor === "object" && isString(anchor.latex))
+      .map((anchor, anchorIndex) => normalizeAnchor(anchor, normalizeStepId(step.id, index), anchorIndex))
+      .slice(0, 3),
+  }));
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Model response does not contain meaningful solution steps.");
@@ -1140,10 +1184,7 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
       id: normalizeStepId(step.id, index),
       heading: step.heading || `Step ${index + 1}`,
       reasoning: step.reasoning || "This step follows from the previous expression.",
-      anchors: step.anchors
-        .filter(isUsefulAnchor)
-        .map((anchor, anchorIndex) => normalizeAnchor(anchor, normalizeStepId(step.id, index), anchorIndex))
-        .slice(0, 3),
+      anchors: step.anchors,
     })),
     finalAnswerLatex,
     numericCheck: safeString(value.numericCheck),
@@ -1151,6 +1192,8 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
 }
 
 export function assertCompactSolveResponse(value, originalProblem = "") {
+  value = sanitizeStringValues(recoverDeclaredLatexControlCharacters(value));
+  originalProblem = stripTerminalControlSequences(originalProblem);
   if (!value || typeof value !== "object") {
     throw createInvalidResponseError("Model returned an invalid compact solve response.");
   }
@@ -1160,39 +1203,33 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
   if (!isString(value.title) || !problemLatex || rawSteps.length === 0) {
     throw createInvalidResponseError("Compact model response is missing required solve fields.");
   }
-  assertRawGeneratedLatexFields(rawSolveLatexFields({
-    problemLatex: value.problemLatex,
-    finalAnswerLatex: rawSteps.at(-1)?.latex,
-    steps: rawSteps,
-    includeProblemLatex: isString(value.problemLatex),
-  }));
+  const structurallyInvalidStep = rawSteps.some((step) => (
+    !step
+    || typeof step !== "object"
+    || !isString(step.id)
+    || !isString(step.heading)
+    || !isString(step.latex)
+    || typeof step.reasoning !== "string"
+    || !Array.isArray(step.anchors)
+  ));
+  if (structurallyInvalidStep) {
+    throw createInvalidResponseError("Compact model response contains an invalid solve step.");
+  }
 
   const steps = rawSteps
     .map((step, index) => ({
-      id: normalizeStepId(step?.id, index),
-      heading: safeString(step?.heading || `Step ${index + 1}`),
-      latex: simplifyDisplayedLatex(sanitizeGeneratedLatex(step?.latex)),
-      reasoning: safeString(step?.reasoning),
+      id: normalizeStepId(step.id, index),
+      heading: safeString(step.heading),
+      latex: sanitizeGeneratedLatex(step.latex),
+      reasoning: safeString(step.reasoning),
       anchors: [],
-    }))
-    .filter((step, index) => (
-      step.latex
-      && !isStandaloneDifferential(step.latex)
-      && !isFillerHeading(step.heading)
-      && !isDuplicateProblemStep(step, problemLatex, index)
-    ));
+    }));
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Compact model response does not contain meaningful solution steps.");
   }
 
-  const finalStep = steps.at(-1);
-  if (!isFinalAnswerHeading(finalStep?.heading)) {
-    throw createInvalidResponseError("Compact model response must end with a final answer step.");
-  }
-
-  const finalAnswerLatex = simplifyDisplayedLatex(steps.at(-1)?.latex || problemLatex);
-  assertGeneratedLatexFields(solveLatexFields({ problemLatex, finalAnswerLatex, steps }));
+  const finalAnswerLatex = sanitizeGeneratedLatex(steps.at(-1)?.latex || problemLatex);
   return {
     title: safeString(value.title),
     problemLatex,
@@ -1209,29 +1246,29 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
 }
 
 export function assertImageSolveResponse(value) {
+  value = sanitizeStringValues(recoverDeclaredLatexControlCharacters(value));
   if (!value || typeof value !== "object") {
     throw createInvalidResponseError("Model returned an invalid image solve response.");
   }
 
   const extractedProblemLatex = sanitizeGeneratedLatex(value.extractedProblemLatex);
   const extractedProblemText = safeString(value.extractedProblemText);
-  const finalAnswerLatex = simplifyDisplayedLatex(sanitizeGeneratedLatex(value.finalAnswerLatex));
+  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex);
   const rawSteps = Array.isArray(value.steps) ? value.steps : [];
   if (!isString(value.title) || !extractedProblemLatex || !extractedProblemText || rawSteps.length === 0 || !finalAnswerLatex) {
     throw createInvalidResponseError("Image model response is missing required extracted solve fields.");
   }
-  assertRawGeneratedLatexFields(rawSolveLatexFields({
-    problemLatex: value.extractedProblemLatex,
-    finalAnswerLatex: value.finalAnswerLatex,
-    steps: rawSteps.map((step) => ({
-      ...step,
-      latex: step?.equationLatex,
-      anchors: Array.isArray(step?.tokens)
-        ? step.tokens.map((token) => ({ latex: token?.latex }))
-        : [],
-    })),
-    includeProblemLatex: true,
-  }));
+  const structurallyInvalidStep = rawSteps.some((step) => (
+    !step
+    || typeof step !== "object"
+    || !isString(step.title)
+    || !isString(step.equationLatex)
+    || typeof step.explanation !== "string"
+    || !Array.isArray(step.tokens)
+  ));
+  if (structurallyInvalidStep) {
+    throw createInvalidResponseError("Image model response contains an invalid solve step.");
+  }
 
   const steps = rawSteps
     .map((step, index) => ({
@@ -1251,12 +1288,6 @@ export function assertImageSolveResponse(value) {
         : [],
     }))
     .filter((step) => step.latex);
-  assertGeneratedLatexFields(solveLatexFields({
-    problemLatex: extractedProblemLatex,
-    finalAnswerLatex,
-    steps,
-  }));
-
   if (steps.length === 0) {
     throw createInvalidResponseError("Image model response does not contain meaningful solution steps.");
   }

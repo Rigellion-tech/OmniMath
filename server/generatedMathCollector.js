@@ -154,16 +154,6 @@ export function collectGeneratedMath(result = {}, {
   const fields = [];
   const steps = Array.isArray(result?.steps) ? result.steps : [];
   for (const [stepIndex, step] of steps.entries()) {
-    if (includeStepProseMath) {
-      for (const field of ["label", "title", "heading", "summary", "reasoning", "plainExplanation"]) {
-        addProseFields(fields, {
-          basePath: `steps[${stepIndex}].${field}`,
-          value: step?.[field],
-          sourceType: field,
-          stepIndex,
-        });
-      }
-    }
     for (const field of ["math", "latex", "equationLatex"]) {
       if (typeof step?.[field] === "string" && step[field].trim()) {
         addField(fields, {
@@ -185,6 +175,16 @@ export function collectGeneratedMath(result = {}, {
             lineIndex,
           });
         }
+      }
+    }
+    if (includeStepProseMath) {
+      for (const field of ["label", "title", "heading", "summary", "reasoning", "plainExplanation"]) {
+        addProseFields(fields, {
+          basePath: `steps[${stepIndex}].${field}`,
+          value: step?.[field],
+          sourceType: field,
+          stepIndex,
+        });
       }
     }
     if (includeAnchors) {

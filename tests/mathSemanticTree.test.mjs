@@ -739,4 +739,33 @@ describe("math semantic tree", () => {
     assert.equal(cases.flatNodes.filter((node) => node.type === "caseExpression").length, 2);
     assert.equal(cases.flatNodes.filter((node) => node.type === "caseCondition").length, 2);
   });
+
+  it("segments nested integral products by mathematical factors instead of function suffix text", () => {
+    const latex = "\\int_{0}^{\\frac{\\pi}{2}}\\frac{t\\cot t\\ln(\\cos t)}{1+t_1^2}\\,dt";
+    const tree = semanticTree(latex, "nested-product-ownership");
+    const cot = nodeByLatex(tree, "\\cot t", "function");
+    const logarithm = nodeByLatex(tree, "\\ln(\\cos t)", "function");
+    const cosine = nodeByLatex(tree, "\\cos t", "argument");
+    const poweredSubscript = nodeByLatex(tree, "t_1^2", "power");
+
+    assert.equal(cot.type, "functionCall");
+    assert.equal(logarithm.type, "functionCall");
+    assert.equal(cosine.type, "functionCall");
+    assert.equal(cot.latex.includes("\\ln"), false, "cotangent must not own the following logarithm");
+    assert.equal(cot.parentId, logarithm.parentId, "adjacent function factors should be siblings in the product");
+    assert.deepEqual(childrenOf(tree, poweredSubscript).map((node) => node.latex), ["t_1", "^", "2"]);
+    for (const node of [cot, logarithm, cosine, poweredSubscript]) assertSourceText(tree, node, node.latex);
+  });
+
+  it("keeps spacing commands outside neighboring semantic source ranges", () => {
+    const tree = semanticTree("a\\qquad=\\qquad\\left(\\frac{x_1^2}{1+x}\\right)", "spacing-ownership");
+    const equality = nodeByLatex(tree, "=", "equality");
+    const left = nodeByLatex(tree, "a", "leftSide");
+    const fraction = tree.flatNodes.find((node) => node.type === "fraction");
+
+    assertSourceText(tree, equality, "=");
+    assertSourceText(tree, left, "a");
+    assert.equal(left.sourceRange.end <= equality.sourceRange.start, true);
+    assert.equal(fraction.latex.includes("\\qquad"), false);
+  });
 });

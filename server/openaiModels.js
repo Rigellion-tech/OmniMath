@@ -248,6 +248,7 @@ function roleFromPath(path = "solver", debugContext = {}) {
   if (path === "extractionReview") return "extractionReview";
   if (path === "hover") return "hover";
   if (path === "pinned") return "pinned";
+  if (path === "repair") return "repair";
   if (path === "premiumEscalation") return "premiumEscalation";
   if (path === "escalation") return "escalation";
   const attemptType = String(debugContext.attemptType || debugContext.retryPurpose || "").toLowerCase();
@@ -373,10 +374,38 @@ function resolvePricing(modelId = "", capability = {}) {
   };
 }
 
-function resolveReasoningEffort(role = "solver", capability = {}) {
+function resolveReasoningEffort(role = "solver", capability = {}, debugContext = {}) {
   const requested = firstEnv(ROLE_EFFORT_ENV[role] || []);
   const defaultEffort = ROLE_DEFAULT_REASONING_EFFORT[role] || "medium";
   const candidate = requested.value || defaultEffort;
+  if (debugContext.retryPurpose === "compact" && capability.reasoning) {
+    const difficultRole = role === "repair" || role === "escalation" || role === "premiumEscalation";
+    if (difficultRole && candidate !== "none") {
+      const preferredEfforts = candidate === "low" || candidate === "minimal"
+        ? [candidate, "low", "minimal"]
+        : candidate === "medium"
+          ? ["low", "medium", "minimal"]
+          : ["medium", "low", "minimal"];
+      const reducedCandidate = preferredEfforts
+        .find((effort) => capability.reasoningEfforts.includes(effort));
+      const effort = reducedCandidate
+        || (capability.reasoningEfforts.includes(candidate) ? candidate : null);
+      return {
+        requestedEffort: effort || candidate,
+        effort,
+        source: "compact_retry_reduced_reasoning_policy",
+        omittedReason: effort ? "" : "unsupported_reasoning_effort",
+      };
+    }
+    if (!difficultRole && capability.reasoningEfforts.includes("none")) {
+      return {
+        requestedEffort: "none",
+        effort: "none",
+        source: "compact_retry_policy",
+        omittedReason: "",
+      };
+    }
+  }
   if (!capability.reasoning) {
     return {
       requestedEffort: requested.value || "",
@@ -452,7 +481,7 @@ export function selectOpenAiModel({
     : resolveRoleModel(role);
   const modelId = modelSelection.value;
   const capability = getModelCapability(modelId);
-  const reasoning = resolveReasoningEffort(role, capability);
+  const reasoning = resolveReasoningEffort(role, capability, debugContext);
   const pricing = resolvePricing(modelId, capability);
   const timeout = resolveOpenAiRequestTimeout(role);
   const sampling = DEFAULT_OPENAI_SAMPLING[role] ? { ...DEFAULT_OPENAI_SAMPLING[role] } : {};

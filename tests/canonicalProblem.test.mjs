@@ -2,12 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createCanonicalProblemPayload,
   getCanonicalDisplayText,
   getCanonicalDisplayTextSource,
   getCanonicalMathInput,
   getCanonicalMathInputSource,
   getCanonicalSolverInput,
 } from "../src/lib/canonicalProblem.js";
+
+const DISALLOWED_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u;
+
+test("canonical problem normalization removes terminal formatting without changing LaTeX", () => {
+  const latex = "\\int_0^\\infty f(x)\\,dx";
+  const payload = createCanonicalProblemPayload({
+    canonicalText: `\u001b[1mEvaluate the integral.\u001b[0m`,
+    canonicalLatex: `\u001b[1m${latex}\u001b[0m`,
+  });
+
+  assert.equal(payload.canonicalText, "Evaluate the integral.");
+  assert.equal(payload.canonicalLatex, latex);
+  assert.doesNotMatch(payload.canonicalLatex, DISALLOWED_CONTROL);
+});
 
 test("canonical display text prefers readable canonical text", () => {
   const payload = {

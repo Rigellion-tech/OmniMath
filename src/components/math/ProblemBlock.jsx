@@ -6,7 +6,7 @@ import MathRenderer from "./MathRenderer";
 import { normalizeMathRendererInput } from "./MathRenderer";
 import SolutionFlow from "./SolutionFlow";
 import WorkspaceCompareView from "./WorkspaceCompareView";
-import { useHover } from "@/lib/HoverContext";
+import { useHoverActions } from "@/lib/HoverContext";
 import { annotateMathExplanation } from "@/lib/mathAnnotator";
 import { classifyProblem, cleanLatexSnippet, getProblemLabel, hasLatexSyntax } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
@@ -371,7 +371,7 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
   const { settings, updateSetting } = useSettings();
   const {
     clearHoverLens,
-  } = useHover();
+  } = useHoverActions();
   const steps = useMemo(() => getSolutionSteps(problem), [problem]);
   useEffect(() => {
     logSolutionState("ProblemBlock props", {

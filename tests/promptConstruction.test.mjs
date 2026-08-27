@@ -28,13 +28,16 @@ describe("math prompt construction", () => {
     assert.match(prompt, /Simplify displayed equations before returning them/);
   });
 
-  it("requires transformation-first algebra steps for perfect-square quadratics", () => {
+  it("moves mathematical quality responsibility into generation", () => {
     const prompt = buildMathExplanationPrompt({ problem: "x^2 + 88x + 1936 = 0" });
 
     assert.match(prompt, /each displayed steps\[\]\.latex must be a direct algebraic transformation/i);
     assert.match(prompt, /Explanatory facts and identity checks belong in steps\[\]\.reasoning/i);
-    assert.match(prompt, /coefficient-matching facts only in reasoning/);
-    assert.match(prompt, /original equation, to the factored square equation, to the linear equation, to the final answer/);
+    assert.match(prompt, /Solve the mathematics carefully before writing the response/);
+    assert.match(prompt, /Introduce every new symbol before or at first use/);
+    assert.match(prompt, /Use special functions only when genuinely useful/);
+    assert.match(prompt, /every displayed equation must follow from the preceding step/);
+    assert.match(prompt, /check the final answer against the derivation/i);
     assert.match(prompt, /Do not display identity-conversion steps/);
   });
 

@@ -1,4 +1,5 @@
 export function rectArea(rect = {}) {
+  if (!rect) return 0;
   const width = Math.max(0, Number(rect.width ?? rect.right - rect.left) || 0);
   const height = Math.max(0, Number(rect.height ?? rect.bottom - rect.top) || 0);
   return width * height;
@@ -6,6 +7,68 @@ export function rectArea(rect = {}) {
 
 export function rectContainsPoint(rect = {}, x, y) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+/**
+ * Convert a viewport-space DOM rectangle into the local coordinate space of
+ * an ancestor that scrolls with the same rendered content. Scroll offsets and
+ * page movement are already represented in both viewport rectangles, so they
+ * must not be added again here.
+ */
+export function viewportRectToLocalSemanticRect(rect = null, originRect = null, options = {}) {
+  const source = normalizeSemanticRect(rect);
+  const origin = normalizeSemanticRect(originRect);
+  if (!source || !origin) return null;
+
+  const layoutWidth = Number(options.originWidth);
+  const layoutHeight = Number(options.originHeight);
+  const scaleX = Number.isFinite(layoutWidth) && layoutWidth > 0 && origin.width > 0
+    ? origin.width / layoutWidth
+    : 1;
+  const scaleY = Number.isFinite(layoutHeight) && layoutHeight > 0 && origin.height > 0
+    ? origin.height / layoutHeight
+    : 1;
+
+  const scrollLeft = Number(options.scrollLeft) || 0;
+  const scrollTop = Number(options.scrollTop) || 0;
+  const left = (source.left - origin.left) / scaleX + scrollLeft;
+  const top = (source.top - origin.top) / scaleY + scrollTop;
+  const width = source.width / scaleX;
+  const height = source.height / scaleY;
+  return normalizeSemanticRect({
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+  });
+}
+
+/** Convert a stable root-content-local rectangle back into viewport space. */
+export function localSemanticRectToViewportRect(rect = null, originRect = null, options = {}) {
+  const source = normalizeSemanticRect(rect);
+  const origin = normalizeSemanticRect(originRect);
+  if (!source || !origin) return null;
+
+  const layoutWidth = Number(options.originWidth);
+  const layoutHeight = Number(options.originHeight);
+  const scaleX = Number.isFinite(layoutWidth) && layoutWidth > 0 && origin.width > 0
+    ? origin.width / layoutWidth
+    : 1;
+  const scaleY = Number.isFinite(layoutHeight) && layoutHeight > 0 && origin.height > 0
+    ? origin.height / layoutHeight
+    : 1;
+  const scrollLeft = Number(options.scrollLeft) || 0;
+  const scrollTop = Number(options.scrollTop) || 0;
+  const left = origin.left + (source.left - scrollLeft) * scaleX;
+  const top = origin.top + (source.top - scrollTop) * scaleY;
+  const width = source.width * scaleX;
+  const height = source.height * scaleY;
+  return normalizeSemanticRect({
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+  });
 }
 
 function rectContainsRect(outer = {}, inner = {}, tolerance = 1) {
@@ -22,6 +85,98 @@ export function rectIntersectsRect(left = {}, right = {}) {
     && left.left < right.right
     && left.bottom > right.top
     && left.top < right.bottom;
+}
+
+export function preserveSemanticRectFragments(rects = []) {
+  const seen = new Set();
+  return rects
+    .map(normalizeSemanticRect)
+    .filter(Boolean)
+    .filter((rect) => rectArea(rect) > 0)
+    .filter((rect) => {
+      const key = [rect.left, rect.top, rect.right, rect.bottom]
+        .map((value) => Math.round(Number(value) * 100) / 100)
+        .join(":");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => left.top - right.top || left.left - right.left || rectArea(left) - rectArea(right));
+}
+
+export function dedupeSemanticTargetsById(targets = []) {
+  const byId = new Map();
+  for (const target of targets.filter(Boolean)) {
+    const id = target.id || target.semanticId || target.semanticNodeId;
+    if (!id) continue;
+    const current = byId.get(id);
+    if (!current) {
+      byId.set(id, {
+        ...target,
+        rects: preserveSemanticRectFragments(target.rects || []),
+        paintedRects: preserveSemanticRectFragments(target.paintedRects || []),
+      });
+      continue;
+    }
+    byId.set(id, {
+      ...current,
+      ...target,
+      id,
+      rects: preserveSemanticRectFragments([...(current.rects || []), ...(target.rects || [])]),
+      paintedRects: preserveSemanticRectFragments([...(current.paintedRects || []), ...(target.paintedRects || [])]),
+    });
+  }
+  return [...byId.values()];
+}
+
+function semanticTargetId(target = {}) {
+  return target.id || target.semanticId || target.semanticNodeId || "";
+}
+
+function semanticTargetSummary(target = {}) {
+  return {
+    id: semanticTargetId(target),
+    latex: target.latex || target.display || target.text || "",
+    role: target.role || target.kind || target.type || "node",
+    sourceRange: target.sourceRange || null,
+  };
+}
+
+export function auditSemanticHoverCoverage({
+  stepId = "",
+  sourceLatex = "",
+  recognizedTokens = [],
+  descriptors = [],
+  registeredTargets = [],
+  renderedTargets = [],
+} = {}) {
+  const descriptorIds = new Set(descriptors.map(semanticTargetId).filter(Boolean));
+  const registeredIds = new Set(registeredTargets.map(semanticTargetId).filter(Boolean));
+  const mappingOwners = new Map();
+
+  for (const target of registeredTargets) {
+    const mappingKey = String(target.chosenDomKey || "");
+    const id = semanticTargetId(target);
+    if (!mappingKey || !id) continue;
+    const owners = mappingOwners.get(mappingKey) || [];
+    owners.push(id);
+    mappingOwners.set(mappingKey, owners);
+  }
+
+  return {
+    stepId,
+    sourceLatex: String(sourceLatex || ""),
+    recognizedTokens: recognizedTokens.map(semanticTargetSummary),
+    descriptorCount: descriptorIds.size,
+    registeredNodeCount: registeredIds.size,
+    unmappedTokens: descriptors
+      .filter((target) => !registeredIds.has(semanticTargetId(target)))
+      .map(semanticTargetSummary),
+    duplicateMappings: [...mappingOwners]
+      .filter(([, ids]) => new Set(ids).size > 1)
+      .map(([mappingKey, ids]) => ({ mappingKey, tokenIds: [...new Set(ids)] })),
+    renderedTokenIds: [...new Set(renderedTargets.map(semanticTargetId).filter(Boolean))],
+  };
 }
 
 export const HOVER_ELIGIBLE_ROLES = new Set([

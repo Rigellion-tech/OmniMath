@@ -105,10 +105,6 @@ function findRule(value = "") {
   return RULES.find((rule) => rule.patterns.some((pattern) => pattern.test(text))) || null;
 }
 
-function isEquationLike(value = "") {
-  return /(?:=|\\le|\\ge|<=|>=)/.test(String(value || ""));
-}
-
 function asksForDerivativeOrRule(value = "") {
   return /(?:differentiat|derivative|d\/dx|\\frac\{d\}\{dx\}|prime|power rule|product rule|chain rule|quotient rule|what rule|which rule|explain .*rule)/i
     .test(String(value || ""));
@@ -290,7 +286,10 @@ function buildToken(rule, stepId = "local-step") {
 }
 
 export function explainLocalRule(value) {
-  if (isEquationLike(value) && !asksForDerivativeOrRule(value)) return null;
+  // Rule snippets are only valid for an explicit derivative/rule request.
+  // Do not let incidental math such as x^2 inside an integral select the
+  // unrelated power-rule explanation.
+  if (!asksForDerivativeOrRule(value)) return null;
   const rule = findRule(value);
   if (!rule) return null;
 

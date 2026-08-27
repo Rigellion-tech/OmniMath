@@ -8,6 +8,21 @@ import {
 
 const intervalRegression = "t \\in [0, \\frac{\\pi}{2})";
 
+test("complete aligned environments are validated as one field", () => {
+  const aligned = String.raw`\begin{aligned}
+I&:=\int_0^1 x\,dx\\
+&=\frac12
+\end{aligned}`;
+  const validation = validateGeneratedLatex(aligned, { fieldPath: "steps[0].latex" });
+
+  assert.equal(validation.valid, true, JSON.stringify(validation.issues));
+});
+
+test("malformed aligned environments and stray alignment markers remain rejected", () => {
+  assert.equal(validateGeneratedLatex(String.raw`\begin{aligned}I&=1`, { fieldPath: "latex" }).valid, false);
+  assert.equal(validateGeneratedLatex("I&=1", { fieldPath: "latex" }).valid, false);
+});
+
 test("generated LaTeX validation accepts valid interval notation", () => {
   const validIntervals = [
     "[a,b]",
@@ -41,6 +56,57 @@ test("generated LaTeX validation accepts indexed operators with scoped variables
     const result = validateGeneratedLatex(latex, { fieldPath: "test.latex" });
     assert.equal(result.valid, true, latex);
     assert.deepEqual(result.issues, [], latex);
+  }
+});
+
+test("generated LaTeX validation rejects merged trig commands before presentation", () => {
+  const malformed = ["\\cost", "\\cott", "\\sint", "\\tant"];
+  for (const latex of malformed) {
+    const result = validateGeneratedLatex(latex, { fieldPath: "steps[0].latex" });
+    assert.equal(result.valid, false, latex);
+    assert.equal(result.issues.some((issue) => issue.startsWith("katex_parse_failed:")), true, latex);
+
+    assert.doesNotThrow(() => assertFastSolveResponse({
+      title: "Malformed trig command",
+      problemLatex: "I=0",
+      steps: [{
+        id: "s1",
+        heading: "Malformed step",
+        latex: `I=${latex}`,
+        reasoning: "This malformed command must not reach presentation.",
+        anchors: [],
+      }],
+      finalAnswerLatex: "I=0",
+      numericCheck: "0",
+    }, "I=0"));
+  }
+});
+
+test("generated LaTeX validation preserves valid circular and hyperbolic trig forms", () => {
+  const valid = [
+    "\\cos t",
+    "\\cos(t)",
+    "\\cos^2 t",
+    "\\cosh t",
+    "\\sin t",
+    "\\sinh t",
+    "\\cot t",
+  ];
+
+  for (const latex of valid) {
+    const result = validateGeneratedLatex(latex, { fieldPath: "steps[0].latex" });
+    assert.equal(result.valid, true, `${latex}: ${result.issues.join(",")}`);
+  }
+});
+
+test("generated LaTeX validation rejects cdott while preserving valid cdot commands", () => {
+  const malformed = validateGeneratedLatex("\\cdott", { fieldPath: "steps[0].latex" });
+  assert.equal(malformed.valid, false);
+  assert.equal(malformed.issues.some((issue) => issue.startsWith("katex_parse_failed:")), true);
+
+  for (const latex of ["\\cdot t", "\\cdot x", "\\cdot n", "\\cdots", "\\cdotp"]) {
+    const result = validateGeneratedLatex(latex, { fieldPath: "steps[0].latex" });
+    assert.equal(result.valid, true, `${latex}: ${result.issues.join(",")}`);
   }
 });
 

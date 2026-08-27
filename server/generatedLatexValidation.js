@@ -31,6 +31,11 @@ const LOST_COMMAND_NAMES = [
   "mu",
   "sigma",
   "omega",
+  "sum",
+  "prod",
+  "lim",
+  "infty",
+  "zeta",
 ];
 
 const LOST_COMMAND_PATTERN = new RegExp(
@@ -262,7 +267,9 @@ function katexParses(value = "") {
 }
 
 function splitGeneratedLines(value = "") {
-  return String(value || "")
+  const source = String(value || "").trim();
+  if (/\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(source)) return [source];
+  return source
     .split(/\r?\n+/)
     .map((line) => line.trim())
     .filter(Boolean);

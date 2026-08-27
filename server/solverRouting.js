@@ -17,7 +17,7 @@ export function classifyProblemComplexity({ problem = "", canonicalLatex = "", o
     return { tier: "repair", reason: "infinite_series" };
   }
   if (/\\int[\s\S]*\\infty|improper|infinity/iu.test(text)) {
-    return { tier: "repair", reason: "improper_integral" };
+    return { tier: "standard", reason: "improper_integral_standard_first" };
   }
   if (text.length > 1200) {
     return { tier: "repair", reason: "long_context" };
@@ -30,7 +30,11 @@ export function classifyProblemComplexity({ problem = "", canonicalLatex = "", o
 
 export function chooseSolverRoleForProblem(input = {}) {
   const classification = classifyProblemComplexity(input);
-  if (classification.tier === "escalation") return { role: "escalation", ...classification };
-  if (classification.tier === "repair") return { role: "repair", ...classification };
-  return { role: "solver", ...classification };
+  return {
+    role: "solver",
+    ...classification,
+    reason: classification.tier === "standard"
+      ? classification.reason
+      : `solver_first:${classification.reason}`,
+  };
 }

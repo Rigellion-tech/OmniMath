@@ -6,7 +6,7 @@ import InlineMath from "./InlineMath";
 import MathText from "./MathText";
 import { explainFollowup, explainPin, explainToken } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
-import { useHover } from "@/lib/HoverContext";
+import { useHoverActions, useHoverSemanticState, useHoverTooltipState } from "@/lib/HoverContext";
 import {
   getHoverTargetIdentity,
   createStableLazyPayload,
@@ -52,6 +52,7 @@ const pinRequestLocks = new Set();
 const requestCooldownUntil = new Map();
 let activeHoverRequest = null;
 let nextHoverRequestAt = 0;
+let tooltipDomInstanceSequence = 0;
 const DEBUG_SOLUTION_STATE = import.meta.env.DEV
   && import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true";
 const DEBUG_MATH_HOVER = import.meta.env.DEV
@@ -322,6 +323,13 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, re
     selectedText: payload.semanticSourceText || payload.targetSourceText || "",
     sourceRange: payload.targetSourceRange || payload.semanticSourceRange || null,
   });
+  logLazyExplanation("request-start", {
+    mode,
+    cacheKey,
+    requestId: requestDescriptor?.requestId || null,
+    debugRequestId: payload.debugRequestId,
+    targetId: requestDescriptor?.targetId || null,
+  });
   const promise = request({ payload, getToken, signal })
     .then((data) => {
       logLazyExplanation("response arrival", {
@@ -346,6 +354,14 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, re
         storedHoverExplanationLength: String(resolved.explanation || "").length,
         durationMs: Math.round(performance.now() - startedAt),
         cached: Boolean(data.cached),
+      });
+      logLazyExplanation("request-complete", {
+        mode,
+        cacheKey,
+        requestId: requestDescriptor?.requestId || null,
+        debugRequestId: payload.debugRequestId,
+        targetId: requestDescriptor?.targetId || null,
+        durationMs: Math.round(performance.now() - startedAt),
       });
       return resolved;
     })
@@ -625,8 +641,25 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         requestDescriptor: request,
       })
         .then((resolved) => {
-          if (!isCurrent()) return;
+          if (!isCurrent()) {
+            logLazyExplanation("response-discarded", {
+              mode,
+              cacheKey,
+              requestId,
+              reason: "request-no-longer-current",
+              targetId: request.targetId,
+            });
+            return;
+          }
           const applies = shouldApplyLazyExplanation(item, resolved);
+          logLazyExplanation(applies ? "response-applied" : "response-discarded", {
+            mode,
+            cacheKey,
+            requestId,
+            reason: applies ? "target-matched" : "target-mismatch",
+            targetId: request.targetId,
+            responseTargetId: resolved.targetId || null,
+          });
           logLazyExplanation("state update", {
             mode,
             cacheKey,
@@ -820,7 +853,7 @@ function FollowupChat({ item, problem, getToken }) {
 }
 
 function FloatingWindow({ item, index, problem, getToken }) {
-  const { clearHoverLens, closeExplanationWindow, toggleWindowPin, setWindowDepth, moveExplanationWindow } = useHover();
+  const { clearHoverLens, closeExplanationWindow, toggleWindowPin, setWindowDepth, moveExplanationWindow } = useHoverActions();
   const { settings } = useSettings();
   const windowRef = useRef(null);
   const dragRef = useRef(null);
@@ -1036,9 +1069,26 @@ function FloatingWindow({ item, index, problem, getToken }) {
 }
 
 export function ExplanationPopover() {
-  const { explanationLevel, hoverLens, holdHoverLens, releaseHoverLens } = useHover();
+  const {
+    explanationLevel,
+    hoverLens,
+  } = useHoverTooltipState();
+  const {
+    holdHoverLens,
+    releaseHoverLens,
+    reconcileHoverOwnership,
+    reportHoverLifecycle,
+  } = useHoverActions();
   const { getToken } = useAuthToken();
   const tooltipRef = useRef(null);
+  const tooltipDomInstanceRef = useRef({ lensId: null, identity: "" });
+  if (hoverLens?.id && tooltipDomInstanceRef.current.lensId !== hoverLens.id) {
+    tooltipDomInstanceSequence += 1;
+    tooltipDomInstanceRef.current = {
+      lensId: hoverLens.id,
+      identity: `quick-tooltip-${tooltipDomInstanceSequence}`,
+    };
+  }
   const [adjustedPosition, setAdjustedPosition] = useState(null);
   const [maxTooltipHeight, setMaxTooltipHeight] = useState(null);
   const hoverDepth = explanationLevel >= 2 ? "intermediate" : "beginner";
@@ -1067,12 +1117,18 @@ export function ExplanationPopover() {
   useEffect(() => {
     if (!hoverLens) return undefined;
     const identity = getHoverTargetIdentity(hoverLens);
+    const tooltipDomIdentity = tooltipDomInstanceRef.current.identity;
     logLazyExplanation("tooltip mount", {
       semanticNodeId: identity.semanticId || identity.targetId || null,
       selectedText: identity.sourceText || hoverLens.selectedText || hoverLens.display || "",
       sourceRange: identity.sourceRange || null,
       tooltipId: hoverLens.id,
     });
+    reportHoverLifecycle("tooltip-mounted", {
+      tokenStableId: identity.semanticId || identity.targetId || null,
+      tooltipDomIdentity,
+    });
+    reconcileHoverOwnership("tooltip-mounted");
     return () => {
       logLazyExplanation("tooltip unmount", {
         semanticNodeId: identity.semanticId || identity.targetId || null,
@@ -1080,8 +1136,12 @@ export function ExplanationPopover() {
         sourceRange: identity.sourceRange || null,
         tooltipId: hoverLens.id,
       });
+      reportHoverLifecycle("tooltip-unmounted", {
+        tokenStableId: identity.semanticId || identity.targetId || null,
+        tooltipDomIdentity,
+      });
     };
-  }, [hoverLens]);
+  }, [hoverLens?.id, reconcileHoverOwnership, reportHoverLifecycle]);
 
   useLayoutEffect(() => {
     setAdjustedPosition(null);
@@ -1132,7 +1192,19 @@ export function ExplanationPopover() {
       responseTextLength: String(lazyState.data?.explanation || "").length,
       renderedTextLength: tooltip.textContent?.length || 0,
     });
-  }, [hoverLens?.anchor, lazyState.data?.explanation]);
+    reportHoverLifecycle("tooltip-resized", {
+      tokenStableId: identity.semanticId || identity.targetId || null,
+      tooltipDomIdentity: tooltipDomInstanceRef.current.identity,
+      tooltipRect: {
+        left: tooltipRect.left,
+        top: tooltipRect.top,
+        width: tooltipRect.width,
+        height: tooltipRect.height,
+      },
+      responseTextLength: String(lazyState.data?.explanation || "").length,
+    });
+    requestAnimationFrame(() => reconcileHoverOwnership("tooltip-resized-or-repositioned"));
+  }, [hoverLens?.anchor, identity.semanticId, identity.targetId, lazyState.data?.explanation, reconcileHoverOwnership, reportHoverLifecycle]);
 
   useLayoutEffect(() => {
     if (!hoverLens) return undefined;
@@ -1173,6 +1245,7 @@ export function ExplanationPopover() {
       data-semantic-id={identity.semanticId || identity.targetId || undefined}
       data-tooltip-semantic-id={identity.semanticId || identity.targetId || undefined}
       data-source-range={identity.sourceRange ? `${identity.sourceRange.start}:${identity.sourceRange.end}` : undefined}
+      data-tooltip-dom-instance={tooltipDomInstanceRef.current.identity}
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 4 }}
@@ -1208,7 +1281,7 @@ export function ExplanationPopover() {
 }
 
 export function PinnedLensLayer({ problem }) {
-  const { pinnedLenses } = useHover();
+  const { pinnedLenses } = useHoverSemanticState();
   const { getToken } = useAuthToken();
 
   return (

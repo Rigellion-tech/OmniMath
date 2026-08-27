@@ -1,7 +1,9 @@
+import { stripTerminalControlSequences } from "./textSanitization.js";
+
 const CANONICAL_SOURCES = new Set(["ocr-reviewed", "ocr-direct", "typed"]);
 
 function normalizeText(value = "") {
-  return String(value || "")
+  return stripTerminalControlSequences(value)
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")

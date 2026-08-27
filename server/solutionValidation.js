@@ -10,7 +10,11 @@ import {
   numericalFinalAnswerCheck,
   verifyCriticalIdentities,
 } from "./mathValidationAnalysis.js";
-import { analyzeSymbolOrigins, extractSymbolInventory } from "./symbolInventory.js";
+import {
+  analyzeSymbolOrigins,
+  extractLeadingSpecialFunctionDefinitions,
+  extractSymbolInventory,
+} from "./symbolInventory.js";
 
 function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -490,7 +494,7 @@ function stepFullText(step = {}) {
 function explicitlyJustifiesSpecialFunction(stepText = "", specialName = "") {
   const text = safeString(stepText);
   if (!text) return false;
-  const hasIdentityLanguage = /derive|derivation|prove|proof|shown\s+by|from\s+the\s+(?:series|definition|identity)|using\s+the\s+identity|identity\s+is|cite|cited|by\s+(?:Euler|Feynman|Parseval|Mellin|Beta|Gamma)|known\s+identity\s*:/iu.test(text);
+  const hasIdentityLanguage = /derive|derivation|prove|proof|shown\s+by|from\s+(?:the\s+)?(?:convergent\s+)?series\s+definition|from\s+the\s+(?:series|definition|identity)|using\s+the\s+identity|identity\s+is|cite|cited|by\s+(?:Euler|Feynman|Parseval|Mellin|Beta|Gamma)|known\s+identity\s*:/iu.test(text);
   const hasDisplayedIdentity = /(?:=|\\sum|∑|\\prod|∏|\\int|∫).*(?:\\zeta|ζ|\\Gamma|Γ|\\operatorname\s*\{\s*Li\s*\}|elliptic)/iu.test(text);
   const merelyKnownResult = /known\s+(?:integral\s+)?result|standard\s+result|table\s+result/iu.test(text) && !hasDisplayedIdentity;
   return !merelyKnownResult && hasIdentityLanguage && (hasDisplayedIdentity || new RegExp(specialName, "iu").test(text));
@@ -504,7 +508,8 @@ function findAbruptSpecialFunctionIntroductions(result = {}, { problem = "" } = 
     const text = stepFullText(step);
     for (const specialName of extractSpecialFunctions(text)) {
       if (seen.has(specialName)) continue;
-      if (!explicitlyJustifiesSpecialFunction(text, specialName)) {
+      const explicitlyDefined = extractLeadingSpecialFunctionDefinitions(text).has(specialName);
+      if (!explicitlyDefined && !explicitlyJustifiesSpecialFunction(text, specialName)) {
         issues.push(`abrupt_special_function_introduction:${specialName}`);
       }
       seen.add(specialName);
@@ -1036,6 +1041,8 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
     explicitDefinitions: symbolDiagnostics.explicitDefinitions,
     unexplainedSymbols: symbolDiagnostics.unexplainedSymbols,
     boundSymbolProvenance: symbolDiagnostics.boundSymbolProvenance,
+    provenanceDiagnostics: symbolDiagnostics.provenanceDiagnostics,
+    stepReports: symbolDiagnostics.stepReports,
     fieldReports: symbolDiagnostics.fieldReports.map((field) => ({
       fieldPath: field.fieldPath,
       sourceType: field.sourceType,
@@ -1047,6 +1054,12 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
       symbols: field.symbols,
       unexplainedSymbols: field.unexplainedSymbols,
       boundSymbolProvenance: field.boundSymbolProvenance,
+      knownBeforeStep: field.knownBeforeStep,
+      knownBeforeField: field.knownBeforeField,
+      localBoundSymbols: field.localBoundSymbols,
+      symbolsIntroducedByCurrentStep: field.symbolsIntroducedByCurrentStep,
+      knownAfterStep: field.knownAfterStep,
+      introductions: field.introductions,
     })),
   };
   for (const fieldReport of symbolDiagnostics.fieldReports) {
@@ -1065,12 +1078,18 @@ function buildSolutionRuleEvaluations(result, { problem = "", includeQualityRule
           fieldPath: fieldReport.fieldPath,
           sourceType: fieldReport.sourceType,
           classification: "undefined_free_symbol",
-          value: fieldReport.value,
+          value: fieldReport.value.length <= 240 ? fieldReport.value : `${fieldReport.value.slice(0, 239)}…`,
           fragmentIndex: fieldReport.fragmentIndex,
           fragmentStart: fieldReport.fragmentStart,
           fragmentEnd: fieldReport.fragmentEnd,
           extractionReason: fieldReport.extractionReason,
-          localBoundSymbols: (fieldReport.boundSymbolProvenance || []).map((binding) => binding.symbol),
+          firstSeen: fieldReport.symbols.find((item) => item.symbol === symbol)?.firstSeen || null,
+          introducedAt: fieldReport.symbols.find((item) => item.symbol === symbol)?.introducedAt || null,
+          scope: fieldReport.symbols.find((item) => item.symbol === symbol)?.scope || null,
+          reason: fieldReport.symbols.find((item) => item.symbol === symbol)?.reason || "unknown provenance",
+          localBoundSymbols: fieldReport.localBoundSymbols || [],
+          knownBeforeStep: fieldReport.knownBeforeStep || [],
+          symbolsIntroducedByCurrentStep: fieldReport.symbolsIntroducedByCurrentStep || [],
         }),
       });
     }

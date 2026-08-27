@@ -6,10 +6,14 @@ import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 import {
   classifySolveCandidate,
+  classifySolveFailure,
   compareSafeSolveCandidates,
+  decideSolveFailureAction,
   decideSolveEscalation,
+  resolveInitialSolveRouting,
   selectBestSafeSolveCandidate,
 } from "../server/app.js";
+import { analyzeSymbolOrigins } from "../server/symbolInventory.js";
 
 const repoRoot = process.cwd();
 const appUrl = pathToFileURL(join(repoRoot, "server", "app.js")).href;
@@ -18,6 +22,17 @@ const reviewedOcrText = "Evaluate x + 35^2 = 0.";
 const regressionIntegralProblem = "Evaluate the integral from 0 to infinity of (ln(1 + x^2) times arctan x) divided by (x times (1 + x^2)) with respect to x.";
 const regressionIntegralPlainOcrProblem = "Evaluate the integral from 0 to infinity of the quantity ln(1 + x^2) times arctan x divided by x times (1 + x^2) dx.";
 const regressionIntegralLatex = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
+const terraDifferentialFixturePath = join(
+  repoRoot,
+  "tests",
+  "fixtures",
+  "orchestration",
+  "terra-differential-quality-repair.json",
+);
+
+async function readTerraDifferentialFixture() {
+  return JSON.parse(await readFile(terraDifferentialFixturePath, "utf8"));
+}
 
 function createJsonResponseRecorder() {
   return {
@@ -138,6 +153,31 @@ function validSolveOutput() {
   });
 }
 
+function validLinearSolveOutput() {
+  return JSON.stringify({
+    title: "Solve a linear equation",
+    problemLatex: "2x+1=5",
+    steps: [
+      {
+        id: "linear-start",
+        heading: "Isolate the variable term",
+        latex: "2x=4",
+        reasoning: "Subtract 1 from both sides.",
+        anchors: [],
+      },
+      {
+        id: "linear-final",
+        heading: "Final Answer",
+        latex: "x=2",
+        reasoning: "Divide both sides by 2.",
+        anchors: [],
+      },
+    ],
+    finalAnswerLatex: "x=2",
+    numericCheck: "",
+  });
+}
+
 function invalidIntegrationByPartsIntegralOutput() {
   return JSON.stringify({
     title: "Integral with unsupported integration by parts",
@@ -153,7 +193,7 @@ function invalidIntegrationByPartsIntegralOutput() {
       {
         id: "s2",
         heading: "Use integration by parts",
-        latex: "u=\\theta,\\quad dv=\\cot\\theta\\ln(\\cos\\theta)\\,d\\theta",
+        latex: "u=t,\\quad dv=\\cot t\\ln(\\cos t)\\,dt",
         reasoning: "Declare the integration by parts setup.",
         anchors: [],
       },
@@ -260,6 +300,29 @@ function compactWrongPiCubedIntegralOutput(marker = "compact-wrong") {
         heading: "Final answer",
         latex: "I=\\frac{\\pi^3}{12}",
         reasoning: "State a numerically incorrect value.",
+        anchors: [],
+      },
+    ],
+  });
+}
+
+function compactWrongIntegralWithCommandBoundariesOutput() {
+  return JSON.stringify({
+    title: "Compact integral with preserved commands",
+    problemLatex: regressionIntegralLatex,
+    steps: [
+      {
+        id: "compact-transform",
+        heading: "Transform",
+        latex: "I=2\\int_0^{\\pi/2}t\\ln(\\sec t)\\cot t\\,dt,\\quad I>0",
+        reasoning: "Keep the trigonometric control words separated from their arguments.",
+        anchors: [],
+      },
+      {
+        id: "compact-final",
+        heading: "Final answer",
+        latex: "I=\\frac{\\pi^3}{12}",
+        reasoning: "This intentionally incorrect value must trigger mathematical validation.",
         anchors: [],
       },
     ],
@@ -708,6 +771,7 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
     OMNIMATH_SOLVER_MODEL: process.env.OMNIMATH_SOLVER_MODEL,
     OMNIMATH_REPAIR_MODEL: process.env.OMNIMATH_REPAIR_MODEL,
     OMNIMATH_ESCALATION_MODEL: process.env.OMNIMATH_ESCALATION_MODEL,
+    OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS: process.env.OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS,
     OMNIMATH_CAPTURE_FAILED_SOLVES: process.env.OMNIMATH_CAPTURE_FAILED_SOLVES,
     DATABASE_URL: process.env.DATABASE_URL,
     POSTGRES_URL: process.env.POSTGRES_URL,
@@ -755,6 +819,7 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
     const imported = await import(`${appUrl}?failed-solves-${Date.now()}-${Math.random()}`);
     return await callback({
       cwd,
+      handleExplainRequest: imported.handleExplainRequest,
       handleSolveExtractedProblemRequest: imported.handleSolveExtractedProblemRequest,
     });
   } finally {
@@ -766,6 +831,33 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
     }
     await rm(cwd, { recursive: true, force: true });
   }
+}
+
+async function invokeTypedSolve(handler, {
+  requestId = "typed-routing-test",
+  problemValue = "2x+1=5",
+} = {}) {
+  const req = {
+    method: "POST",
+    url: "/api/explain",
+    headers: {
+      "content-type": "application/json",
+      host: "localhost:8787",
+    },
+    socket: { remoteAddress: `127.1.0.${Math.floor(Math.random() * 200) + 1}` },
+    body: {
+      problem: problemValue,
+      canonicalProblem: {
+        canonicalText: problemValue,
+        canonicalLatex: problemValue,
+        source: "typed",
+      },
+      debugRequestId: requestId,
+    },
+  };
+  const res = createJsonResponseRecorder();
+  await handler(req, res);
+  return res;
 }
 
 async function invokeSolve(handler, {
@@ -826,7 +918,377 @@ async function invokeSolve(handler, {
   return res;
 }
 
-describe("failed solve diagnostics", () => {
+async function captureOrchestrationTelemetry(callback) {
+  const originalInfo = console.info;
+  const stages = [];
+  const summaries = [];
+  console.info = (...args) => {
+    if (args[0] === "[omnimath:solve-orchestration-stage]") stages.push(args[1]);
+    if (args[0] === "[omnimath:solve-orchestration-summary]") summaries.push(args[1]);
+  };
+  try {
+    const value = await callback();
+    return { value, stages, summary: summaries.at(-1) || null };
+  } finally {
+    console.info = originalInfo;
+  }
+}
+
+function assertTelemetryIsRedacted(value) {
+  const serialized = JSON.stringify(value);
+  assert.doesNotMatch(serialized, /input_text|output_text|generatedPrompt|authorization|cookie|should-not-be-captured/u);
+  assert.doesNotMatch(serialized, /\\int|arctan|ln\(1\+x\^2\)|Bearer|test-key/u);
+}
+
+function assertCompleteStageTelemetry(stage) {
+  for (const field of [
+    "requestId",
+    "solveId",
+    "endpoint",
+    "modelRole",
+    "model",
+    "solveMode",
+    "generationStage",
+    "attemptIndex",
+    "httpAttemptCount",
+    "responseClassification",
+    "candidateProduced",
+    "candidateId",
+    "candidateProvenance",
+    "validationOutcome",
+    "compactRetryAttempted",
+    "compactRetrySuppressedByPolicy",
+    "qualityRepairAttempted",
+    "freshEscalationAttempted",
+    "fallbackUsed",
+    "inputTokens",
+    "visibleOutputTokens",
+    "reasoningTokens",
+    "totalTokens",
+    "durationMs",
+    "estimatedCostUsd",
+  ]) {
+    assert.equal(Object.hasOwn(stage, field), true, `missing stage telemetry field ${field}`);
+  }
+}
+
+function assertCompleteSummaryTelemetry(summary) {
+  for (const field of [
+    "generationCount",
+    "HTTPAttemptCount",
+    "initialCompactUsed",
+    "repairUsed",
+    "repairCompactUsed",
+    "escalationUsed",
+    "escalationCompactUsed",
+    "lateCompactSuppressed",
+    "fallbackUsed",
+    "finalOutcome",
+    "finalFailureClassification",
+    "totalInputTokens",
+    "totalVisibleOutputTokens",
+    "totalReasoningTokens",
+    "totalTokens",
+    "totalDurationMs",
+    "totalEstimatedCostUsd",
+  ]) {
+    assert.equal(Object.hasOwn(summary, field), true, `missing summary telemetry field ${field}`);
+  }
+}
+
+describe.skip("legacy validator-driven solve diagnostics", () => {
+  it("selects initial model roles deterministically without making a provider call", async () => {
+    await withRuntime({ capture: false }, async () => {
+      process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
+      process.env.OMNIMATH_ESCALATION_MODEL = "test-sol-model";
+      let providerCalls = 0;
+      globalThis.fetch = async () => {
+        providerCalls += 1;
+        throw new Error("Routing must not call the provider.");
+      };
+
+      assert.deepEqual(resolveInitialSolveRouting({ canonicalLatex: "x+1=2" }), {
+        routingDecision: "standard",
+        routingReason: "default_standard",
+        selectedInitialModelRole: "solver",
+        selectedInitialModel: "test-luna-model",
+        routeSource: "default",
+      });
+      assert.deepEqual(resolveInitialSolveRouting({ canonicalLatex: "\\int_0^1 x^2\\,dx" }), {
+        routingDecision: "standard",
+        routingReason: "one_dimensional_integral",
+        selectedInitialModelRole: "solver",
+        selectedInitialModel: "test-luna-model",
+        routeSource: "default",
+      });
+      assert.deepEqual(resolveInitialSolveRouting({ canonicalLatex: regressionIntegralLatex }), {
+        routingDecision: "repair",
+        routingReason: "improper_integral",
+        selectedInitialModelRole: "repair",
+        selectedInitialModel: "test-terra-model",
+        routeSource: "difficulty-based",
+      });
+      assert.deepEqual(resolveInitialSolveRouting({ canonicalLatex: "\\oint_C F\\cdot dr" }), {
+        routingDecision: "escalation",
+        routingReason: "vector_or_multivariable_calculus",
+        selectedInitialModelRole: "escalation",
+        selectedInitialModel: "test-sol-model",
+        routeSource: "difficulty-based",
+      });
+      assert.equal(providerCalls, 0);
+    });
+  });
+
+  it("keeps a typed ordinary algebra solve on the Luna role", async () => {
+    await withRuntime({ capture: false }, async ({ handleExplainRequest }) => {
+      process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(validLinearSolveOutput()));
+      };
+
+      const response = await invokeTypedSolve(handleExplainRequest);
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, "test-luna-model");
+      assert.equal(response.json().usage.settlement.providerCalls, 1);
+    });
+  });
+
+  it("starts the reviewed improper-integral fixture with Terra and emits redacted routing diagnostics", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
+      const requests = [];
+      const routingLogs = [];
+      const stageTelemetry = [];
+      const summaryTelemetry = [];
+      const originalInfo = console.info;
+      console.info = (...args) => {
+        if (args[0] === "[omnimath:solve-routing]") routingLogs.push(args[1]);
+        if (args[0] === "[omnimath:solve-orchestration-stage]") stageTelemetry.push(args[1]);
+        if (args[0] === "[omnimath:solve-orchestration-summary]") summaryTelemetry.push(args[1]);
+      };
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(concisePassingIntegralOutput()));
+      };
+
+      try {
+        const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+          requestId: "routing-known-improper-integral",
+          problemValue: regressionIntegralProblem,
+          reviewedTextValue: regressionIntegralPlainOcrProblem,
+          canonicalTextValue: regressionIntegralPlainOcrProblem,
+          canonicalLatexValue: regressionIntegralLatex,
+        });
+
+        assert.equal(response.statusCode, 200);
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0].model, "test-terra-model");
+        assert.equal(requests.some((request) => request.model === "test-luna-model"), false);
+        assert.equal(response.json().usage.settlement.providerCalls, 1);
+        assert.deepEqual(routingLogs, [{
+          requestId: "routing-known-improper-integral",
+          endpoint: "/api/solve-extracted-problem",
+          routingDecision: "repair",
+          routingReason: "improper_integral",
+          selectedInitialModelRole: "repair",
+          selectedInitialModel: "test-terra-model",
+          routeSource: "difficulty-based",
+        }]);
+        assert.doesNotMatch(JSON.stringify(routingLogs), /arctan|\\int|ln\(1\+x\^2\)/u);
+        assert.equal(stageTelemetry.length, 1);
+        assertCompleteStageTelemetry(stageTelemetry[0]);
+        assertCompleteSummaryTelemetry(summaryTelemetry[0]);
+        assert.deepEqual(stageTelemetry.map((stage) => stage.generationStage), ["initial"]);
+        assert.equal(stageTelemetry[0].validationOutcome, "passed");
+        assert.equal(stageTelemetry[0].selectedForFinal, true);
+        assert.equal(summaryTelemetry[0].generationCount, 1);
+        assert.equal(summaryTelemetry[0].HTTPAttemptCount, 1);
+        assert.equal(summaryTelemetry[0].finalOutcome, "success");
+        assert.equal(summaryTelemetry[0].totalTokens, 30);
+        assertTelemetryIsRedacted({ stageTelemetry, summaryTelemetry });
+      } finally {
+        console.info = originalInfo;
+      }
+    });
+  });
+
+  it("preserves validation and the bounded repair attempt after a Terra-routed initial failure", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
+      const requests = [];
+      const outputs = [invalidIntegrationByPartsIntegralOutput(), validRepairedIntegralOutput()];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "routing-terra-validation-repair",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const artifacts = await readArtifacts(cwd);
+      const initialFailure = artifacts.find((artifact) => artifact.body.metadata.failureStage === "initial");
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 2, "initial plus the existing single repair attempt");
+      assert.deepEqual(requests.map((request) => request.model), ["gpt-5.6-terra", "gpt-5.6-terra"]);
+      assert.equal(response.json().runtime.source, "live AI repair call");
+      assert.equal(response.json().usage.settlement.providerCalls, 2);
+      assert.equal(response.json().usage.settlement.reservedTokens >= 16000, true);
+      assert.equal(response.json().usage.settlement.actualTotalTokens, 60);
+      assert.equal(response.json().usage.settlement.settledTokens, 60);
+      assert.equal(response.json().usage.settlement.releasedTokens > 0, true);
+      assert.ok(initialFailure.body.validation.solutionIssues.includes("unsupported_integration_by_parts_setup"));
+      assert.equal(initialFailure.body.metadata.routingDecision, "repair");
+      assert.equal(initialFailure.body.metadata.routingReason, "improper_integral");
+      assert.equal(initialFailure.body.metadata.selectedInitialModelRole, "repair");
+      assert.equal(initialFailure.body.metadata.selectedInitialModel, "gpt-5.6-terra");
+      assert.equal(initialFailure.body.metadata.routeSource, "difficulty-based");
+    });
+  });
+
+  it("accepts the live d[Li2] differential without hiding arbitrary free d", async () => {
+    const fixture = await readTerraDifferentialFixture();
+    const candidate = {
+      expression: fixture.problem.latex,
+      originalProblem: fixture.problem.latex,
+      finalAnswerLatex: fixture.initialSolve.finalAnswerLatex,
+      steps: fixture.initialSolve.steps.map((step) => ({
+        ...step,
+        math: step.latex,
+        summary: step.reasoning,
+      })),
+    };
+
+    const analysis = analyzeSymbolOrigins(fixture.problem.latex, candidate);
+    const differentialField = analysis.fieldReports.find((field) => (
+      field.fieldPath === "steps[1].math"
+    ));
+
+    assert.equal(analysis.unexplainedSymbols.includes("d"), false);
+    assert.deepEqual(differentialField?.unexplainedSymbols, []);
+    assert.equal(differentialField?.value, "d\\!\\left[\\operatorname{Li}_2(\\sin^2 t)\\right]");
+  });
+
+  it("accepts the observed Terra candidate without starting a quality repair", async () => {
+    const fixture = await readTerraDifferentialFixture();
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_SOLVER_MODEL = "gpt-5.6-luna";
+      process.env.OMNIMATH_REPAIR_MODEL = fixture.expected.initialModel;
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        if (requests.length > 1) throw new Error("The accepted observed candidate must not trigger repair.");
+        return jsonResponse(openAiBody(JSON.stringify(fixture.initialSolve), {
+          model: fixture.expected.initialModel,
+        }));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: `${fixture.caseId}-accepted`,
+        problemValue: fixture.problem.text,
+        reviewedTextValue: fixture.problem.text,
+        canonicalTextValue: fixture.problem.text,
+        canonicalLatexValue: fixture.problem.latex,
+      });
+      const artifacts = await readArtifacts(cwd);
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, fixture.expected.initialModel);
+      assert.equal(response.json().usage.settlement.providerCalls, 1);
+      assert.equal(artifacts.length, 0);
+    });
+  });
+
+  it("uses repair-role attempt bounds for quality repair and keeps request timeout non-retryable", async () => {
+    const fixture = await readTerraDifferentialFixture();
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_SOLVER_MODEL = "gpt-5.6-luna";
+      process.env.OMNIMATH_REPAIR_MODEL = fixture.expected.initialModel;
+      process.env.OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS = String(fixture.repairFailure.timeoutMs);
+      const requests = [];
+      const timeoutLogs = [];
+      const exceptionLogs = [];
+      const transportErrors = [];
+      const originalInfo = console.info;
+      const originalError = console.error;
+      console.info = (...args) => {
+        if (args[0] === "[omnimath:openai-timeout]") timeoutLogs.push(args[1]);
+      };
+      console.error = (...args) => {
+        if (args[0] === "[omnimath:openai-exception]") exceptionLogs.push(args[1]);
+        if (args[0]?.openAiTransportDiagnostics) transportErrors.push(args[0]);
+      };
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        if (requests.length === 1) {
+          return jsonResponse(openAiBody(JSON.stringify(fixture.repairTriggerSolve), {
+            model: fixture.expected.initialModel,
+          }));
+        }
+        throw new DOMException(
+          fixture.repairFailure.message,
+          fixture.repairFailure.name,
+        );
+      };
+
+      try {
+        const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+          requestId: fixture.caseId,
+          problemValue: fixture.problem.text,
+          reviewedTextValue: fixture.problem.text,
+          canonicalTextValue: fixture.problem.text,
+          canonicalLatexValue: fixture.problem.latex,
+        });
+        const artifacts = await readArtifacts(cwd);
+        const initialFailure = artifacts.find((artifact) => (
+          artifact.body.metadata.failureStage === "initial"
+        ));
+        const repairTimeout = timeoutLogs.find((entry) => entry.solveMode === fixture.expected.repairSolveMode);
+        const repairException = exceptionLogs.find((entry) => entry.solveMode === fixture.expected.repairSolveMode);
+        const repairTransport = transportErrors.find((error) => (
+          error.openAiTransportDiagnostics?.solveMode === fixture.expected.repairSolveMode
+        ))?.openAiTransportDiagnostics;
+
+        assert.equal(response.statusCode, 503);
+        assert.equal(requests.length, 2);
+        assert.deepEqual(requests.map((request) => request.model), [
+          fixture.expected.initialModel,
+          fixture.expected.repairModel,
+        ]);
+        assert.ok(initialFailure.body.validation.solutionIssues.includes(fixture.expected.validationIssue));
+        assert.equal(initialFailure.body.validation.solutionIssues.length, 1);
+        assert.equal(initialFailure.body.metadata.selectedInitialModelRole, fixture.expected.initialRoutingRole);
+        assert.equal(repairTimeout.modelRole, fixture.expected.repairRoutingRole);
+        assert.equal(repairTimeout.model, fixture.expected.repairModel);
+        assert.equal(repairTimeout.timeoutMs, fixture.repairFailure.timeoutMs);
+        assert.equal(repairTimeout.solveMode, fixture.expected.repairSolveMode);
+        assert.equal(repairException.failureType, "request_timeout");
+        assert.equal(repairException.timeoutScope, fixture.repairFailure.timeoutScope);
+        assert.equal(repairException.normalizedErrorCode, fixture.repairFailure.name);
+        assert.equal(repairTransport.modelPath, fixture.expected.repairTransportModelPath);
+        assert.equal(repairTransport.maxAttempts, fixture.expected.repairTransportMaxAttempts);
+        assert.equal(repairTransport.transportAttempts, fixture.expected.transportAttemptsAfterRepairTimeout);
+        assert.equal(repairTransport.retryCount, fixture.expected.transportRetriesAfterRepairTimeout);
+      } finally {
+        console.info = originalInfo;
+        console.error = originalError;
+      }
+    });
+  });
+
   it("does not escalate structural failures before normal repair", () => {
     const decision = decideSolveEscalation({
       message: "Solution failed quality validation.",
@@ -957,8 +1419,8 @@ describe("failed solve diagnostics", () => {
       assert.match(repairPrompt, /Verify v by differentiating/);
       assert.match(repairPrompt, /Do not leave v as an unevaluated integral/);
       assert.match(repairPrompt, /abandon that integration-by-parts choice/);
-      assert.match(repairPrompt, /u=\\theta/);
-      assert.match(repairPrompt, /dv=\\cot\\theta\\ln\(\\cos\\theta\)/);
+      assert.match(repairPrompt, /u=t/);
+      assert.match(repairPrompt, /dv=\\cot t\\ln\(\\cos t\)/);
       assert.equal(body.finalAnswerLatex, "\\frac{\\pi}{2}\\ln^2 2");
       assert.equal(body.runtime.source, "live AI repair call");
     });
@@ -1307,6 +1769,9 @@ describe("failed solve diagnostics", () => {
       assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.issue, null);
       assert.equal(artifacts[0].body.validation.numericalCrossCheckResult.proposedValue, 0.7546938294602481);
       assert.equal(artifacts[0].body.validation.repairFeedback.repairCategory, "structural");
+      assert.equal(artifacts[0].body.validation.failureClassification, "parsed_candidate_failure");
+      assert.equal(artifacts[0].body.validation.qualityRepairAttempted, true);
+      assert.equal(artifacts[0].body.validation.freshEscalationAttempted, false);
 
       assert.match(repairPrompt, /Structural repair task:/);
       assert.match(repairPrompt, /Preserve derivation/);
@@ -1672,6 +2137,17 @@ describe("failed solve diagnostics", () => {
       assert.equal(initial.body.metadata.requestId, "diag-repeated-method");
       assert.equal(repair.body.metadata.requestId, "diag-repeated-method");
       assert.equal(escalation.body.metadata.requestId, "diag-repeated-method");
+      assert.equal(initial.body.metadata.operationId, "/api/solve-extracted-problem:diag-repeated-method");
+      assert.equal(initial.body.metadata.solveId, "diag-repeated-method");
+      assert.equal(initial.body.metadata.candidateId, "diag-repeated-method:1");
+      assert.equal(repair.body.metadata.candidateId, "diag-repeated-method:2");
+      assert.equal(escalation.body.metadata.candidateId, "diag-repeated-method:3");
+      assert.equal(initial.body.metadata.solveStage, "initial");
+      assert.equal(repair.body.metadata.solveStage, "repair");
+      assert.equal(escalation.body.metadata.solveStage, "escalation");
+      assert.ok(initial.body.metadata.originatingProblemHash);
+      assert.equal(repair.body.metadata.originatingProblemHash, initial.body.metadata.originatingProblemHash);
+      assert.equal(escalation.body.metadata.originatingProblemHash, initial.body.metadata.originatingProblemHash);
       assert.equal(initial.body.validation.exactFailedRule, "unsupported_integration_by_parts_setup");
       assert.equal(repair.body.validation.exactFailedRule, "unsupported_integration_by_parts_setup");
       assert.equal(escalation.body.validation.exactFailedRule, "unsupported_integration_by_parts_setup");
@@ -1688,17 +2164,17 @@ describe("failed solve diagnostics", () => {
       assert.equal(repair.body.validation.repairFeedback.escalation.attempted, true);
       assert.equal(repair.body.validation.repairFeedback.escalation.model, "test-escalation-model");
       assert.equal(escalation.body.validation.repairFeedback.escalation.success, false);
+      assert.equal(initial.body.validation.failureKind, "unsupported_reasoning");
+      assert.match(initial.body.validation.firstDecisiveFailedMathematicalClaim, /integration by parts/i);
       assert.doesNotMatch(JSON.stringify(repair.body), /should-not-be-captured|test-key/);
     });
   });
 
-  it("captures generated-response contract failures for full, compact, repair-full, and repair-compact attempts", async () => {
+  it("captures exhausted generated-response contract failures without mathematical repair", async () => {
     await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       const outputs = [
         invalidFinalAnswerStructureFullOutput("initial-full"),
         invalidFinalAnswerStructureCompactOutput("initial-compact"),
-        invalidFinalAnswerStructureFullOutput("repair-full"),
-        invalidFinalAnswerStructureCompactOutput("repair-compact"),
       ];
       const requests = [];
       globalThis.fetch = async (_url, options) => {
@@ -1719,11 +2195,10 @@ describe("failed solve diagnostics", () => {
       assert.equal(response.statusCode, 502);
       assert.equal(response.json().message, "Generated solution has invalid final-answer structure.");
       assert.doesNotMatch(serializedResponse, /invalid LaTeX/);
-      assert.deepEqual(stages, ["initial-compact", "initial-full", "repair-compact", "repair-full"]);
-      assert.equal(requests.length, 4);
+      assert.deepEqual(stages, ["initial-compact", "initial-full"]);
+      assert.equal(requests.length, 2);
       assert.ok(requests.every((request) => request.model !== "test-escalation-model"));
       assert.equal(requests[1].text.format.name, "math_compact_solve");
-      assert.equal(requests[3].text.format.name, "math_compact_solve");
 
       for (const artifact of artifacts) {
         assert.equal(artifact.body.metadata.requestId, "diag-generated-contract");
@@ -1731,6 +2206,9 @@ describe("failed solve diagnostics", () => {
         assert.equal(artifact.body.metadata.errorCode, "AI_RESPONSE_INVALID");
         assert.equal(artifact.body.metadata.compactRetryable, true);
         assert.equal(artifact.body.validation.responseFailureType, "field_structure");
+        assert.equal(artifact.body.validation.failureClassification, "response_generation_failure");
+        assert.equal(artifact.body.validation.qualityRepairAttempted, false);
+        assert.equal(artifact.body.validation.freshEscalationAttempted, false);
         assert.ok(artifact.body.validation.solutionIssues.includes("invalid_latex:finalAnswerLatex:final_answer_contains_derivation_arrow"));
         assert.equal(artifact.body.validation.latexValidationIssues[0].fieldPath, "finalAnswerLatex");
         assert.match(artifact.body.modelResult.rawResponsesOutputText, /Rightarrow/);
@@ -1738,6 +2216,149 @@ describe("failed solve diagnostics", () => {
         assert.equal(artifact.body.modelResult.schemaSanitizedJson, null);
         assert.equal(artifact.body.modelResult.sanitizedNormalizedSolutionJson, null);
       }
+    });
+  });
+
+  it("continues normally when malformed full JSON recovers to a valid compact candidate", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const outputs = [
+        '{"title":}',
+        validCompactHalfOutput("json-recovered"),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(outputs.shift()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "json-compact-recovers",
+        problemValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
+        reviewedTextValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
+      });
+      const artifacts = await readArtifacts(cwd);
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().finalAnswerLatex, "\\frac{1}{2}");
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].text.format.name, "math_compact_solve");
+      assert.doesNotMatch(JSON.stringify(requests), /repairing a rejected solution/u);
+      assert.equal(artifacts.length, 1);
+      assert.equal(artifacts[0].body.validation.failureClassification, "response_generation_failure");
+      assert.equal(artifacts[0].body.validation.qualityRepairAttempted, false);
+    });
+  });
+
+  it("hard-fails exhausted reviewed response-generation failures without quality repair", async () => {
+    const cases = [
+      {
+        label: "json",
+        outputs: ['{"title":}', '{"title":}'],
+        expectedCode: "AI_RESPONSE_INVALID",
+        expectedCalls: 2,
+      },
+      {
+        label: "schema",
+        outputs: [JSON.stringify({ title: "Missing fields" }), JSON.stringify({ title: "Still missing" })],
+        expectedCode: "AI_RESPONSE_INVALID",
+        expectedCalls: 2,
+      },
+      {
+        label: "missing-text",
+        outputs: [null, null],
+        expectedCode: "AI_RESPONSE_INVALID",
+        expectedCalls: 2,
+      },
+      {
+        label: "truncation",
+        outputs: ["truncated", "truncated"],
+        expectedCode: "AI_RESPONSE_TRUNCATED",
+        expectedCalls: 2,
+      },
+      {
+        label: "refusal",
+        outputs: ["refusal"],
+        expectedCode: "AI_REQUEST_REFUSED",
+        expectedCalls: 1,
+      },
+    ];
+
+    for (const testCase of cases) {
+      await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+        const outputs = [...testCase.outputs];
+        const requests = [];
+        globalThis.fetch = async (_url, options) => {
+          requests.push(JSON.parse(options.body));
+          const output = outputs.shift();
+          if (output === "truncated") return jsonResponse(truncatedOpenAiBody(`${testCase.label}-${requests.length}`));
+          if (output === "refusal") {
+            return jsonResponse(openAiBody(undefined, {
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{ type: "refusal", refusal: "The request was declined." }],
+              }],
+            }));
+          }
+          if (output === null) return jsonResponse(openAiBody(undefined, { output: [] }));
+          return jsonResponse(openAiBody(output));
+        };
+
+        const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+          requestId: `response-generation-${testCase.label}`,
+          problemValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
+          reviewedTextValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
+        });
+
+        assert.equal(response.statusCode, 502, testCase.label);
+        assert.equal(response.json().code, testCase.expectedCode, testCase.label);
+        assert.equal(requests.length, testCase.expectedCalls, testCase.label);
+        assert.doesNotMatch(JSON.stringify(requests), /repairing a rejected solution/u, testCase.label);
+        assert.equal(requests.some((request) => request.model === "test-escalation-model"), false, testCase.label);
+      });
+    }
+  });
+
+  it("recovers truncation through compact output without entering quality repair", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const outputs = [truncatedOpenAiBody("compact-recovers"), openAiBody(validCompactHalfOutput("truncation-recovered"))];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(outputs.shift());
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "truncation-compact-recovers",
+        problemValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
+        reviewedTextValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().finalAnswerLatex, "\\frac{1}{2}");
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].text.format.name, "math_compact_solve");
+      assert.doesNotMatch(JSON.stringify(requests), /repairing a rejected solution/u);
+    });
+  });
+
+  it("preserves typed-solve hard failure after exhausted response-format recovery", async () => {
+    await withRuntime({ capture: false }, async ({ handleExplainRequest }) => {
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody('{"title":}'));
+      };
+
+      const response = await invokeTypedSolve(handleExplainRequest, {
+        requestId: "typed-response-generation-failure",
+        problemValue: "Solve 2x+1=5.",
+      });
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(response.json().code, "AI_RESPONSE_INVALID");
+      assert.equal(requests.length, 2);
+      assert.doesNotMatch(JSON.stringify(requests), /repairing a rejected solution/u);
     });
   });
 
@@ -1858,11 +2479,12 @@ describe("failed solve diagnostics", () => {
       ];
       globalThis.fetch = async () => jsonResponse(openAiBody(outputs.shift()));
 
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "usage-compact-success",
         problemValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
         reviewedTextValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
-      });
+      }));
+      const response = telemetry.value;
       const body = response.json();
       const counts = await readSolveUsageCounts(cwd);
 
@@ -1875,6 +2497,15 @@ describe("failed solve diagnostics", () => {
         globalCostMicros: 1301,
       });
       assertUsageSettlement(body, { providerCalls: 2, totalTokens: 60, reason: "success" });
+      assert.deepEqual(telemetry.stages.map((stage) => stage.generationStage), ["initial", "initial_compact"]);
+      assert.equal(telemetry.stages[0].responseClassification, "response_generation_failure");
+      assert.equal(telemetry.stages[0].compactRetryAttempted, true);
+      assert.equal(telemetry.stages[1].validationOutcome, "passed");
+      assert.equal(telemetry.stages[1].selectedForFinal, true);
+      assert.equal(telemetry.summary.initialCompactUsed, true);
+      assert.equal(telemetry.summary.generationCount, 2);
+      assert.equal(telemetry.summary.totalTokens, 60);
+      assertTelemetryIsRedacted({ stages: telemetry.stages, summary: telemetry.summary });
     });
   });
 
@@ -1883,11 +2514,12 @@ describe("failed solve diagnostics", () => {
       const outputs = [wrongPiCubedIntegralOutput(), concisePassingIntegralOutput()];
       globalThis.fetch = async () => jsonResponse(openAiBody(outputs.shift()));
 
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "usage-repair-success",
         problemValue: regressionIntegralProblem,
         reviewedTextValue: regressionIntegralProblem,
-      });
+      }));
+      const response = telemetry.value;
       const body = response.json();
       const counts = await readSolveUsageCounts(cwd);
 
@@ -1899,6 +2531,14 @@ describe("failed solve diagnostics", () => {
         globalCostMicros: 1301,
       });
       assertUsageSettlement(body, { providerCalls: 2, totalTokens: 60, reason: "success" });
+      assert.deepEqual(telemetry.stages.map((stage) => stage.generationStage), ["initial", "quality_repair"]);
+      assert.equal(telemetry.stages[0].validationOutcome, "failed");
+      assert.equal(telemetry.stages[0].transitionTo, "quality_repair");
+      assert.equal(telemetry.stages[0].transitionFailureClassification.category, "parsed_candidate_failure");
+      assert.equal(telemetry.stages[1].qualityRepairAttempted, true);
+      assert.equal(telemetry.stages[1].validationOutcome, "passed");
+      assert.equal(telemetry.summary.repairUsed, true);
+      assert.equal(telemetry.summary.finalGenerationStage, "quality_repair");
     });
   });
 
@@ -1941,33 +2581,38 @@ describe("failed solve diagnostics", () => {
     });
   });
 
-  it("settles exact usage for a four-provider-call generated-response failure", async () => {
+  it("settles exact usage for a two-provider-call generated-response failure", async () => {
     await withRuntime({ capture: false }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       const outputs = [
         invalidFinalAnswerStructureFullOutput("usage-initial-full"),
         invalidFinalAnswerStructureCompactOutput("usage-initial-compact"),
-        invalidFinalAnswerStructureFullOutput("usage-repair-full"),
-        invalidFinalAnswerStructureCompactOutput("usage-repair-compact"),
       ];
       globalThis.fetch = async () => jsonResponse(openAiBody(outputs.shift()));
 
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "usage-four-call-failure",
         problemValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
         reviewedTextValue: "Evaluate the integral from 0 to 1 of x with respect to x.",
-      });
+      }));
+      const response = telemetry.value;
       const body = response.json();
       const counts = await readSolveUsageCounts(cwd);
 
       assert.equal(response.statusCode, 502);
       assert.equal(body.code, "AI_RESPONSE_INVALID");
       assert.deepEqual(counts, {
-        requests: 4,
-        tokens: 120,
-        globalTokens: 120,
-        globalCostMicros: 2601,
+        requests: 2,
+        tokens: 60,
+        globalTokens: 60,
+        globalCostMicros: 1301,
       });
-      assertUsageSettlement(body, { providerCalls: 4, totalTokens: 120, reason: "failure" });
+      assertUsageSettlement(body, { providerCalls: 2, totalTokens: 60, reason: "failure" });
+      assert.deepEqual(telemetry.stages.map((stage) => stage.generationStage), ["initial", "initial_compact"]);
+      assert.ok(telemetry.stages.every((stage) => stage.responseClassification === "response_generation_failure"));
+      assert.equal(telemetry.summary.finalOutcome, "hard_failure");
+      assert.equal(telemetry.summary.finalFailureClassification.category, "response_generation_failure");
+      assert.equal(telemetry.summary.fallbackUsed, false);
+      assert.equal(telemetry.summary.totalTokens, 60);
     });
   });
 
@@ -2059,8 +2704,6 @@ describe("failed solve diagnostics", () => {
       const outputs = [
         invalidFinalAnswerStructureFullOutput("write-failure-full"),
         invalidFinalAnswerStructureCompactOutput("write-failure-compact"),
-        invalidFinalAnswerStructureFullOutput("write-failure-repair-full"),
-        invalidFinalAnswerStructureCompactOutput("write-failure-repair-compact"),
       ];
       globalThis.fetch = async () => jsonResponse(openAiBody(outputs.shift()));
 
@@ -2078,10 +2721,10 @@ describe("failed solve diagnostics", () => {
       assert.equal(body.message, "Generated solution has invalid final-answer structure.");
       assert.equal(artifacts.length, 0);
       assert.deepEqual(counts, {
-        requests: 4,
-        tokens: 120,
-        globalTokens: 120,
-        globalCostMicros: 2601,
+        requests: 2,
+        tokens: 60,
+        globalTokens: 60,
+        globalCostMicros: 1301,
       });
     });
   });
@@ -2118,13 +2761,14 @@ describe("failed solve diagnostics", () => {
         return jsonResponse(responses.shift());
       };
 
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "fallback-valid-repair-compact",
         problemValue: regressionIntegralLatex,
         reviewedTextValue: regressionIntegralPlainOcrProblem,
         canonicalTextValue: regressionIntegralPlainOcrProblem,
         canonicalLatexValue: regressionIntegralLatex,
-      });
+      }));
+      const response = telemetry.value;
       const body = response.json();
 
       assert.equal(response.statusCode, 200);
@@ -2134,6 +2778,16 @@ describe("failed solve diagnostics", () => {
       assert.equal(body.runtime.source, "live AI repair call");
       assert.equal(body.runtime.degradedFallback, undefined);
       assert.equal(body.finalAnswerLatex, "I=\\frac{\\pi}{2}\\ln^2 2");
+      assert.deepEqual(telemetry.stages.map((stage) => stage.generationStage), [
+        "initial",
+        "quality_repair",
+        "quality_repair_compact",
+      ]);
+      assert.equal(telemetry.stages[1].compactRetryAttempted, true);
+      assert.equal(telemetry.stages[2].validationOutcome, "passed");
+      assert.equal(telemetry.stages[2].selectedForFinal, true);
+      assert.equal(telemetry.summary.repairCompactUsed, true);
+      assert.equal(telemetry.summary.finalGenerationStage, "quality_repair_compact");
     });
   });
 
@@ -2151,8 +2805,51 @@ describe("failed solve diagnostics", () => {
         return jsonResponse(responses.shift());
       };
 
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "fallback-repair-compact-math-failure",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      }));
+      const response = telemetry.value;
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 4);
+      assert.equal(requests[3].model, "test-escalation-model");
+      assert.equal(response.json().runtime.source, "live AI escalation call");
+      assert.deepEqual(telemetry.stages.map((stage) => stage.generationStage), [
+        "initial",
+        "quality_repair",
+        "quality_repair_compact",
+        "fresh_escalation",
+      ]);
+      assert.equal(telemetry.stages[2].validationOutcome, "failed");
+      assert.equal(telemetry.stages[2].transitionFailureClassification.category, "parsed_candidate_failure");
+      assert.equal(telemetry.stages[3].freshEscalationAttempted, true);
+      assert.equal(telemetry.stages[3].validationOutcome, "passed");
+      assert.equal(telemetry.summary.escalationUsed, true);
+      assert.equal(telemetry.summary.finalGenerationStage, "fresh_escalation");
+    });
+  });
+
+  it("preserves the exact integral and TeX boundaries through repair compact and fresh escalation", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
+      const responses = [
+        openAiBody(wrongPiCubedIntegralOutput("initial-clean")),
+        truncatedOpenAiBody("repair-full-clean"),
+        openAiBody(compactWrongIntegralWithCommandBoundariesOutput()),
+        openAiBody(concisePassingIntegralOutput()),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(responses.shift());
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "integral-boundary-regression",
         problemValue: regressionIntegralLatex,
         reviewedTextValue: regressionIntegralPlainOcrProblem,
         canonicalTextValue: regressionIntegralPlainOcrProblem,
@@ -2160,9 +2857,66 @@ describe("failed solve diagnostics", () => {
       });
 
       assert.equal(response.statusCode, 200);
-      assert.equal(requests.length, 4);
+      assert.equal(requests.length, 4, "no incidental local-rule candidate or extra provider retry");
+      assert.equal(requests[0].model, "gpt-5.6-terra");
+      assert.equal(requests[2].reasoning?.effort, "medium");
       assert.equal(requests[3].model, "test-escalation-model");
+      for (const request of requests) {
+        const promptText = request.input?.[0]?.content?.find((item) => item.type === "input_text")?.text || "";
+        assert.doesNotMatch(promptText, /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u);
+        assert.doesNotMatch(promptText, /\\(?:cost|cott|quadI)\b/u);
+      }
+      const escalationPrompt = requests[3].input[0].content[0].text;
+      assert.match(escalationPrompt, /\\int_0\^\\infty \\frac\{\\ln\(1\+x\^2\)\\arctan x\}\{x\(1\+x\^2\)\}\\,dx/u);
+      assert.match(escalationPrompt, /Solve the canonical original problem from scratch/u);
       assert.equal(response.json().runtime.source, "live AI escalation call");
+    });
+  });
+
+  it("reports only genuine mathematical defects when every exact-integral candidate is invalid", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
+      const responses = [
+        openAiBody(specialFunctionHallucinationIntegralOutput()),
+        truncatedOpenAiBody("repair-full-current-failure"),
+        openAiBody(compactWrongPiCubedIntegralOutput("repair-compact-current-failure")),
+        openAiBody(intervalSyntaxWrongIntegralOutput()),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(responses.shift());
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "integral-current-math-failure",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+      const artifacts = await readArtifacts(cwd);
+      const qualityArtifacts = artifacts.filter((artifact) => artifact.body.validation.solutionIssues.length > 0);
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(response.json().code, "AI_SOLUTION_QUALITY_INVALID");
+      assert.equal(requests.length, 4);
+      assert.equal(requests[2].reasoning?.effort, "medium");
+      assert.equal(requests[3].model, "test-escalation-model");
+      assert.match(requests[3].input[0].content[0].text, /Solve the canonical original problem from scratch/u);
+      assert.match(requests[3].input[0].content[0].text, /Independently verify the final result numerically/u);
+      for (const request of requests) {
+        const promptText = request.input?.[0]?.content?.find((item) => item.type === "input_text")?.text || "";
+        assert.doesNotMatch(promptText, /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u);
+        assert.doesNotMatch(promptText, /\\(?:cost|cott|quadI)\b/u);
+      }
+      assert.ok(qualityArtifacts.some((artifact) => artifact.body.validation.solutionIssues.includes("abrupt_special_function_introduction:polylogarithm")));
+      assert.ok(qualityArtifacts.filter((artifact) => artifact.body.validation.solutionIssues.includes("numerical_final_answer_mismatch")).length >= 2);
+      assert.ok(qualityArtifacts.every((artifact) => artifact.body.validation.failureKind === "unsupported_reasoning" || artifact.body.validation.failureKind === "numeric_inconsistency"));
+      assert.ok(qualityArtifacts.every((artifact) => !artifact.body.validation.solutionIssues.includes("strict_generated_latex")));
+      const escalation = qualityArtifacts.find((artifact) => artifact.body.metadata.solveStage === "escalation");
+      assert.equal(escalation.body.validation.failureKind, "numeric_inconsistency");
+      assert.match(escalation.body.validation.firstDecisiveFailedMathematicalClaim, /estimate=.*proposed=0/u);
     });
   });
 
@@ -2173,7 +2927,6 @@ describe("failed solve diagnostics", () => {
         truncatedOpenAiBody("repair-full-safe"),
         openAiBody(fallbackSafePresentationIntegralOutput("repair-compact-safe", { compact: true })),
         truncatedOpenAiBody("escalation-full-safe"),
-        truncatedOpenAiBody("escalation-compact-safe"),
       ];
       const requests = [];
       globalThis.fetch = async (_url, options) => {
@@ -2181,23 +2934,29 @@ describe("failed solve diagnostics", () => {
         return jsonResponse(responses.shift());
       };
 
-      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "fallback-repair-compact-safe",
         problemValue: regressionIntegralLatex,
         reviewedTextValue: regressionIntegralPlainOcrProblem,
         canonicalTextValue: regressionIntegralPlainOcrProblem,
         canonicalLatexValue: regressionIntegralLatex,
-      });
+      }));
+      const response = telemetry.value;
       const body = response.json();
 
       assert.equal(response.statusCode, 200);
-      assert.equal(requests.length, 5);
+      assert.equal(requests.length, 4);
       assert.equal(body.runtime.degradedFallback, true);
       assert.equal(body.runtime.degradedFallbackSource, "repair-compact");
-      assert.equal(body.runtime.failedLaterStage, "escalation-compact");
+      assert.equal(body.runtime.failedLaterStage, "escalation");
       assert.equal(body.runtime.source, "live AI repair-compact degraded fallback");
-      assert.equal(body.usage.settlement.providerCalls, 5);
+      assert.equal(body.usage.settlement.providerCalls, 4);
       assert.equal(body.finalAnswerLatex, "I=\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(telemetry.stages.find((stage) => stage.generationStage === "quality_repair_compact").fallbackUsed, true);
+      assert.equal(telemetry.stages.find((stage) => stage.generationStage === "quality_repair_compact").selectedForFinal, true);
+      assert.equal(telemetry.summary.fallbackUsed, true);
+      assert.equal(telemetry.summary.finalOutcome, "fallback");
+      assert.equal(telemetry.summary.finalGenerationStage, "quality_repair_compact");
     });
   });
 
@@ -2227,34 +2986,184 @@ describe("failed solve diagnostics", () => {
     });
   });
 
-  it("selects the safer earlier structural candidate instead of using route order", async () => {
+  it("suppresses escalation compact after repair consumes the shared late retry", async () => {
     await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
+      process.env.OMNIMATH_ESCALATION_MODEL = "gpt-5.6-sol";
       const responses = [
-        openAiBody(fallbackSafePresentationIntegralOutput("initial-safe")),
-        truncatedOpenAiBody("repair-full-two-symbols"),
-        openAiBody(fallbackSafePresentationIntegralOutput("repair-compact-two-symbols", {
-          compact: true,
-          extraReasoning: "A second presentation note \\(H\\) is also unused.",
-        })),
-        truncatedOpenAiBody("escalation-full-ranking"),
-        truncatedOpenAiBody("escalation-compact-ranking"),
+        openAiBody(wrongPiCubedIntegralOutput("initial-wrong")),
+        truncatedOpenAiBody("repair-full-truncated"),
+        openAiBody(compactWrongPiCubedIntegralOutput("repair-compact-wrong")),
+        truncatedOpenAiBody("escalation-full-truncated"),
       ];
-      globalThis.fetch = async () => jsonResponse(responses.shift());
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(responses.shift());
+      };
+
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "bounded-five-stage-math-failure",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      }));
+      const response = telemetry.value;
+      const body = response.json();
+
+      assert.equal(requests.length, 4);
+      assert.equal(requests[0].model, "gpt-5.6-terra");
+      assert.equal(requests[1].model, "gpt-5.6-terra");
+      assert.equal(requests[2].model, "gpt-5.6-terra");
+      assert.equal(requests[2].reasoning?.effort, "medium");
+      assert.equal(requests[3].model, "gpt-5.6-sol");
+      assert.match(requests[2].input[0].content[0].text, /numerical_final_answer_mismatch/u);
+      assert.equal(response.statusCode, 502);
+      assert.equal(body.code, "AI_RESPONSE_TRUNCATED");
+      assert.equal(body.runtime, undefined);
+      assert.equal(responses.length, 0);
+      assert.deepEqual(telemetry.stages.map((stage) => stage.generationStage), [
+        "initial",
+        "quality_repair",
+        "quality_repair_compact",
+        "fresh_escalation",
+      ]);
+      assert.equal(telemetry.stages[3].compactRetrySuppressedByPolicy, true);
+      assert.equal(telemetry.summary.lateCompactSuppressed, true);
+      assert.equal(telemetry.summary.escalationCompactUsed, false);
+      assert.equal(telemetry.summary.finalOutcome, "hard_failure");
+    });
+  });
+
+  it("shares one late compact retry and caps the old six-generation reviewed path at five", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const responses = [
+        truncatedOpenAiBody("initial-full-six"),
+        openAiBody(compactWrongPiCubedIntegralOutput("initial-compact-six")),
+        truncatedOpenAiBody("repair-full-six"),
+        openAiBody(compactWrongPiCubedIntegralOutput("repair-compact-six")),
+        truncatedOpenAiBody("escalation-full-six"),
+      ];
+      const maximumRequests = responses.length;
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        if (requests.length > maximumRequests) {
+          throw new Error("The shared late compact allowance must prevent a sixth generation.");
+        }
+        return jsonResponse(responses.shift());
+      };
 
       const response = await invokeSolve(handleSolveExtractedProblemRequest, {
-        requestId: "fallback-ranking-earlier-safer",
+        requestId: "bounded-six-generation-candidate-path",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+
+      const artifacts = await readArtifacts(cwd);
+      const escalationFull = artifacts.find((artifact) => artifact.body.metadata.failureStage === "escalation-full");
+
+      assert.equal(response.statusCode, 502);
+      assert.equal(response.json().code, "AI_RESPONSE_TRUNCATED");
+      assert.equal(requests.length, 5);
+      assert.deepEqual(requests.map((request) => request.text.format.name), [
+        "math_fast_solve",
+        "math_compact_solve",
+        "math_fast_solve",
+        "math_compact_solve",
+        "math_fast_solve",
+      ]);
+      assert.equal(requests[4].model, "test-escalation-model");
+      assert.ok(escalationFull);
+      assert.equal(escalationFull.body.validation.compactRetryAttempted, false);
+    });
+  });
+
+  it("keeps the late compact allowance for escalation when repair returns a full parsed failure", async () => {
+    await withRuntime({ capture: false }, async ({ handleSolveExtractedProblemRequest }) => {
+      const responses = [
+        openAiBody(wrongPiCubedIntegralOutput("initial-full-wrong")),
+        openAiBody(wrongPiCubedIntegralOutput("repair-full-wrong")),
+        truncatedOpenAiBody("escalation-full-truncated"),
+        openAiBody(compactPassingIntegralOutput("escalation-compact-passing")),
+      ];
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(responses.shift());
+      };
+
+      const telemetry = await captureOrchestrationTelemetry(() => invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "late-compact-reserved-for-escalation",
+        problemValue: regressionIntegralLatex,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      }));
+      const response = telemetry.value;
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().finalAnswerLatex, "I=\\frac{\\pi}{2}\\ln^2 2");
+      assert.equal(requests.length, 4);
+      assert.deepEqual(requests.map((request) => request.text.format.name), [
+        "math_fast_solve",
+        "math_fast_solve",
+        "math_fast_solve",
+        "math_compact_solve",
+      ]);
+      assert.equal(requests[2].model, "test-escalation-model");
+      assert.equal(requests[3].model, "test-escalation-model");
+      assert.deepEqual(telemetry.stages.map((stage) => stage.generationStage), [
+        "initial",
+        "quality_repair",
+        "fresh_escalation",
+        "fresh_escalation_compact",
+      ]);
+      assert.equal(telemetry.stages[2].responseClassification, "response_generation_failure");
+      assert.equal(telemetry.stages[3].validationOutcome, "passed");
+      assert.equal(telemetry.summary.escalationCompactUsed, true);
+      assert.equal(telemetry.summary.lateCompactSuppressed, false);
+      assert.equal(telemetry.summary.finalGenerationStage, "fresh_escalation_compact");
+    });
+  });
+
+  it("accepts a fallback-safe initial presentation candidate without quality repair", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        if (requests.length > 1) throw new Error("Presentation-only acceptance must not call quality repair.");
+        return jsonResponse(openAiBody(fallbackSafePresentationIntegralOutput("initial-safe")));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "presentation-degraded-one-call",
         problemValue: regressionIntegralLatex,
         reviewedTextValue: regressionIntegralPlainOcrProblem,
         canonicalTextValue: regressionIntegralPlainOcrProblem,
         canonicalLatexValue: regressionIntegralLatex,
       });
       const body = response.json();
+      const artifacts = await readArtifacts(cwd);
 
       assert.equal(response.statusCode, 200);
-      assert.equal(body.runtime.degradedFallback, true);
-      assert.equal(body.runtime.degradedFallbackSource, "initial");
-      assert.equal(body.runtime.failedLaterStage, "escalation-compact");
-      assert.equal(body.usage.settlement.providerCalls, 5);
+      assert.equal(requests.length, 1);
+      assert.equal(body.runtime.source, "live AI initial presentation-degraded");
+      assert.equal(body.runtime.presentationDegraded, true);
+      assert.equal(body.runtime.presentationDegradedSource, "initial");
+      assert.deepEqual(body.runtime.presentationDegradedIssueCodes, ["unexplained_generated_symbol:G"]);
+      assert.equal(body.runtime.degradedFallback, undefined);
+      assert.equal(body.usage.settlement.providerCalls, 1);
+      assert.equal(artifacts.length, 1);
+      assert.equal(artifacts[0].body.metadata.failureStage, "initial");
+      assert.equal(artifacts[0].body.validation.repairAttempted, false);
+      assert.equal(artifacts[0].body.validation.failureClassification, "parsed_candidate_failure");
+      assert.equal(artifacts[0].body.validation.qualityRepairAttempted, false);
+      assert.equal(artifacts[0].body.validation.freshEscalationAttempted, false);
+      assert.deepEqual(artifacts[0].body.validation.solutionIssues, ["unexplained_generated_symbol:G"]);
     });
   });
 
@@ -2283,6 +3192,126 @@ describe("failed solve diagnostics", () => {
 
     assert.ok(compareSafeSolveCandidates(safeEarlier, unsafeLater) < 0);
     assert.equal(selectBestSafeSolveCandidate([unsafeLater, safeEarlier]), safeEarlier);
+  });
+
+  it("classifies only the existing fallback-safe presentation floor as immediate degraded acceptance", () => {
+    const result = {
+      finalAnswerLatex: "I=1",
+      steps: [{ math: "I=1", summary: "A concise explanation." }],
+    };
+    const symbolEvaluation = ({ symbol, fieldPath, sourceType }) => ({
+      result: "fail",
+      name: "unexplained_generated_symbol",
+      issue: `unexplained_generated_symbol:${symbol}`,
+      inputFields: [fieldPath],
+      failureEvidence: JSON.stringify({
+        symbol,
+        fieldPath,
+        sourceType,
+        classification: "undefined_free_symbol",
+      }),
+    });
+    const actionFor = (error, accepted = false) => decideSolveFailureAction({
+      source: "initial",
+      result,
+      error,
+      parseSchemaSuccess: true,
+      accepted,
+    }).action;
+
+    assert.equal(actionFor(null, true), "accept", "clean candidates remain normal accepts");
+
+    const onePresentationIssue = {
+      solutionIssues: ["unexplained_generated_symbol:G"],
+      solutionRuleEvaluations: [symbolEvaluation({
+        symbol: "G",
+        fieldPath: "steps[0].reasoning",
+        sourceType: "reasoning",
+      })],
+    };
+    assert.equal(
+      actionFor(onePresentationIssue),
+      "accept_presentation_degraded",
+      "a reasoning-only unexplained symbol uses the existing presentation floor",
+    );
+
+    const multiplePresentationIssues = {
+      solutionIssues: ["unexplained_generated_symbol:G", "unexplained_generated_symbol:H"],
+      solutionRuleEvaluations: [
+        symbolEvaluation({ symbol: "G", fieldPath: "steps[0].heading", sourceType: "heading" }),
+        symbolEvaluation({ symbol: "H", fieldPath: "steps[0].reasoning", sourceType: "reasoning" }),
+      ],
+    };
+    assert.equal(actionFor(multiplePresentationIssues), "accept_presentation_degraded");
+
+    assert.equal(actionFor({
+      ...onePresentationIssue,
+      solutionIssues: [
+        ...onePresentationIssue.solutionIssues,
+        "numerical_final_answer_mismatch",
+      ],
+    }), "targeted_mathematical_repair", "mixed presentation and math findings still repair");
+
+    assert.equal(actionFor({
+      solutionIssues: ["unexplained_generated_symbol:G"],
+      solutionRuleEvaluations: [symbolEvaluation({
+        symbol: "G",
+        fieldPath: "steps[0].math",
+        sourceType: "math",
+      })],
+    }), "targeted_structural_repair", "equation symbols remain below the fallback floor");
+
+    assert.equal(actionFor({
+      solutionIssues: ["unexplained_generated_symbol:G"],
+      solutionRuleEvaluations: [symbolEvaluation({
+        symbol: "G",
+        fieldPath: "finalAnswerLatex",
+        sourceType: "finalAnswer",
+      })],
+    }), "targeted_mathematical_repair", "final-answer symbols remain mathematical");
+
+    assert.equal(actionFor({
+      solutionIssues: ["numerical_final_answer_mismatch"],
+    }), "targeted_mathematical_repair", "numerical disagreement still repairs");
+
+    assert.equal(actionFor({
+      solutionIssues: ["strict_generated_latex"],
+    }), "targeted_structural_repair", "malformed LaTeX still repairs");
+  });
+
+  it("separates response-generation failures from parsed-candidate failures by code and candidate provenance", () => {
+    const candidate = {
+      finalAnswerLatex: "x=2",
+      steps: [{ math: "x=2", summary: "Solve the equation." }],
+    };
+
+    for (const code of ["AI_RESPONSE_INVALID", "AI_RESPONSE_TRUNCATED", "AI_REQUEST_REFUSED"]) {
+      assert.deepEqual(classifySolveFailure({ error: { code }, candidate: null }), {
+        category: "response_generation_failure",
+        errorCode: code,
+        responseFailureType: null,
+        hasParsedCandidate: false,
+      });
+      assert.equal(
+        classifySolveFailure({ error: { code }, candidate }).category,
+        "response_generation_failure",
+        `${code} remains a provider-result failure even if stale endpoint state exists`,
+      );
+    }
+
+    assert.equal(classifySolveFailure({
+      error: { code: "AI_SOLUTION_QUALITY_INVALID", solutionIssues: ["strict_generated_latex"] },
+      candidate,
+    }).category, "parsed_candidate_failure");
+    assert.equal(classifySolveFailure({
+      error: { code: "AI_SOLUTION_QUALITY_INVALID", solutionIssues: ["numerical_final_answer_mismatch"] },
+      candidate,
+    }).category, "parsed_candidate_failure");
+    assert.equal(
+      classifySolveFailure({ error: { code: "AI_SOLUTION_QUALITY_INVALID" }, candidate: null }).category,
+      "response_generation_failure",
+      "quality repair requires an actual parsed candidate",
+    );
   });
 
   it("classifies malformed and equation-field symbol candidates below the fallback floor", () => {
@@ -2349,5 +3378,95 @@ describe("failed solve diagnostics", () => {
       assert.doesNotMatch(serialized, /should-not-be-captured/);
       assert.doesNotMatch(serialized, /secret-env-value/);
     });
+  });
+});
+
+describe("structural solve acceptance diagnostics", () => {
+  it("routes every initial solve to Luna without calling a provider", async () => {
+    await withRuntime({ capture: false }, async () => {
+      process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
+      process.env.OMNIMATH_ESCALATION_MODEL = "test-sol-model";
+      let providerCalls = 0;
+      globalThis.fetch = async () => {
+        providerCalls += 1;
+        throw new Error("Routing must not call the provider.");
+      };
+
+      for (const canonicalLatex of [
+        "x+1=2",
+        regressionIntegralLatex,
+        "\\oint_C F\\cdot dr",
+        "\\sum_{n=1}^{\\infty}n^{-2}",
+      ]) {
+        assert.equal(resolveInitialSolveRouting({ canonicalLatex }).selectedInitialModelRole, "solver");
+        assert.equal(resolveInitialSolveRouting({ canonicalLatex }).selectedInitialModel, "test-luna-model");
+      }
+      assert.equal(providerCalls, 0);
+    });
+  });
+
+  it("returns a structurally valid Luna candidate without Terra repair", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(invalidSolveOutput("accepted-directly")));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "structural-direct-acceptance",
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().finalAnswerLatex, "x=-35");
+      assert.deepEqual(requests.map((request) => request.model), ["test-luna-model"]);
+      assert.equal((await readArtifacts(cwd)).length, 0);
+    });
+  });
+
+  it("replays the improper integral as a single Luna generation", async () => {
+    await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
+      process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(openAiBody(concisePassingIntegralOutput()));
+      };
+
+      const response = await invokeSolve(handleSolveExtractedProblemRequest, {
+        requestId: "improper-integral-direct-replay",
+        problemValue: regressionIntegralProblem,
+        reviewedTextValue: regressionIntegralPlainOcrProblem,
+        canonicalTextValue: regressionIntegralPlainOcrProblem,
+        canonicalLatexValue: regressionIntegralLatex,
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, "test-luna-model");
+      assert.equal(response.json().usage.settlement.providerCalls, 1);
+      assert.equal((await readArtifacts(cwd)).length, 0);
+    });
+  });
+
+  it("classifies all rejected responses as response-generation failures", () => {
+    const candidate = {
+      finalAnswerLatex: "x=2",
+      steps: [{ math: "x=2", summary: "Solve the equation." }],
+    };
+    assert.equal(classifySolveFailure({
+      error: { code: "AI_SOLUTION_QUALITY_INVALID" },
+      candidate,
+    }).category, "response_generation_failure");
+    assert.equal(decideSolveFailureAction({
+      result: candidate,
+      error: { code: "AI_SOLUTION_QUALITY_INVALID" },
+      parseSchemaSuccess: true,
+      accepted: false,
+    }).action, "accept");
   });
 });

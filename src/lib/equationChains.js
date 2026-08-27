@@ -1,13 +1,31 @@
+function isLatexDelimiterCommandAt(source = "", index = 0, command = "") {
+  const token = `\\${command}`;
+  return source.startsWith(token, index)
+    && !/[A-Za-z]/.test(source[index + token.length] || "");
+}
+
 function hasTopLevelRelation(text = "") {
   let braceDepth = 0;
   let parenDepth = 0;
+  let bracketDepth = 0;
+  let leftRightDepth = 0;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
+    if (isLatexDelimiterCommandAt(text, index, "left")) leftRightDepth += 1;
+    else if (isLatexDelimiterCommandAt(text, index, "right")) leftRightDepth = Math.max(0, leftRightDepth - 1);
     if (char === "{") braceDepth += 1;
     else if (char === "}") braceDepth -= 1;
     else if (char === "(") parenDepth += 1;
     else if (char === ")") parenDepth -= 1;
-    if (braceDepth === 0 && parenDepth === 0 && /[=<>]/.test(char)) return true;
+    else if (char === "[") bracketDepth += 1;
+    else if (char === "]") bracketDepth -= 1;
+    if (
+      braceDepth === 0
+      && parenDepth === 0
+      && bracketDepth === 0
+      && leftRightDepth === 0
+      && /[=<>]/.test(char)
+    ) return true;
   }
   return false;
 }
@@ -16,13 +34,25 @@ function topLevelRelationIndexes(text = "") {
   const indexes = [];
   let braceDepth = 0;
   let parenDepth = 0;
+  let bracketDepth = 0;
+  let leftRightDepth = 0;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
+    if (isLatexDelimiterCommandAt(text, index, "left")) leftRightDepth += 1;
+    else if (isLatexDelimiterCommandAt(text, index, "right")) leftRightDepth = Math.max(0, leftRightDepth - 1);
     if (char === "{") braceDepth += 1;
     else if (char === "}") braceDepth -= 1;
     else if (char === "(") parenDepth += 1;
     else if (char === ")") parenDepth -= 1;
-    if (braceDepth === 0 && parenDepth === 0 && /[=<>]/.test(char)) indexes.push(index);
+    else if (char === "[") bracketDepth += 1;
+    else if (char === "]") bracketDepth -= 1;
+    if (
+      braceDepth === 0
+      && parenDepth === 0
+      && bracketDepth === 0
+      && leftRightDepth === 0
+      && /[=<>]/.test(char)
+    ) indexes.push(index);
   }
   return indexes;
 }
@@ -61,14 +91,26 @@ function findGluedEquationBoundary(source, relationIndex, previousStart) {
 function findEquationChainBoundary(source, relationIndex, previousStart) {
   let braceDepth = 0;
   let parenDepth = 0;
+  let bracketDepth = 0;
+  let leftRightDepth = 0;
 
   for (let index = previousStart; index < relationIndex; index += 1) {
     const char = source[index];
+    if (isLatexDelimiterCommandAt(source, index, "left")) leftRightDepth += 1;
+    else if (isLatexDelimiterCommandAt(source, index, "right")) leftRightDepth = Math.max(0, leftRightDepth - 1);
     if (char === "{") braceDepth += 1;
     else if (char === "}") braceDepth -= 1;
     else if (char === "(") parenDepth += 1;
     else if (char === ")") parenDepth -= 1;
-    if (braceDepth !== 0 || parenDepth !== 0 || !/\s/.test(char)) continue;
+    else if (char === "[") bracketDepth += 1;
+    else if (char === "]") bracketDepth -= 1;
+    if (
+      braceDepth !== 0
+      || parenDepth !== 0
+      || bracketDepth !== 0
+      || leftRightDepth !== 0
+      || !/\s/.test(char)
+    ) continue;
 
     const before = source.slice(Math.max(previousStart, index - 8), index).trim();
     const after = source.slice(index + 1, relationIndex).trim();

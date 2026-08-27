@@ -1,19 +1,26 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  auditSemanticHoverCoverage,
   chooseSemanticHit,
+  dedupeSemanticTargetsById,
   filterLeafRects,
   getTargetsIntersectingRect,
   reconstructTextFromTargets,
   isHoverEligibleTarget,
   isAggregateHoverTarget,
   isBoundaryCompatibleTextMatch,
+  localSemanticRectToViewportRect,
   medianRectHeight,
+  preserveSemanticRectFragments,
+  rectArea,
   refineDifferentialHighlightGeometry,
   resolveSemanticTarget,
   sortTargetsByRenderedOrder,
   unionSemanticRects,
+  viewportRectToLocalSemanticRect,
 } from "../src/lib/semanticHitboxes.js";
+import { buildSemanticTree, flattenSemanticTreeForTargets } from "../src/lib/mathSemanticTree.js";
 
 const rect = (left, top, width, height) => ({
   left,
@@ -25,6 +32,10 @@ const rect = (left, top, width, height) => ({
 });
 
 describe("semanticHitboxes", () => {
+  it("treats a missing pointer candidate rectangle as zero area", () => {
+    assert.equal(rectArea(null), 0);
+  });
+
   it("prefers the deepest semantic node containing the point", () => {
     const parent = { id: "parent", depth: 1, rects: [rect(0, 0, 100, 40)] };
     const child = { id: "child", depth: 3, rects: [rect(10, 5, 80, 25)] };
@@ -1667,5 +1678,147 @@ describe("semanticHitboxes", () => {
 
     assert.equal(resolveSemanticTarget({ pointer: { x: 95, y: 16 }, candidates: [parent, fragment] }).target.id, "fragment");
     assert.equal(resolveSemanticTarget({ pointer: { x: 60, y: 16 }, candidates: [parent, fragment] }).target, null);
+  });
+
+  it("preserves painted glyph fragments instead of filling mathematical spacing gaps", () => {
+    const fragments = preserveSemanticRectFragments([
+      rect(10, 10, 12, 14),
+      rect(70, 10, 14, 14),
+      rect(10, 10, 12, 14),
+    ]);
+
+    assert.equal(fragments.length, 2);
+    assert.equal(fragments.some((item) => item.left <= 22 && item.right >= 70), false);
+  });
+
+  it("deduplicates geometry by semantic id without collapsing repeated rendered text", () => {
+    const targets = dedupeSemanticTargetsById([
+      { id: "left-t", latex: "t", role: "variable", rects: [rect(10, 10, 8, 14)] },
+      { id: "right-t", latex: "t", role: "variable", rects: [rect(80, 10, 8, 14)] },
+      { id: "left-t", latex: "t", role: "variable", rects: [rect(20, 10, 8, 14)] },
+    ]);
+
+    assert.deepEqual(targets.map((target) => target.id), ["left-t", "right-t"]);
+    assert.equal(targets[0].rects.length, 2);
+    assert.equal(targets[1].rects.length, 1);
+  });
+
+  it("keeps local hitbox geometry stable when a shared horizontal scroll moves the DOM", () => {
+    const initialOrigin = rect(100, 40, 900, 52);
+    const initialRightToken = rect(820, 54, 34, 20);
+    const revealedOrigin = rect(-500, 40, 900, 52);
+    const revealedRightToken = rect(220, 54, 34, 20);
+
+    const initialLocal = viewportRectToLocalSemanticRect(initialRightToken, initialOrigin, {
+      originWidth: 900,
+      originHeight: 52,
+    });
+    const revealedLocal = viewportRectToLocalSemanticRect(revealedRightToken, revealedOrigin, {
+      originWidth: 900,
+      originHeight: 52,
+    });
+
+    assert.deepEqual(revealedLocal, initialLocal);
+    assert.deepEqual(initialLocal, rect(720, 14, 34, 20));
+  });
+
+  it("converts transformed viewport geometry without applying scroll offsets twice", () => {
+    const transformedOrigin = rect(40, 20, 1200, 80);
+    const transformedToken = rect(1000, 40, 48, 28);
+    const local = viewportRectToLocalSemanticRect(transformedToken, transformedOrigin, {
+      originWidth: 600,
+      originHeight: 40,
+    });
+
+    assert.deepEqual(local, rect(480, 10, 24, 14));
+
+    const fragments = [
+      rect(1000, 40, 18, 28),
+      rect(1030, 40, 18, 28),
+    ].map((fragment) => viewportRectToLocalSemanticRect(fragment, transformedOrigin, {
+      originWidth: 600,
+      originHeight: 40,
+    }));
+    assert.equal(preserveSemanticRectFragments(fragments).length, 2);
+  });
+
+  it("round-trips root-content geometry through horizontal and vertical scrolling", () => {
+    const initialOrigin = rect(100, 50, 1200, 80);
+    const viewportToken = rect(1060, 70, 48, 28);
+    const local = viewportRectToLocalSemanticRect(viewportToken, initialOrigin, {
+      originWidth: 600,
+      originHeight: 40,
+      scrollLeft: 35,
+      scrollTop: 4,
+    });
+    assert.deepEqual(local, rect(515, 14, 24, 14));
+
+    const translated = localSemanticRectToViewportRect(local, rect(-300, -150, 1200, 80), {
+      originWidth: 600,
+      originHeight: 40,
+      scrollLeft: 135,
+      scrollTop: 14,
+    });
+    assert.deepEqual(translated, rect(460, -150, 48, 28));
+  });
+
+  it("keeps wide offscreen targets reversible under a scaled ancestor", () => {
+    const local = rect(920, 12, 30, 16);
+    const viewport = localSemanticRectToViewportRect(local, rect(20, 30, 1500, 90), {
+      originWidth: 1000,
+      originHeight: 60,
+      scrollLeft: 600,
+      scrollTop: 0,
+    });
+    assert.deepEqual(viewport, rect(500, 48, 45, 24));
+    assert.deepEqual(viewportRectToLocalSemanticRect(viewport, rect(20, 30, 1500, 90), {
+      originWidth: 1000,
+      originHeight: 60,
+      scrollLeft: 600,
+      scrollTop: 0,
+    }), local);
+  });
+
+  it("keeps recognized function and integral tokens registered as hover targets", () => {
+    const sourceLatex = "\\tan t+\\arctan x+\\ln(\\cos t)+\\cot t+\\int_0^{\\pi/2}f(t)\\,dt";
+    const tree = buildSemanticTree({ stepId: "hover-coverage", displayLatex: sourceLatex, enabled: true });
+    const recognized = flattenSemanticTreeForTargets(tree);
+    const descriptors = recognized.filter((target) => (
+      !target.childIds?.length && isHoverEligibleTarget(target)
+    ));
+    const registered = dedupeSemanticTargetsById(descriptors.map((target, index) => ({
+      ...target,
+      rects: [rect(index * 12, 10, 9, 16)],
+      chosenDomKey: `${target.sourceRange.start}:${target.sourceRange.end}`,
+    })));
+    const audit = auditSemanticHoverCoverage({
+      stepId: tree.stepId,
+      sourceLatex: tree.displayLatex,
+      recognizedTokens: recognized,
+      descriptors,
+      registeredTargets: registered,
+      renderedTargets: registered,
+    });
+    const descriptorLatex = descriptors.map((target) => target.latex);
+
+    for (const expected of ["\\tan", "\\arctan", "\\ln", "\\cos", "\\cot", "\\int", "0", "\\pi", "2"]) {
+      assert.ok(descriptorLatex.includes(expected), `missing descriptor ${expected}: ${descriptorLatex.join(" ")}`);
+    }
+    assert.equal(audit.descriptorCount, descriptors.length);
+    assert.equal(audit.registeredNodeCount, descriptors.length);
+    assert.deepEqual(audit.unmappedTokens, []);
+    assert.deepEqual(audit.duplicateMappings, []);
+    assert.equal(audit.renderedTokenIds.length, descriptors.length);
+
+    const withoutCosine = registered.filter((target) => target.latex !== "\\cos");
+    const missingAudit = auditSemanticHoverCoverage({
+      stepId: tree.stepId,
+      sourceLatex: tree.displayLatex,
+      recognizedTokens: recognized,
+      descriptors,
+      registeredTargets: withoutCosine,
+      renderedTargets: withoutCosine,
+    });
+    assert.deepEqual(missingAudit.unmappedTokens.map((target) => target.latex), ["\\cos"]);
   });
 });

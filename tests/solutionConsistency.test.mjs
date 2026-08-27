@@ -22,6 +22,54 @@ const regressionIntegralLatex = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x
 const regressionIntegralTarget = 0.7546938294601476;
 const regressionIntegralWrongJulyValue = "2.0466220244727404";
 
+function rigorousRegressionIntegralSolution() {
+  return {
+    title: "Rigorous improper integral evaluation",
+    expression: regressionIntegralLatex,
+    problemLatex: regressionIntegralLatex,
+    finalAnswerLatex: "I=\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.754693829460248",
+    steps: [
+      {
+        id: "s1",
+        label: "Tangent substitution",
+        math: "I:=\\int_0^\\infty\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx,\\quad x=\\tan t,\\quad u=\\sin t,\\quad I=2\\int_0^{\\pi/2}t\\ln(\\sec t)\\cot t\\,dt=-\\int_0^1\\frac{\\arcsin u\\ln(1-u^2)}{u}\\,du",
+        summary: "With x=\\tan t and then u=\\sin t, the Jacobians and endpoint limits give the displayed identity.",
+      },
+      {
+        id: "s2",
+        label: "Exchange the nonnegative integrals",
+        math: "\\arcsin u=\\int_0^u\\frac{dx}{\\sqrt{1-x^2}},\\quad I=\\int_0^1\\frac{1}{\\sqrt{1-x^2}}\\left(\\int_x^1\\frac{-\\ln(1-u^2)}{u}\\,du\\right)dx",
+        summary: "The integrand is nonnegative, so Tonelli's theorem justifies exchanging the order of integration.",
+      },
+      {
+        id: "s3",
+        label: "Introduce the dilogarithm from its series definition",
+        math: "z:=u^2,\\quad\\operatorname{Li}_2(z):=\\sum_{n=1}^\\infty\\frac{z^n}{n^2},\\quad\\int_x^1\\frac{-\\ln(1-u^2)}{u}\\,du=\\frac{\\pi^2}{12}-\\frac12\\operatorname{Li}_2(x^2),\\quad J:=\\int_0^{\\pi/2}\\operatorname{Li}_2(\\sin^2 t)\\,dt,\\quad I=\\frac{\\pi^3}{24}-\\frac12J",
+        summary: "From the convergent series definition, termwise integration gives the inner integral and defines J.",
+      },
+      {
+        id: "s4",
+        label: "Verify Euler's dilogarithm identity",
+        math: "\\operatorname{Li}_2(z)+\\operatorname{Li}_2(1-z)=\\frac{\\pi^2}{6}-\\ln z\\ln(1-z),\\quad A:=\\int_0^{\\pi/2}\\ln(\\sin t)\\ln(\\cos t)\\,dt,\\quad J=\\frac{\\pi^3}{24}-2A",
+        summary: "Differentiate both sides of the identity and use the limit at z=0; then pair t with \\pi/2-t to obtain J.",
+      },
+      {
+        id: "s5",
+        label: "Differentiate the beta integral",
+        math: "a,b>0,\\quad B(a,b):=\\int_0^{\\pi/2}\\sin^{a-1}t\\cos^{b-1}t\\,dt=\\frac{\\Gamma(a/2)\\Gamma(b/2)}{2\\Gamma((a+b)/2)},\\quad A=\\left.\\frac{\\partial^2B}{\\partial a\\partial b}\\right|_{a=b=1}=\\frac{\\pi}{2}\\ln^2 2-\\frac{\\pi^3}{48}",
+        summary: "Using the identity from the beta integral definition, differentiate under the integral sign; gamma derivatives give the displayed mixed derivative.",
+      },
+      {
+        id: "s6",
+        label: "Combine the verified identities",
+        math: "I=\\frac{\\pi^3}{24}-\\frac12\\left(\\frac{\\pi^3}{24}-2A\\right)=\\frac{\\pi^3}{48}+A=\\frac{\\pi}{2}\\ln^2 2",
+        summary: "Substitution of the evaluated logarithmic integral cancels the cubic-pi terms.",
+      },
+    ],
+  };
+}
+
 function julyIntegralInvalidReplay({
   expression = regressionIntegralLatex,
   finalAnswerLatex = regressionIntegralWrongJulyValue,
@@ -608,6 +656,136 @@ test("improper-integral July replay rejects wrong numeric value and unsupported 
   assert.ok(Math.abs(report.context.numericalCrossCheckResult.numericalEstimate - regressionIntegralTarget) < 0.00031);
 });
 
+test("reverse-oriented arctangent substitution does not trigger a t provenance repair", () => {
+  const result = {
+    title: "Improper integral substitution provenance replay",
+    expression: regressionIntegralLatex,
+    problemLatex: regressionIntegralLatex,
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+    steps: [
+      { id: "s1", math: "\\arctan x=t", summary: "Introduce the tangent-substitution variable." },
+      { id: "s2", math: "1+x^2=\\sec^2 t", summary: "Rewrite the quadratic factor." },
+      { id: "s3", math: "t\\mapsto\\pi/2-t", summary: "Reflect the substitution variable." },
+      { id: "s4", math: "\\frac{\\pi}{2}\\ln^2 2", summary: "State the checked value." },
+    ],
+  };
+  const report = evaluateSolutionQualityRules(result, { problem: regressionIntegralLatex });
+
+  assert.equal(report.issues.includes("unexplained_generated_symbol:t"), false);
+  assert.equal(report.context.symbolOriginDiagnostics.explicitDefinitions.includes("t"), true);
+  assert.equal(report.context.symbolOriginDiagnostics.unexplainedSymbols.includes("t"), false);
+});
+
+test("a leading explicit Li2 series-integral definition satisfies special-function introduction", () => {
+  const result = {
+    title: "Explicit dilogarithm definition",
+    expression: regressionIntegralLatex,
+    finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+    numericCheck: "0.7546938294602481",
+    steps: [
+      {
+        id: "s1",
+        label: "Define the dilogarithm",
+        math: "\\operatorname{Li}_2(z):=\\sum_{n=1}^{\\infty}\\frac{z^n}{n^2}=-\\int_0^z\\frac{\\ln(1-u)}{u}\\,du,\\qquad 0\\le z\\le1",
+        summary: "Give the convergent series and integral definition before use.",
+      },
+      {
+        id: "s2",
+        label: "Use the definition",
+        math: "\\operatorname{Li}_2(1)=\\frac{\\pi^2}{6}",
+        summary: "Use the previously introduced notation.",
+      },
+      {
+        id: "s3",
+        label: "Final value",
+        math: "I=\\frac{\\pi}{2}\\ln^2 2",
+        summary: "State the proposed value.",
+      },
+    ],
+  };
+  const report = evaluateSolutionQualityRules(result, { problem: regressionIntegralLatex });
+
+  assert.equal(report.issues.includes("abrupt_special_function_introduction:polylogarithm"), false);
+  assert.equal(report.issues.includes("unexplained_generated_symbol:z"), false);
+  assert.equal(report.context.numericalCrossCheckResult.issue, null);
+});
+
+test("Li2 use without a prior valid explicit definition remains abrupt", () => {
+  const candidates = [
+    [
+      { id: "s1", math: "I=\\operatorname{Li}_2(1/2)", summary: "Use Li2 without defining it." },
+    ],
+    [
+      { id: "s1", math: "I=\\operatorname{Li}_2(1/2)", summary: "Use Li2 before its definition." },
+      { id: "s2", math: "\\operatorname{Li}_2(z):=\\sum_{n=1}^{\\infty}\\frac{z^n}{n^2}", summary: "Define it too late." },
+    ],
+    [
+      { id: "s1", math: "\\operatorname{Li}_2(z)=z", summary: "State an equality, not a series or integral definition." },
+    ],
+  ];
+
+  for (const steps of candidates) {
+    const report = evaluateSolutionQualityRules({
+      title: "Unsupported dilogarithm introduction",
+      expression: regressionIntegralLatex,
+      finalAnswerLatex: "\\frac{\\pi}{2}\\ln^2 2",
+      steps,
+    }, { problem: regressionIntegralLatex });
+    assert.ok(report.issues.includes("abrupt_special_function_introduction:polylogarithm"));
+  }
+});
+
+test("rigorous improper-integral derivation passes every validator rule", () => {
+  const result = rigorousRegressionIntegralSolution();
+  const report = evaluateSolutionQualityRules(result, { problem: regressionIntegralLatex });
+
+  assert.deepEqual(report.issues, [], JSON.stringify(report.context.symbolOriginDiagnostics?.fieldReports || [], null, 2));
+  assert.equal(validateSolutionQuality(result, { problem: regressionIntegralLatex }), true);
+  assert.ok(Math.abs(report.context.numericalCrossCheckResult.proposedValue - regressionIntegralTarget) < 1e-12);
+});
+
+test("beta differentiation still fails when it is not connected to the derived intermediate integral", () => {
+  const result = rigorousRegressionIntegralSolution();
+  result.steps = [
+    result.steps[0],
+    {
+      id: "s2",
+      label: "Unconnected parameter family",
+      math: "B(a,b):=\\int_0^{\\pi/2}\\sin^{a-1}t\\cos^{b-1}t\\,dt,\\quad I=\\left.\\frac{\\partial^2B}{\\partial a\\partial b}\\right|_{a=b=1}",
+      summary: "Differentiate a beta parameter family without showing that its derivative reproduces a previously derived target integral.",
+    },
+  ];
+  result.finalAnswerLatex = "I=\\frac{\\pi}{2}\\ln^2 2";
+
+  const report = evaluateSolutionQualityRules(result, { problem: regressionIntegralLatex });
+  assert.ok(report.issues.includes("unverified_critical_identity"));
+  expectValidationIssue(result, regressionIntegralLatex, "unverified_critical_identity");
+});
+
+test("correct improper-integral value does not rescue an unsupported derivation", () => {
+  const result = rigorousRegressionIntegralSolution();
+  result.steps = [
+    {
+      id: "s1",
+      label: "Unsupported parts",
+      math: "u=t,\\quad dv=\\cot t\\ln(\\cos t)\\,dt",
+      summary: "Use integration by parts without computing v.",
+    },
+    {
+      id: "s2",
+      label: "Final answer",
+      math: "I=\\frac{\\pi}{2}\\ln^2 2",
+      summary: "State the numerically correct value without a valid derivation.",
+    },
+  ];
+
+  const report = evaluateSolutionQualityRules(result, { problem: regressionIntegralLatex });
+  assert.ok(report.issues.includes("unsupported_integration_by_parts_setup"));
+  assert.equal(report.issues.includes("numerical_final_answer_mismatch"), false);
+  expectValidationIssue(result, regressionIntegralLatex, "unsupported_integration_by_parts_setup");
+});
+
 test("improper-integral exact-looking value numerically agrees with independent target", () => {
   const exactCandidate = analyzeNumericExpression("\\frac{\\pi}{2}\\ln^2 2");
 
@@ -616,6 +794,11 @@ test("improper-integral exact-looking value numerically agrees with independent 
 });
 
 test("powered-function numeric finals normalize from LaTeX function scripts", () => {
+  const compactBareLogSquare = analyzeNumericExpression("\\frac{\\pi^2}{2}\\ln^{2}2");
+  assert.equal(compactBareLogSquare.status, "evaluable");
+  assert.equal(compactBareLogSquare.normalized, "((pi^2)/((2)))(ln(2))^2");
+  assert.ok(Math.abs(compactBareLogSquare.value - (Math.PI ** 2 / 2) * Math.log(2) ** 2) < 1e-15);
+
   const bareLogSquare = analyzeNumericExpression("\\frac{\\pi}{2}\\ln^{2}(2)");
   assert.equal(bareLogSquare.status, "evaluable");
   assert.equal(bareLogSquare.normalized, "((pi)/((2)))(ln(2))^2");
@@ -635,6 +818,38 @@ test("powered-function numeric finals normalize from LaTeX function scripts", ()
   assert.equal(logCube.status, "evaluable");
   assert.equal(logCube.normalized, "(log(2))^3");
   assert.ok(Math.abs(logCube.value - Math.log(2) ** 3) < 1e-15);
+});
+
+test("safe numeric parser supports common implicit multiplication boundaries", () => {
+  const cases = [
+    ["3\\ln 2", 3 * Math.log(2)],
+    ["\\pi\\sin(\\pi/4)", Math.PI * Math.sin(Math.PI / 4)],
+    ["(1+2)(3+4)", 21],
+  ];
+  for (const [expression, expected] of cases) {
+    const analysis = analyzeNumericExpression(expression);
+    assert.equal(analysis.status, "evaluable", expression);
+    assert.ok(Math.abs(analysis.value - expected) < 1e-12, expression);
+  }
+
+  const malformedAdjacentGroup = analyzeNumericExpression("2(3");
+  assert.equal(malformedAdjacentGroup.status, "malformed");
+  assert.equal(malformedAdjacentGroup.numericIntent, true);
+});
+
+test("compact powered-log parsing still numerically rejects the live wrong exact expression", () => {
+  const finalAnswerLatex = "\\int_{0}^{\\infty}\\frac{\\ln(1+x^{2})\\arctan x}{x(1+x^{2})}\\,dx=\\frac{\\pi^{2}}{2}\\ln^{2}2+\\frac{\\pi^{3}(4-\\pi)}{48}";
+  const report = evaluateSolutionQualityRules({
+    title: "Wrong compact exact value",
+    expression: regressionIntegralLatex,
+    finalAnswerLatex,
+    steps: [{ id: "s1", label: "Final answer", math: finalAnswerLatex, summary: "State the proposed exact value." }],
+  }, { problem: regressionIntegralLatex });
+
+  assert.equal(report.context.numericFinalAnswerAnalysis.status, "evaluable");
+  assert.ok(Math.abs(report.context.numericFinalAnswerAnalysis.value - 2.9254409171584643) < 1e-12);
+  assert.equal(report.issues.includes("unsupported_numeric_final_answer_syntax"), false);
+  assert.equal(report.issues.includes("numerical_final_answer_mismatch"), true);
 });
 
 test("malformed powered functions and absent finals remain rejected", () => {

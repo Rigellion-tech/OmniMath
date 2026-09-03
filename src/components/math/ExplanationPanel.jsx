@@ -406,9 +406,16 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
   const cacheKey = item && enabled ? getLazyCacheKey(item, problem, mode, explanationLevel) : "";
   const requestIdRef = useRef(0);
   const activeRequestRef = useRef(null);
+  const requestInputsRef = useRef({ item, problem, getToken });
+  requestInputsRef.current = { item, problem, getToken };
 
   useEffect(() => {
-    if (!item || !enabled || !cacheKey) {
+    const {
+      item: requestItem,
+      problem: requestProblem,
+    } = requestInputsRef.current;
+
+    if (!requestItem || !enabled || !cacheKey) {
       activeRequestRef.current = null;
       setState((current) => reduceLazyExplanationLifecycle(current, { type: "idle" }));
       return undefined;
@@ -416,7 +423,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
 
     const cache = getMemoryCache(mode);
     const cached = cache.get(cacheKey) || readSessionCache(cacheKey);
-    if (cached && shouldApplyLazyExplanation(item, cached)) {
+    if (cached && shouldApplyLazyExplanation(requestItem, cached)) {
       cache.set(cacheKey, cached);
       logLazyExplanation(mode === "pin" ? "pin cache hit" : "cache hit", { mode, cacheKey });
       activeRequestRef.current = null;
@@ -444,26 +451,26 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
       requestId,
       cacheKey,
       mode,
-      targetId: getLazyTargetId(item),
+      targetId: getLazyTargetId(requestItem),
     });
     activeRequestRef.current = request;
     let cancelled = false;
     const controller = new AbortController();
-    const hoverFallback = mode === "pin" ? getCachedHoverFallback(item, problem) : null;
+    const hoverFallback = mode === "pin" ? getCachedHoverFallback(requestItem, requestProblem) : null;
     const debounceMs = mode === "hover" ? HOVER_DEBOUNCE_MS : 0;
     let timerId = null;
     let loadingTimerId = null;
     let stillGeneratingTimerId = null;
     let timeoutId = null;
 
-    const identity = getHoverTargetIdentity(item);
+    const identity = getHoverTargetIdentity(requestItem);
     logLazyExplanation(`${mode} requested`, {
       mode,
       cacheKey,
       requestId,
       targetId: request.targetId,
       semanticNodeId: identity.semanticId || identity.targetId || null,
-      selectedText: identity.sourceText || item?.selectedText || item?.display || "",
+      selectedText: identity.sourceText || requestItem?.selectedText || requestItem?.display || "",
       sourceRange: identity.sourceRange || null,
     });
     setState((current) => reduceLazyExplanationLifecycle(current, {
@@ -524,7 +531,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         if (cachedBeforePin) {
           pinExplanationCache.set(cacheKey, cachedBeforePin);
           logLazyExplanation("pin cache hit", { mode, cacheKey });
-          if (shouldApplyLazyExplanation(item, cachedBeforePin)) {
+          if (shouldApplyLazyExplanation(requestItem, cachedBeforePin)) {
             activeRequestRef.current = null;
             setState((current) => reduceLazyExplanationLifecycle(current, {
               type: "cache_hit",
@@ -538,15 +545,15 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
           createLazyRequest({
             cacheKey,
             mode,
-            item,
-            problem,
-            getToken,
+            item: requestItem,
+            problem: requestProblem,
+            getToken: requestInputsRef.current.getToken,
             signal: controller.signal,
             requestDescriptor: request,
             })
             .then((resolved) => {
               if (!isCurrent()) return;
-              const applies = shouldApplyLazyExplanation(item, resolved);
+              const applies = shouldApplyLazyExplanation(requestItem, resolved);
               logLazyExplanation("state update", {
                 mode,
                 cacheKey,
@@ -634,9 +641,9 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
       createLazyRequest({
         cacheKey,
         mode,
-        item,
-        problem,
-        getToken,
+        item: requestItem,
+        problem: requestProblem,
+        getToken: requestInputsRef.current.getToken,
         signal: controller.signal,
         requestDescriptor: request,
       })
@@ -651,7 +658,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
             });
             return;
           }
-          const applies = shouldApplyLazyExplanation(item, resolved);
+          const applies = shouldApplyLazyExplanation(requestItem, resolved);
           logLazyExplanation(applies ? "response-applied" : "response-discarded", {
             mode,
             cacheKey,
@@ -754,7 +761,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         pinRequestLocks.delete(cacheKey);
       }
     };
-  }, [cacheKey, enabled, explanationLevel, getToken, item, mode, problem]);
+  }, [cacheKey, enabled, explanationLevel, mode]);
 
   return state;
 }
@@ -1238,12 +1245,18 @@ export function ExplanationPopover() {
 
   if (!hoverLens) return null;
   const initialPosition = adjustedPosition || getInitialClampedTooltipPosition(hoverLens);
+  const lazyTargetId = lazyState.request?.targetId
+    || lazyState.data?.semanticId
+    || lazyState.data?.targetId
+    || null;
 
   const tooltipNode = (
     <motion.div
       ref={tooltipRef}
       data-semantic-id={identity.semanticId || identity.targetId || undefined}
       data-tooltip-semantic-id={identity.semanticId || identity.targetId || undefined}
+      data-lazy-target-id={lazyTargetId || undefined}
+      data-lazy-phase={lazyState.phase}
       data-source-range={identity.sourceRange ? `${identity.sourceRange.start}:${identity.sourceRange.end}` : undefined}
       data-tooltip-dom-instance={tooltipDomInstanceRef.current.identity}
       initial={{ opacity: 0, y: 4 }}

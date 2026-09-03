@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   auditSemanticHoverCoverage,
+  buildSemanticGapRects,
   chooseSemanticHit,
   dedupeSemanticTargetsById,
   filterLeafRects,
@@ -380,6 +381,129 @@ describe("semanticHitboxes", () => {
     assert.equal(chooseSemanticHit([split], 55, 5).id, "split");
   });
 
+  it("builds only bounded internal gaps between neighboring painted children", () => {
+    const gaps = buildSemanticGapRects([
+      rect(10, 10, 18, 16),
+      rect(34, 10, 10, 16),
+      rect(90, 10, 12, 16),
+    ], { medianHeight: 16 });
+
+    assert.deepEqual(gaps, [rect(28, 10, 6, 16)]);
+  });
+
+  it("does not assign an internal gap that is painted by a nested descendant", () => {
+    const gaps = buildSemanticGapRects([
+      rect(10, 10, 18, 16),
+      rect(34, 10, 10, 16),
+    ], {
+      medianHeight: 16,
+      occupiedRects: [
+        rect(10, 10, 18, 16),
+        rect(29, 12, 4, 12),
+        rect(34, 10, 10, 16),
+      ],
+    });
+
+    assert.deepEqual(gaps, []);
+  });
+
+  it("lets a semantic group own its cached internal gap without stealing child ink", () => {
+    const left = {
+      id: "left-number",
+      role: "constant",
+      type: "number",
+      parentId: "numerator",
+      depth: 4,
+      deterministic: true,
+      rectSource: "semantic-dom",
+      geometryQuality: "precise_leaf",
+      rects: [rect(10, 10, 18, 16)],
+      paintedRects: [rect(10, 10, 18, 16)],
+    };
+    const numerator = {
+      id: "numerator",
+      role: "numerator",
+      type: "sum",
+      childIds: [left.id, "right-op"],
+      depth: 3,
+      deterministic: true,
+      rectSource: "semantic-dom:painted-child-clusters:internal-gaps",
+      geometryQuality: "fragmented_group",
+      rects: [rect(10, 10, 18, 16), rect(28, 10, 6, 16), rect(34, 10, 10, 16)],
+      paintedRects: [rect(10, 10, 18, 16), rect(34, 10, 10, 16)],
+      gapRects: [rect(28, 10, 6, 16)],
+    };
+
+    assert.equal(resolveSemanticTarget({ pointer: { x: 20, y: 18 }, candidates: [numerator, left] }).target.id, left.id);
+    const gap = resolveSemanticTarget({ pointer: { x: 31, y: 18 }, candidates: [left, numerator] });
+    assert.equal(gap.target.id, numerator.id);
+    assert.equal(gap.candidateScores[0].gapExact, true);
+  });
+
+  it("lets an explicit group gap beat only the padded whitespace of a neighboring leaf", () => {
+    const paddedOperator = {
+      id: "plus-minus",
+      role: "operator",
+      type: "operator",
+      parentId: "numerator",
+      depth: 4,
+      deterministic: true,
+      rectSource: "semantic-dom",
+      geometryQuality: "precise_leaf",
+      rects: [rect(28, 10, 20, 16)],
+      paintedRects: [rect(34, 10, 10, 16)],
+    };
+    const numerator = {
+      id: "numerator",
+      role: "numerator",
+      type: "sum",
+      childIds: ["left-number", paddedOperator.id],
+      depth: 3,
+      deterministic: true,
+      rectSource: "semantic-dom:painted-child-clusters:internal-gaps",
+      geometryQuality: "fragmented_group",
+      rects: [rect(28, 10, 6, 16), rect(34, 10, 10, 16)],
+      paintedRects: [rect(34, 10, 10, 16)],
+      gapRects: [rect(28, 10, 6, 16)],
+    };
+
+    assert.equal(resolveSemanticTarget({ pointer: { x: 31, y: 18 }, candidates: [paddedOperator, numerator] }).target.id, numerator.id);
+    assert.equal(resolveSemanticTarget({ pointer: { x: 39, y: 18 }, candidates: [numerator, paddedOperator] }).target.id, paddedOperator.id);
+  });
+
+  it("lets an explicitly owned painted primitive beat an overlapping descendant glyph box", () => {
+    const fraction = {
+      id: "fraction",
+      role: "fraction",
+      type: "fraction",
+      childIds: ["numerator", "denominator"],
+      depth: 2,
+      deterministic: true,
+      isAggregateTarget: true,
+      rectSource: "semantic-dom:fraction-line-primitives",
+      geometryQuality: "fragmented_group",
+      rects: [rect(10, 24, 50, 2)],
+      paintedRects: [rect(10, 24, 50, 2)],
+      ownedPrimitiveRects: [rect(10, 24, 50, 2)],
+    };
+    const paddedPlus = {
+      id: "plus",
+      role: "operator",
+      type: "operator",
+      parentId: "numerator",
+      depth: 4,
+      deterministic: true,
+      rectSource: "semantic-dom",
+      geometryQuality: "precise_leaf",
+      rects: [rect(28, 10, 14, 16)],
+      paintedRects: [rect(28, 10, 14, 16)],
+    };
+
+    const result = resolveSemanticTarget({ pointer: { x: 35, y: 25 }, candidates: [paddedPlus, fraction] });
+    assert.equal(result.target.id, fraction.id);
+    assert.equal(result.candidateScores[0].ownedPrimitiveExact, true);
+  });
+
   it("keeps ambiguous tiny operators leaf-sized instead of climbing to structural parents", () => {
     const parent = { id: "sum", role: "term", depth: 2, rects: [rect(0, 0, 80, 30)] };
     const operator = { id: "plus", role: "operator", parentId: "sum", depth: 4, rects: [rect(38, 12, 2, 6)] };
@@ -469,7 +593,7 @@ describe("semanticHitboxes", () => {
     assert.equal(chooseSemanticHit(targets, 78, 44, integral).id, "sin");
   });
 
-  it("keeps a bound expression selectable over internal fraction leaves", () => {
+  it("keeps painted descendants reachable inside a bound expression", () => {
     const upper = {
       id: "upper-bound",
       role: "upperBound",
@@ -506,7 +630,7 @@ describe("semanticHitboxes", () => {
     assert.equal(resolveSemanticTarget({
       pointer: { x: 38, y: 7 },
       candidates: [upper, numerator, denominator],
-    }).target.id, "upper-bound");
+    }).target.id, "upper-numerator");
   });
 
   it("builds aggregate rectangles from descendant rectangles", () => {
@@ -1215,6 +1339,37 @@ describe("semanticHitboxes", () => {
     }).target.id, "dtheta");
   });
 
+  it("keeps the variable leaf reachable inside a compound differential", () => {
+    const differential = {
+      id: "dtheta",
+      role: "differential",
+      type: "differential",
+      latex: "d\\theta",
+      depth: 3,
+      childIds: ["d", "theta"],
+      deterministic: true,
+      rectSource: "semantic-dom:differential-child-leaf-fragments",
+      geometryQuality: "fragmented_group",
+      rects: [rect(10, 10, 10, 16), rect(22, 10, 14, 16)],
+      paintedRects: [rect(10, 10, 10, 16), rect(22, 10, 14, 16)],
+    };
+    const theta = {
+      id: "theta",
+      role: "variable",
+      type: "symbol",
+      latex: "\\theta",
+      depth: 4,
+      parentId: "dtheta",
+      deterministic: true,
+      rectSource: "semantic-dom",
+      geometryQuality: "precise_leaf",
+      rects: [rect(22, 10, 14, 16)],
+      paintedRects: [rect(22, 10, 14, 16)],
+    };
+
+    assert.equal(resolveSemanticTarget({ pointer: { x: 28, y: 18 }, candidates: [differential, theta] }).target.id, theta.id);
+  });
+
   it("selects differential targets only inside glyph-tight bounds", () => {
     const dt = {
       id: "dt",
@@ -1383,9 +1538,9 @@ describe("semanticHitboxes", () => {
     });
 
     assert.equal(refined.id, "integral-dt");
-    assert.equal(refined.rects.length, 1);
-    assert.deepEqual(refined.rects[0], rect(194, 13, 16, 15));
-    assert.match(refined.visualRectSource, /differential-child-leaf-union/);
+    assert.equal(refined.rects.length, 2);
+    assert.deepEqual(refined.rects, [rect(194, 13, 8, 15), rect(203, 13, 7, 15)]);
+    assert.match(refined.visualRectSource, /differential-child-leaf-fragments/);
   });
 
   it("refines a multi-character differential variable without collapsing to only d", () => {
@@ -1405,7 +1560,7 @@ describe("semanticHitboxes", () => {
     });
 
     assert.equal(refined.id, "dtheta");
-    assert.deepEqual(refined.rects[0], rect(142, 23, 33, 16));
+    assert.deepEqual(refined.rects, [rect(142, 23, 8, 16), rect(151, 23, 24, 16)]);
   });
 
   it("keeps nested fraction/integral differential geometry out of the integrand", () => {
@@ -1426,7 +1581,7 @@ describe("semanticHitboxes", () => {
     });
 
     assert.equal(refined.id, "nested-dt");
-    assert.deepEqual(refined.rects[0], rect(232, 42, 16, 16));
+    assert.deepEqual(refined.rects, [rect(232, 42, 8, 16), rect(241, 42, 7, 16)]);
     assert.equal(refined.rects[0].left > integrand.right, true);
   });
 
@@ -1459,8 +1614,8 @@ describe("semanticHitboxes", () => {
 
     assert.equal(firstRefined.id, "first-dt");
     assert.equal(secondRefined.id, "second-dt");
-    assert.deepEqual(firstRefined.rects[0], rect(84, 12, 16, 15));
-    assert.deepEqual(secondRefined.rects[0], rect(211, 12, 16, 15));
+    assert.deepEqual(firstRefined.rects, [rect(84, 12, 8, 15), rect(93, 12, 7, 15)]);
+    assert.deepEqual(secondRefined.rects, [rect(211, 12, 8, 15), rect(220, 12, 7, 15)]);
   });
 
   it("falls back to filtered text-range geometry before using an oversized differential aggregate", () => {

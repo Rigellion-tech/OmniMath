@@ -104,6 +104,39 @@ export function preserveSemanticRectFragments(rects = []) {
     .sort((left, right) => left.top - right.top || left.left - right.left || rectArea(left) - rectArea(right));
 }
 
+/**
+ * Build only the whitespace corridors between neighboring painted children.
+ * These rectangles make a meaningful compound target reachable without
+ * stretching its hitbox across unrelated whitespace or descendant ink.
+ */
+export function buildSemanticGapRects(rects = [], options = {}) {
+  const children = preserveSemanticRectFragments(rects);
+  const occupiedRects = preserveSemanticRectFragments(options.occupiedRects || children);
+  const medianHeight = Number(options.medianHeight) || medianRectHeight(children) || 18;
+  const maxGap = Number(options.maxGap) || Math.max(4, medianHeight);
+  const gaps = [];
+
+  for (let leftIndex = 0; leftIndex < children.length; leftIndex += 1) {
+    const left = children[leftIndex];
+    for (let rightIndex = 0; rightIndex < children.length; rightIndex += 1) {
+      if (leftIndex === rightIndex) continue;
+      const right = children[rightIndex];
+      const width = right.left - left.right;
+      if (width <= 0 || width > maxGap) continue;
+      const top = Math.max(left.top, right.top);
+      const bottom = Math.min(left.bottom, right.bottom);
+      const overlapHeight = bottom - top;
+      if (overlapHeight < Math.min(left.height, right.height) * 0.4) continue;
+      const gap = normalizeSemanticRect({ left: left.right, right: right.left, top, bottom });
+      if (!gap) continue;
+      const occupied = occupiedRects.some((child) => rectIntersectsRect(child, gap));
+      if (!occupied) gaps.push(gap);
+    }
+  }
+
+  return preserveSemanticRectFragments(gaps);
+}
+
 export function dedupeSemanticTargetsById(targets = []) {
   const byId = new Map();
   for (const target of targets.filter(Boolean)) {
@@ -115,6 +148,8 @@ export function dedupeSemanticTargetsById(targets = []) {
         ...target,
         rects: preserveSemanticRectFragments(target.rects || []),
         paintedRects: preserveSemanticRectFragments(target.paintedRects || []),
+        gapRects: preserveSemanticRectFragments(target.gapRects || []),
+        ownedPrimitiveRects: preserveSemanticRectFragments(target.ownedPrimitiveRects || []),
       });
       continue;
     }
@@ -124,6 +159,8 @@ export function dedupeSemanticTargetsById(targets = []) {
       id,
       rects: preserveSemanticRectFragments([...(current.rects || []), ...(target.rects || [])]),
       paintedRects: preserveSemanticRectFragments([...(current.paintedRects || []), ...(target.paintedRects || [])]),
+      gapRects: preserveSemanticRectFragments([...(current.gapRects || []), ...(target.gapRects || [])]),
+      ownedPrimitiveRects: preserveSemanticRectFragments([...(current.ownedPrimitiveRects || []), ...(target.ownedPrimitiveRects || [])]),
     });
   }
   return [...byId.values()];
@@ -355,6 +392,8 @@ function candidateHits(targets = [], x, y) {
             targetIndex,
             rectIndex,
             paintedExact: paintedRects.some((paintedRect) => rectContainsPoint(paintedRect, x, y)),
+            gapExact: (target.gapRects || []).some((gapRect) => rectContainsPoint(gapRect, x, y)),
+            ownedPrimitiveExact: (target.ownedPrimitiveRects || []).some((primitiveRect) => rectContainsPoint(primitiveRect, x, y)),
             paintedDistance,
           };
         })
@@ -379,6 +418,7 @@ function isExplicitAggregateHoverTarget(target = {}) {
   return Boolean(target.isAggregateTarget || target.aggregate)
     || source.includes("aggregate")
     || source.includes("child-union")
+    || source.includes("internal-gaps")
     || source.includes("annotated");
 }
 
@@ -480,6 +520,7 @@ function isRejectedGhostHit(hit = {}) {
     return true;
   }
   if (!isBroadGeometryTarget(target)) return false;
+  if (hit.gapExact) return false;
   if (hit.paintedExact) return false;
   if (Number(hit.paintedDistance) <= GHOST_HIT_DISTANCE_PX) return false;
   hit.rejectionReason = "broad-aggregate-pointer-not-on-painted-descendant";
@@ -499,8 +540,7 @@ function isDifferentialOperatorChildOf(child = {}, parent = {}) {
 
 function compareDeterministicCandidates(left, right) {
   return (
-    Number(isPreferredAggregateHoverTarget(right.target)) - Number(isPreferredAggregateHoverTarget(left.target))
-    || Number(isDifferentialOperatorChildOf(left.target, right.target)) - Number(isDifferentialOperatorChildOf(right.target, left.target))
+    Number(isDifferentialOperatorChildOf(left.target, right.target)) - Number(isDifferentialOperatorChildOf(right.target, left.target))
     || Number(right.paintedExact) - Number(left.paintedExact)
     || geometryQualityRank(right.target) - geometryQualityRank(left.target)
     || left.paintedDistance - right.paintedDistance
@@ -656,7 +696,12 @@ export function refineDifferentialHighlightGeometry(target = {}, options = {}) {
     const source = aggregateMuchWider
       ? `${baseSource}:differential-child-leaf-union-wide-aggregate`
       : `${baseSource}:differential-child-leaf-union`;
-    return annotateRefinedDifferentialTarget(target, [childUnion], source, aggregateUnion);
+    return annotateRefinedDifferentialTarget(
+      target,
+      preserveSemanticRectFragments(childRects),
+      source.replace("child-leaf-union", "child-leaf-fragments"),
+      aggregateUnion
+    );
   }
 
   if (textUnion && isConservativeDifferentialRect(textUnion, target, geometryOptions)) {
@@ -754,6 +799,8 @@ function semanticScore(hit, pointer = {}, currentTarget = null, options = {}) {
   const exact = rectContainsPoint(hit.rect, pointer.x, pointer.y);
   const distance = rectCenterDistance(hit.rect, pointer.x, pointer.y);
   const paintedExact = Boolean(hit.paintedExact);
+  const gapExact = Boolean(hit.gapExact);
+  const ownedPrimitiveExact = Boolean(hit.ownedPrimitiveExact);
   const paintedDistance = Number.isFinite(Number(hit.paintedDistance)) ? Number(hit.paintedDistance) : distance;
   const qualityRank = geometryQualityRank(target);
   const currentBonus = currentTarget?.id && currentTarget.id === target.id ? 7 : 0;
@@ -775,6 +822,8 @@ function semanticScore(hit, pointer = {}, currentTarget = null, options = {}) {
     area,
     distance,
     paintedExact,
+    gapExact,
+    ownedPrimitiveExact,
     paintedDistance,
     geometryQuality: geometryQuality(target),
     geometryQualityRank: qualityRank,
@@ -1004,8 +1053,18 @@ export function resolveSemanticTarget({
       .filter((hit) => !isImpreciseLeafOverlayHit(hit, deterministicHits));
     const deterministicLeafHits = preciseDeterministicHits.filter(({ target }) => (
       (isLeafSemanticTarget(target) && isHoverEligibleTarget(target))
-      || isPreferredAggregateHoverTarget(target)
       || isDifferentialHoverTarget(target)
+    ));
+    const deterministicPaintedLeafHits = deterministicLeafHits.filter((hit) => hit.paintedExact);
+    const deterministicOwnedPrimitiveHits = preciseDeterministicHits.filter((hit) => (
+      hit.ownedPrimitiveExact
+      && isAggregateHoverTarget(hit.target)
+      && isExplicitAggregateHoverTarget(hit.target)
+    ));
+    const deterministicOwnedGapHits = preciseDeterministicHits.filter((hit) => (
+      hit.gapExact
+      && isAggregateHoverTarget(hit.target)
+      && isExplicitAggregateHoverTarget(hit.target)
     ));
     const deterministicEligibleHits = preciseDeterministicHits.filter(({ target }) => (
       options.includeStructural
@@ -1017,8 +1076,14 @@ export function resolveSemanticTarget({
       isAggregateRescueForImpreciseLeaf(hit, deterministicHits)
     ));
     const deterministicPool = (
-      deterministicLeafHits.length > 0
-        ? deterministicLeafHits
+      deterministicOwnedPrimitiveHits.length > 0
+        ? deterministicOwnedPrimitiveHits
+        : deterministicPaintedLeafHits.length > 0
+          ? deterministicPaintedLeafHits
+        : deterministicOwnedGapHits.length > 0
+          ? deterministicOwnedGapHits
+          : deterministicLeafHits.length > 0
+            ? deterministicLeafHits
         : deterministicEligibleHits.length > 0
           ? deterministicEligibleHits
           : deterministicRescueHits.length > 0
@@ -1040,18 +1105,18 @@ export function resolveSemanticTarget({
     const deterministicMinusOperatorHit = deterministicPool
       .filter(({ target }) => isMinusOperatorTarget(target))
       .sort((left, right) => rectArea(left.rect) - rectArea(right.rect))[0];
-    if (shouldPreferStandaloneMinus(deterministicMinusOperatorHit, deterministicNegativeNumberHit)) {
-      return {
-        target: deterministicMinusOperatorHit.target,
-        candidateScores: [semanticScore(deterministicMinusOperatorHit, { x, y }, currentTarget, { ...options, interactionMode })],
-        reason: "deterministic-standalone-minus",
-      };
-    }
     if (shouldPreferSignedNumberBody(deterministicNegativeNumberHit, deterministicMinusOperatorHit, { x, y })) {
       return {
         target: deterministicNegativeNumberHit.target,
         candidateScores: [semanticScore(deterministicNegativeNumberHit, { x, y }, currentTarget, { ...options, interactionMode })],
         reason: "deterministic-negative-number-body",
+      };
+    }
+    if (shouldPreferStandaloneMinus(deterministicMinusOperatorHit, deterministicNegativeNumberHit)) {
+      return {
+        target: deterministicMinusOperatorHit.target,
+        candidateScores: [semanticScore(deterministicMinusOperatorHit, { x, y }, currentTarget, { ...options, interactionMode })],
+        reason: "deterministic-standalone-minus",
       };
     }
     const scoredHits = deterministicPool
@@ -1069,7 +1134,6 @@ export function resolveSemanticTarget({
   const leafHits = allHits
     .filter(({ target }) => (
       (isLeafSemanticTarget(target) && isHoverEligibleTarget(target))
-      || isPreferredAggregateHoverTarget(target)
       || isDifferentialHoverTarget(target)
     ))
     .filter((hit) => preciseAllHits.includes(hit))

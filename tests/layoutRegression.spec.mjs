@@ -4,7 +4,7 @@ import { deflateSync } from "node:zlib";
 import katex from "katex";
 import { annotateMathExplanation } from "../src/lib/mathAnnotator.js";
 import { buildSemanticTree } from "../src/lib/mathSemanticTree.js";
-import { createSemanticKatexTrust, serializeSemanticTreeToLatex } from "../src/lib/semanticMathRenderer.js";
+import { classifySemanticNodeInteraction, createSemanticKatexTrust, serializeSemanticTreeToLatex } from "../src/lib/semanticMathRenderer.js";
 import { createLocalRuleExplanation } from "../server/localRules.js";
 
 const ARTIFACT_DIR = "test-artifacts/layout-regression";
@@ -29,6 +29,11 @@ const LOW_CONFIDENCE_OCR_TEXT = [
 ].join(" ");
 
 const LONG_VECTOR_FIELD_LATEX = "\\mathbf{F}(x,y,z)=\\langle y^2z+e^{x^2}\\sin(yz), x^3+\\ln(1+z^2)+\\frac{\\cos(xy)}{1+x^2+y^2}, xye^{-z^2}+\\arctan(x-y)\\rangle";
+const EVALUATION_GAMMA_LATEX = "A=\\left.\\frac{\\partial^2}{\\partial a\\,\\partial b}\\frac{\\Gamma(a/2)\\Gamma(b/2)}{2\\Gamma((a+b)/2)}\\right|_{a=b=1}";
+const FUNCTION_OWNERSHIP_LATEX = "\\frac{\\Gamma(a/2)\\Gamma(b/2)+\\zeta(s)+\\sin(x)+\\sin(\\cos(t))}{\\cos(x)+\\ln(x)+\\operatorname{Li}(x)}";
+const SIGNED_FRACTION_LATEX = "J=-\\frac{B}{2}+\\frac{\\pi A}{4}";
+const COMPLETE_CLAUSE_LATEX = "x = \\tan t,\\quad t \\in [0,\\pi/2),\\quad I=-2J,\\quad J:=\\int_0^{\\pi/2} t\\ln(\\cos t)\\cot t\\,dt";
+const LEADING_FRACTION_SUM_LATEX = "-\\frac14\\sum_{n=1}^{\\infty}\\frac{1}{n^2}=-\\frac{\\pi^2}{24}";
 
 const LONG_STOKES_PROBLEM = [
   "Use Stokes' theorem for the upward oriented paraboloid cap.",
@@ -584,6 +589,81 @@ async function installLocalSemanticLayerFixture(page, { lazyRequests = [], longL
             medium: "Function",
             deep: "Function",
           }],
+        }, {
+          id: "local-semantic-function-ownership-step",
+          label: "Named function ownership fixture",
+          math: FUNCTION_OWNERSHIP_LATEX,
+          summary: "Function heads must retain identities distinct from their arguments inside nested fractions.",
+          chunks: [{
+            id: "local-semantic-function-ownership-chunk",
+            display: FUNCTION_OWNERSHIP_LATEX,
+            latex: FUNCTION_OWNERSHIP_LATEX,
+            text: FUNCTION_OWNERSHIP_LATEX,
+            role: "fraction",
+            short: "Named functions",
+            medium: "Named functions",
+            deep: "Named functions",
+          }],
+        }, {
+          id: "local-semantic-signed-fraction-step",
+          label: "Signed fraction unary fixture",
+          math: SIGNED_FRACTION_LATEX,
+          summary: "A leading unary sign must preserve independent numerator and denominator hitboxes.",
+          chunks: [{
+            id: "local-semantic-signed-fraction-chunk",
+            display: SIGNED_FRACTION_LATEX,
+            latex: SIGNED_FRACTION_LATEX,
+            text: SIGNED_FRACTION_LATEX,
+            role: "equation",
+            short: "Signed fraction",
+            medium: "Signed fraction",
+            deep: "Signed fraction",
+          }],
+        }, {
+          id: "local-semantic-evaluation-step",
+          label: "Evaluation wrapper Gamma fixture",
+          math: EVALUATION_GAMMA_LATEX,
+          summary: "Evaluation notation must retain granular semantic hitboxes for every inner function and operand.",
+          chunks: [{
+            id: "local-semantic-evaluation-chunk",
+            display: EVALUATION_GAMMA_LATEX,
+            latex: EVALUATION_GAMMA_LATEX,
+            text: EVALUATION_GAMMA_LATEX,
+            role: "evaluation",
+            short: "Evaluated derivative",
+            medium: "Evaluated derivative",
+            deep: "Evaluated derivative",
+          }],
+        }, {
+          id: "local-semantic-complete-clause-step",
+          label: "Complete multi-clause coverage fixture",
+          math: COMPLETE_CLAUSE_LATEX,
+          summary: "Every clause in one display must retain authoritative semantic hover ownership.",
+          chunks: [{
+            id: "local-semantic-complete-clause-chunk",
+            display: COMPLETE_CLAUSE_LATEX,
+            latex: COMPLETE_CLAUSE_LATEX,
+            text: COMPLETE_CLAUSE_LATEX,
+            role: "expression",
+            short: "Complete clauses",
+            medium: "Complete clauses",
+            deep: "Complete clauses",
+          }],
+        }, {
+          id: "local-semantic-leading-fraction-sum-step",
+          label: "Leading fraction and large operator fixture",
+          math: LEADING_FRACTION_SUM_LATEX,
+          summary: "A shorthand fraction next to a large operator must retain numerator and denominator ownership.",
+          chunks: [{
+            id: "local-semantic-leading-fraction-sum-chunk",
+            display: LEADING_FRACTION_SUM_LATEX,
+            latex: LEADING_FRACTION_SUM_LATEX,
+            text: LEADING_FRACTION_SUM_LATEX,
+            role: "equation",
+            short: "Fraction and sum",
+            medium: "Fraction and sum",
+            deep: "Fraction and sum",
+          }],
         }],
         finalAnswerLatex: "67",
         usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 7, remaining: 43, limit: 50 },
@@ -735,7 +815,17 @@ async function assertLayoutIntegrity(page, { checkHover = false } = {}) {
   expect(errors).toEqual([]);
 }
 
+async function settleSemanticScroll(page) {
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      window.__OMNIMATH_SCROLL_COORDINATOR__?.flush?.();
+      resolve();
+    });
+  }));
+}
+
 async function moveSemanticPointer(page, x, y) {
+  await settleSemanticScroll(page);
   await page.mouse.move(x, y, { steps: 1 });
   const delivered = await page.evaluate(({ x, y }) => {
     const element = document.elementFromPoint(x, y);
@@ -995,6 +1085,241 @@ test("local semantic layer creates subtoken targets without solver annotations",
   await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "pin").at(-1)?.body?.selectedLatex).toBe("x");
 });
 
+test("evaluation wrappers preserve reachable granular Gamma hitboxes", async ({ page }) => {
+  const lazyRequests = [];
+  await installLocalSemanticLayerFixture(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect evaluation wrapper hitboxes.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const tree = buildSemanticTree({
+    stepId: "browser-evaluation-fixture",
+    displayLatex: EVALUATION_GAMMA_LATEX,
+    enabled: true,
+  });
+  const gammaFraction = tree.flatNodes.find((node) => (
+    node.type === "fraction"
+    && node.latex.includes("\\Gamma(a/2)")
+  ));
+  const condition = tree.flatNodes.find((node) => node.role === "evaluationCondition");
+  const expectedLeaves = tree.flatNodes.filter((node) => {
+    if (node.childIds.length > 0 || ["delimiter", "evaluationBar"].includes(node.role)) return false;
+    if (tree.displayLatex.slice(node.sourceRange.start, node.sourceRange.end) !== node.latex) return false;
+    const insideGammaFraction = node.sourceRange.start >= gammaFraction.sourceRange.start
+      && node.sourceRange.end <= gammaFraction.sourceRange.end;
+    const insideCondition = node.sourceRange.start >= condition.sourceRange.start
+      && node.sourceRange.end <= condition.sourceRange.end;
+    return insideGammaFraction || insideCondition;
+  });
+
+  const step = page.locator(".step-card").filter({ hasText: "Evaluation wrapper Gamma fixture" });
+  await expect(step).toBeVisible();
+  await expect.poll(async () => step.locator(".math-semantic-hitbox[data-target-kind='leaf']").count())
+    .toBeGreaterThanOrEqual(expectedLeaves.length);
+
+  for (const expected of expectedLeaves) {
+    const target = step.locator(
+      `.math-semantic-hitbox[data-target-kind='leaf'][data-source-range="${expected.sourceRange.start}:${expected.sourceRange.end}"]`
+    ).first();
+    await expect(target, `missing reachable hitbox for ${expected.id}`).toBeVisible();
+    await expect(target).toHaveAttribute("data-token-latex", expected.latex);
+    await expect(target).toHaveAttribute("data-geometry-valid", "true");
+    const box = await target.boundingBox();
+    expect(box, `missing geometry for ${expected.id}`).not.toBeNull();
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    const semanticId = await target.getAttribute("data-semantic-id");
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", semanticId);
+  }
+
+  const gammaIds = await step.locator(".math-semantic-hitbox[data-target-kind='leaf']").evaluateAll((nodes) =>
+    nodes
+      .filter((node) => node.getAttribute("data-token-latex") === "\\Gamma")
+      .map((node) => node.getAttribute("data-semantic-id")),
+  );
+  expect(gammaIds).toHaveLength(3);
+  expect(new Set(gammaIds).size).toBe(3);
+});
+
+test("render-time semantic ownership keeps named function heads distinct from arguments", async ({ page }) => {
+  await installLocalSemanticLayerFixture(page);
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect named function ownership.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const stepId = "local-semantic-function-ownership-step";
+  const chunkId = "local-semantic-function-ownership-chunk";
+  const tree = buildSemanticTree({
+    stepId: `${chunkId}-${stepId}`,
+    displayLatex: FUNCTION_OWNERSHIP_LATEX,
+    enabled: true,
+  });
+  const expectedVisibleHeads = ["Γ", "Γ", "ζ", "sin", "sin", "cos", "cos", "ln", "Li"];
+  const functionHeads = tree.flatNodes.filter((node) => node.role === "functionName");
+  const step = page.locator(".step-card").filter({ hasText: "Named function ownership fixture" });
+
+  await expect(step).toBeVisible();
+  expect(functionHeads).toHaveLength(expectedVisibleHeads.length);
+
+  const semanticLeafIds = tree.flatNodes
+    .filter((node) => !Array.isArray(node.childIds) || node.childIds.length === 0)
+    .map((node) => node.id);
+  const contaminatedLeafOwners = await step.evaluate((stepElement, leafIds) => {
+    const contamination = [];
+    for (const leafId of leafIds) {
+      for (const owner of stepElement.querySelectorAll(`[data-semantic-id="${CSS.escape(leafId)}"]`)) {
+        const unrelatedDescendant = [...owner.querySelectorAll("[data-semantic-id]")]
+          .find((descendant) => descendant.getAttribute("data-semantic-id") !== leafId);
+        if (unrelatedDescendant) {
+          contamination.push({
+            leafId,
+            descendantId: unrelatedDescendant.getAttribute("data-semantic-id"),
+          });
+        }
+      }
+    }
+    return contamination;
+  }, semanticLeafIds);
+  expect(contaminatedLeafOwners).toEqual([]);
+
+  for (const [index, head] of functionHeads.entries()) {
+    const call = tree.nodeMap[head.parentId];
+    const argument = tree.nodeMap[call.childIds.find((id) => tree.nodeMap[id]?.role === "argument")];
+    const visibleHead = expectedVisibleHeads[index];
+    const owner = step.locator(`.katex-html [data-semantic-id="${head.id}"]`).first();
+
+    expect(argument?.id, `missing argument for ${head.latex}`).toBeTruthy();
+    expect(head.id).not.toBe(argument.id);
+    await expect(owner, `missing authoritative DOM owner for ${head.latex}`).toBeVisible();
+    await expect(owner).toHaveText(visibleHead);
+    await expect(owner).toHaveAttribute("data-semantic-role", "functionName");
+
+    const argumentOwnsHead = await step.locator(`.katex-html [data-semantic-id="${argument.id}"]`).evaluateAll(
+      (nodes, expectedText) => nodes.some((node) => (node.textContent || "").includes(expectedText)),
+      visibleHead,
+    );
+    expect(argumentOwnsHead, `${head.latex} must not inherit its argument identity`).toBe(false);
+
+    const box = await owner.evaluate((element) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      const rects = [];
+      let textNode = walker.nextNode();
+      while (textNode) {
+        if ((textNode.textContent || "").trim()) {
+          const range = document.createRange();
+          range.selectNodeContents(textNode);
+          rects.push(...Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0));
+        }
+        textNode = walker.nextNode();
+      }
+      if (rects.length === 0) return null;
+      const left = Math.min(...rects.map((rect) => rect.left));
+      const top = Math.min(...rects.map((rect) => rect.top));
+      const right = Math.max(...rects.map((rect) => rect.right));
+      const bottom = Math.max(...rects.map((rect) => rect.bottom));
+      return { x: left, y: top, width: right - left, height: bottom - top };
+    });
+    expect(box, `missing visible head geometry for ${head.latex}`).not.toBeNull();
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", head.id);
+    await expect(step.locator(`.math-semantic-hitbox[data-semantic-id="${head.id}"]`).first()).toBeVisible();
+  }
+});
+
+test("leading unary fractions preserve pointer-reachable numerator and denominator hitboxes", async ({ page }) => {
+  const lazyRequests = [];
+  await installLocalSemanticLayerFixture(page, { lazyRequests });
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect signed fraction hitboxes.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const step = page.locator(".step-card").filter({ hasText: "Signed fraction unary fixture" });
+  await expect(step).toBeVisible();
+
+  for (const expected of [
+    { latex: "B", range: "9:10" },
+    { latex: "2", range: "12:13" },
+  ]) {
+    const target = step.locator(
+      `.math-semantic-hitbox[data-target-kind='leaf'][data-source-range="${expected.range}"][data-token-latex="${expected.latex}"]`,
+    ).first();
+    await expect(target).toBeVisible();
+    await expect(target).toHaveAttribute("data-geometry-valid", "true");
+    await target.scrollIntoViewIfNeeded();
+    const semanticId = await target.getAttribute("data-semantic-id");
+    const box = await target.boundingBox();
+    expect(box, `missing geometry for ${expected.latex}`).not.toBeNull();
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await moveSemanticPointer(page, center.x, center.y);
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", semanticId);
+  }
+});
+
+test("complete clauses and shorthand fractions have no silent interactive hover gaps", async ({ page }) => {
+  await installLocalSemanticLayerFixture(page);
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Audit complete semantic hover coverage.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+
+  const fixtures = [
+    {
+      label: "Complete multi-clause coverage fixture",
+      stepId: "local-semantic-complete-clause-step",
+      chunkId: "local-semantic-complete-clause-chunk",
+      latex: COMPLETE_CLAUSE_LATEX,
+    },
+    {
+      label: "Leading fraction and large operator fixture",
+      stepId: "local-semantic-leading-fraction-sum-step",
+      chunkId: "local-semantic-leading-fraction-sum-chunk",
+      latex: LEADING_FRACTION_SUM_LATEX,
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const step = page.locator(".step-card").filter({
+      has: page.locator(`[data-token-id="${fixture.chunkId}"]`),
+    });
+    await expect(step).toBeVisible();
+    const renderedLatex = await step.locator(`[data-token-id="${fixture.chunkId}"]`).getAttribute("data-token-latex");
+    const tree = buildSemanticTree({
+      stepId: `${fixture.chunkId}-${fixture.stepId}`,
+      displayLatex: renderedLatex,
+      enabled: true,
+    });
+    const interactiveLeaves = tree.flatNodes.filter((node) => (
+      classifySemanticNodeInteraction(node, tree.displayLatex).interactive
+    ));
+    await expect.poll(() => step.locator(".math-semantic-hitbox[data-target-kind='leaf']").count())
+      .toBeGreaterThanOrEqual(interactiveLeaves.length);
+
+    for (const [leafIndex, leaf] of interactiveLeaves.entries()) {
+      const hitbox = step.locator(`.math-semantic-hitbox[data-semantic-id="${leaf.id}"]`).first();
+      const owner = step.locator(`.katex-html [data-semantic-id="${leaf.id}"]`).first();
+      await expect(hitbox, `missing reachable hitbox for ${leaf.id}`).toBeVisible();
+      await expect(hitbox).toHaveAttribute("data-geometry-valid", "true");
+      await expect(owner, `missing authoritative DOM annotation for ${leaf.id}`).toBeVisible();
+      const pointerEvents = await hitbox.evaluate((element) => (
+        getComputedStyle(element.closest("[data-math-chunk-owner]")).pointerEvents
+      ));
+      expect(pointerEvents, `${leaf.id} has no interactive chunk owner`).not.toBe("none");
+      const box = await hitbox.boundingBox();
+      expect(box, `missing measured geometry for ${leaf.id}`).not.toBeNull();
+      expect(box.width).toBeGreaterThan(0);
+      expect(box.height).toBeGreaterThan(0);
+      if (leafIndex === 0 || leafIndex === interactiveLeaves.length - 1) {
+        await hitbox.scrollIntoViewIfNeeded();
+        const currentBox = await hitbox.boundingBox();
+        await moveSemanticPointer(page, currentBox.x + currentBox.width / 2, currentBox.y + currentBox.height / 2);
+        await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", leaf.id);
+      }
+    }
+  }
+});
+
 test("quick tooltip owns hover across portal insertion and stale source clears", async ({ page }) => {
   const lazyRequests = [];
   await installLocalSemanticLayerFixture(page, {
@@ -1190,7 +1515,7 @@ test("debug hover performance counters prove pointer movement uses cached semant
   expect(overlayPointerEvents.length).toBeGreaterThan(0);
   expect(overlayPointerEvents.every((value) => value === "none")).toBe(true);
 
-  await page.evaluate(() => {
+  const invalidationDebug = await page.evaluate(() => {
     window.__OMNIMATH_HOVER_PERF__.counters = {};
     window.__OMNIMATH_HOVER_PERF__.last = {};
     window.__OMNIMATH_HOVER_PERF__.events = [];
@@ -1201,7 +1526,15 @@ test("debug hover performance counters prove pointer movement uses cached semant
     for (let index = 0; index < 5; index += 1) {
       window.__OMNIMATH_HOVER_PERF__.invalidateSemanticGeometry?.("debug-coalesced-invalidation", chunkId);
     }
+    return {
+      chunkId,
+      registryKeys: Object.keys(window.__OMNIMATH_HOVER_PERF__.invalidateSemanticGeometryByChunk || {}),
+      hasInvalidator: typeof window.__OMNIMATH_HOVER_PERF__.invalidateSemanticGeometry === "function",
+      counters: window.__OMNIMATH_HOVER_PERF__.counters,
+    };
   });
+  expect(invalidationDebug.hasInvalidator).toBe(true);
+  expect(invalidationDebug.registryKeys).toContain(invalidationDebug.chunkId);
   await expect.poll(() => page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.counters?.geometryMeasurement || 0)).toBeGreaterThanOrEqual(1);
   const invalidationCounters = await page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.counters || {});
   expect(invalidationCounters.geometryInvalidated || 0).toBeGreaterThanOrEqual(5);
@@ -1267,7 +1600,14 @@ test("shared scroll coordinator translates cached geometry without semantic reco
     revision: node.getAttribute("data-measurement-revision"),
   }));
   expect(afterScroll).toEqual(baseline);
-  await firstTarget.hover({ force: true });
+  await firstTarget.scrollIntoViewIfNeeded();
+  const firstTargetBox = await firstTarget.boundingBox();
+  expect(firstTargetBox).not.toBeNull();
+  await moveSemanticPointer(
+    page,
+    firstTargetBox.x + firstTargetBox.width / 2,
+    firstTargetBox.y + firstTargetBox.height / 2
+  );
   await expect(firstTarget).toHaveAttribute("data-active-target", "true");
 
   const transformedScale = await page.evaluate(() => {
@@ -1292,7 +1632,13 @@ test("shared scroll coordinator translates cached geometry without semantic reco
     window.__OMNIMATH_HOVER_PERF__?.last?.geometryReconstruction?.reason || ""
   ))).toBe("transform-change");
   await lowerTarget.scrollIntoViewIfNeeded();
-  await lowerTarget.hover({ force: true });
+  const lowerTargetBox = await lowerTarget.boundingBox();
+  expect(lowerTargetBox).not.toBeNull();
+  await moveSemanticPointer(
+    page,
+    lowerTargetBox.x + lowerTargetBox.width / 2,
+    lowerTargetBox.y + lowerTargetBox.height / 2
+  );
   await expect(lowerTarget).toHaveAttribute("data-active-target", "true");
 
   const listenerCountBeforeUnmount = await page.evaluate(() => (
@@ -1337,33 +1683,44 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
     };
   }, { stepLabel, role, kind, occurrence });
 
-  const groupGapPoint = async (stepLabel, role) => page.evaluate(({ stepLabel, role }) => {
-    const step = [...document.querySelectorAll(".step-card")]
-      .find((card) => card.textContent?.includes(stepLabel));
-    const group = step?.querySelector(`.math-semantic-hitbox[data-target-kind='group'][data-token-role='${role}']`);
-    if (!group) return null;
-    group.scrollIntoView({ block: "center", inline: "nearest" });
-    const groupRect = group.getBoundingClientRect();
-    const leafRects = [...step.querySelectorAll(".math-semantic-hitbox[data-target-kind='leaf']")]
-      .map((node) => node.getBoundingClientRect())
-      .filter((rect) => (
-        rect.right > groupRect.left
-        && rect.left < groupRect.right
-        && rect.bottom > groupRect.top
-        && rect.top < groupRect.bottom
-      ));
-    for (let y = groupRect.top + 1; y < groupRect.bottom - 1; y += 2) {
-      for (let x = groupRect.left + 1; x < groupRect.right - 1; x += 2) {
-        if (!leafRects.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)) {
-          return { x, y };
-        }
-      }
-    }
-    return { x: groupRect.left + groupRect.width / 2, y: groupRect.top + groupRect.height / 2 };
-  }, { stepLabel, role });
+  const groupGapPoint = async (stepLabel, role) => {
+    const semanticId = await page.evaluate(({ stepLabel, role }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(stepLabel));
+      const group = [...(step?.querySelectorAll(`.math-semantic-hitbox[data-target-kind='group'][data-token-role='${role}'][data-hitbox-region='internal-gap']`) || [])]
+        .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+        .filter(({ rect }) => rect.width >= 2 && rect.height >= 2)
+        .sort((left, right) => right.rect.width - left.rect.width || right.rect.height - left.rect.height)[0]?.node;
+      if (!group) return null;
+      group.scrollIntoView({ block: "center", inline: "nearest" });
+      return group.getAttribute("data-semantic-id");
+    }, { stepLabel, role });
+    if (!semanticId) return null;
+    await page.waitForTimeout(80);
+    return page.evaluate(({ stepLabel, role, semanticId }) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(stepLabel));
+      const group = [...(step?.querySelectorAll(`.math-semantic-hitbox[data-target-kind='group'][data-token-role='${role}'][data-hitbox-region='internal-gap']`) || [])]
+        .filter((candidate) => candidate.getAttribute("data-semantic-id") === semanticId)
+        .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+        .filter(({ rect }) => rect.width >= 2 && rect.height >= 2)
+        .sort((left, right) => right.rect.width - left.rect.width || right.rect.height - left.rect.height)[0]?.node;
+      if (!group) return null;
+      const groupRect = group.getBoundingClientRect();
+      return {
+        x: groupRect.left + groupRect.width / 2,
+        y: groupRect.top + groupRect.height / 2,
+        semanticId,
+        latex: group.getAttribute("data-token-latex"),
+        role: group.getAttribute("data-token-role"),
+      };
+    }, { stepLabel, role, semanticId });
+  };
 
   const hoverAndRead = async (box, position = { x: 0.82, y: 0.58 }) => {
     expect(box).not.toBeNull();
+    await page.mouse.move(4, 4, { steps: 1 });
+    await page.waitForTimeout(180);
     const previous = lazyRequests.filter((request) => request.endpoint === "hover").length;
     await moveSemanticPointer(page, box.x + Math.max(1, box.width * position.x), box.y + Math.max(1, box.height * position.y));
     await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
@@ -1385,23 +1742,28 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
   };
 
   const fullIntegral = await targetBox("Aggregate integral", "integral", "group");
-  const fullBody = await hoverAndRead(fullIntegral, { x: 0.45, y: 0.86 });
+  const integralGap = await groupGapPoint("Aggregate integral", "integral");
+  expect(integralGap).not.toBeNull();
+  const fullBody = await hoverAndRead({ ...fullIntegral, ...integralGap, width: 1, height: 1 }, { x: 0, y: 0 });
   expect(fullBody.selectedLatex).toContain("\\int");
   expect(fullBody.selectedNode?.role).toBe("integral");
   expect(fullBody.selectedNode?.aggregate).toBe(true);
   expect(fullBody.selectedNode?.sourceRange).toBeTruthy();
 
-  const upperBound = await targetBox("Aggregate integral", "upperBound", "any");
-  const upperBody = await hoverAndRead(upperBound, { x: 0.5, y: 0.5 });
-  expect(upperBody.selectedLatex).toContain("\\pi");
-  expect(upperBody.selectedNode?.role).toBe("upperBound");
+  const upperDenominator = await targetBox("Aggregate integral", "denominator", "leaf");
+  const upperBody = await hoverAndRead(upperDenominator, { x: 0.5, y: 0.5 });
+  expect(upperBody.selectedLatex).toBe("2");
+  expect(upperBody.selectedNode?.role).toBe("denominator");
+  expect(upperBody.semanticId).not.toBe(fullIntegral.semanticId);
 
   const power = await targetBox("Grouped power expression", "power", "group");
-  const powerPoint = await groupGapPoint("Grouped power expression", "power");
-  expect(powerPoint).not.toBeNull();
-  const powerBody = await hoverAndRead({ ...power, x: powerPoint.x, y: powerPoint.y, width: 1, height: 1 }, { x: 0, y: 0 });
-  expect(powerBody.selectedLatex).toContain("^2");
-  expect(powerBody.selectedNode?.aggregate).toBe(true);
+  expect(power).not.toBeNull();
+  expect(power.latex).toContain("^2");
+
+  const base = await targetBox("Grouped power expression", "variable", "leaf");
+  const baseBody = await hoverAndRead(base, { x: 0.5, y: 0.5 });
+  expect(baseBody.selectedLatex).toBe("x");
+  expect(baseBody.selectedNode?.role).toBe("variable");
 
   const exponent = await targetBox("Grouped power expression", "exponent", "leaf");
   const exponentBody = await hoverAndRead(exponent, { x: 0.5, y: 0.5 });
@@ -1409,8 +1771,11 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
   expect(exponentBody.selectedNode?.role).toBe("exponent");
 
   const denominator = await targetBox("Grouped power expression", "denominator", "group");
-  const denominatorBody = await hoverAndRead(denominator, { x: 0.8, y: 0.55 });
-  expect(denominatorBody.selectedLatex.length).toBeGreaterThan(0);
+  const denominatorGap = await groupGapPoint("Grouped power expression", "denominator");
+  expect(denominatorGap).not.toBeNull();
+  const denominatorBody = await hoverAndRead({ ...denominator, ...denominatorGap, width: 1, height: 1 }, { x: 0, y: 0 });
+  expect(denominatorBody.selectedNode?.role).toBe("denominator");
+  expect(denominatorBody.selectedNode?.aggregate).toBe(true);
 
   await expect(page.locator(".omni-quick-tooltip")).toContainText(/wrap cleanly|selected/i);
   const tooltipBox = await page.locator(".omni-quick-tooltip").boundingBox();
@@ -1910,6 +2275,285 @@ test("nested integral and signed exponent targets preserve semantic identity", a
   }
 });
 
+test("pointer trajectories replace stale identities across nested semantic structures", async ({ page }) => {
+  test.slow();
+  const requests = [];
+  const steps = [
+    ["transition-radical", "Radical transition", "r=\\sqrt{x+1}"],
+    ["transition-integral", "Integral bound transition", "I=\\int_0^{-2}f(x)\\,d\\theta"],
+    ["transition-signed", "Signed exponent transition", "y=x^{-1}"],
+    ["transition-fraction", "Fraction transition", "q=\\frac{a+b}{c+d}"],
+    ["transition-differential", "Differential transition", "J=\\int_0^1 f(\\theta)\\,d\\theta"],
+    ["transition-nested", "Nested bound torture", "\\int_0^{2^{\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}}} f(x)\\,dx"],
+  ];
+
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        title: "Semantic pointer transition stress",
+        problem: "Inspect semantic pointer transitions.",
+        expression: steps[0][2],
+        steps: steps.map(([id, label, math]) => ({
+          id,
+          label,
+          math,
+          summary: `${label} keeps every represented semantic target reachable.`,
+          chunks: [{ id: `${id}-chunk`, display: math, latex: math, text: math, role: "equation" }],
+        })),
+        finalAnswerLatex: steps.at(-1)[2],
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+        saved: false,
+        demoMode: true,
+      }),
+    });
+  });
+  for (const endpoint of ["**/api/explain-token", "**/api/explain-pin"]) {
+    await page.route(endpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      requests.push({ endpoint: endpoint.includes("pin") ? "pin" : "hover", body });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          title: `Selected ${body?.selectedLatex || "math"}`,
+          explanation: `${body?.selectedLatex || "This target"} owns the current pointer identity.`,
+        }),
+      });
+    });
+  }
+
+  await page.goto("/?mockAuth=1");
+  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect semantic pointer transitions.");
+  await page.getByRole("button", { name: /Explain/i }).click();
+  await expect(page.getByRole("button", { name: /Nested bound torture/i })).toBeVisible();
+
+  const targetsForStep = async (stepLabel) => {
+    await page.evaluate((label) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(label));
+      step?.scrollIntoView({ block: "center", inline: "center" });
+    }, stepLabel);
+    await page.waitForTimeout(100);
+    return page.evaluate((label) => {
+      const step = [...document.querySelectorAll(".step-card")]
+        .find((card) => card.textContent?.includes(label));
+      return [...(step?.querySelectorAll(".math-semantic-hitbox[data-token-id]") || [])]
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return {
+            id: node.getAttribute("data-token-id"),
+            semanticId: node.getAttribute("data-semantic-id"),
+            latex: node.getAttribute("data-token-latex") || "",
+            role: node.getAttribute("data-token-role") || "",
+            kind: node.getAttribute("data-target-kind") || "",
+            region: node.getAttribute("data-hitbox-region") || "painted",
+            sourceRange: node.getAttribute("data-source-range") || "",
+            rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height },
+          };
+        })
+        .filter((target) => target.rect.width > 0 && target.rect.height > 0);
+    }, stepLabel);
+  };
+
+  const target = (targets, { latex, role = null, kind = null, region = null, occurrence = 0, smallestHeight = false }) => {
+    const matches = targets.filter((candidate) => (
+      candidate.latex === latex
+      && (!role || candidate.role === role)
+      && (!kind || candidate.kind === kind)
+      && (!region || candidate.region === region)
+    )).sort((left, right) => (
+      smallestHeight
+        ? left.rect.height - right.rect.height || right.rect.width - left.rect.width
+        : left.rect.top - right.rect.top || left.rect.left - right.rect.left
+    ));
+    const selected = matches[occurrence] || null;
+    expect(selected, `missing ${latex} (${role || "any role"}, ${region || "any region"})`).not.toBeNull();
+    return selected;
+  };
+
+  const pointIn = (selected, xRatio = 0.5, yRatio = 0.5) => ({
+    x: Math.max(selected.rect.left + 0.5, Math.min(selected.rect.right - 0.5, selected.rect.left + selected.rect.width * xRatio)),
+    y: Math.max(selected.rect.top + 0.5, Math.min(selected.rect.bottom - 0.5, selected.rect.top + selected.rect.height * yRatio)),
+  });
+
+  const assertResolvedPoint = async (selected, point = pointIn(selected), expected = {}) => {
+    const previousRequest = requests.findLast((request) => (
+      request.endpoint === "hover" && request.body?.semanticId === selected.semanticId
+    ))?.body || null;
+    const diagnosticCount = await page.evaluate(() => (window.__OMNIMATH_HOVER_DIAGNOSTICS__ || []).length);
+    await moveSemanticPointer(page, point.x, point.y);
+    await expect.poll(() => page.evaluate(() => window.__OMNIMATH_HOVER_STATE__?.hoverState?.semanticId || ""))
+      .toBe(selected.semanticId);
+    await expect.poll(() => page.evaluate(({ diagnosticCount, semanticId }) => (
+      (window.__OMNIMATH_HOVER_DIAGNOSTICS__ || [])
+        .slice(diagnosticCount)
+        .findLast((entry) => entry?.chosenNodeId === semanticId) || null
+    ), { diagnosticCount, semanticId: selected.semanticId })).not.toBeNull();
+    const diagnostic = await page.evaluate(({ diagnosticCount, semanticId }) => (
+      (window.__OMNIMATH_HOVER_DIAGNOSTICS__ || [])
+        .slice(diagnosticCount)
+        .findLast((entry) => entry?.chosenNodeId === semanticId) || null
+    ), { diagnosticCount, semanticId: selected.semanticId });
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-lazy-target-id", selected.semanticId);
+    if (!previousRequest) {
+      await expect.poll(() => {
+        const hoverRequests = requests.filter((request) => request.endpoint === "hover");
+        return hoverRequests.at(-1)?.body?.semanticId || "";
+      }).toBe(selected.semanticId);
+    }
+    const requestBody = requests.findLast((request) => (
+      request.endpoint === "hover" && request.body?.semanticId === selected.semanticId
+    ))?.body;
+    expect(diagnostic.chosenLatex).toBe(expected.latex || selected.latex);
+    expect(diagnostic.chosenRole).toBe(expected.role || selected.role);
+    expect(diagnostic.selected?.sourceRange).toEqual(requestBody.semanticSourceRange);
+    expect(requestBody.selectedLatex).toBe(expected.latex || selected.latex);
+    expect(requestBody.targetRole).toBe(expected.role || selected.role);
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-semantic-id", selected.semanticId);
+    await expect.poll(() => page.evaluate(() => window.__OMNIMATH_HOVER_PERF__?.last?.pointerResolveComplete?.layoutReadCount))
+      .toBe(0);
+    return { diagnostic, requestBody };
+  };
+
+  const assertNoTargetPoint = async (point) => {
+    const diagnosticCount = await page.evaluate(() => (window.__OMNIMATH_HOVER_DIAGNOSTICS__ || []).length);
+    await moveSemanticPointer(page, point.x, point.y);
+    await expect.poll(() => page.evaluate(() => window.__OMNIMATH_HOVER_STATE__?.hoverState || null)).toBeNull();
+    await expect.poll(() => page.evaluate((start) => (
+      (window.__OMNIMATH_HOVER_DIAGNOSTICS__ || []).slice(start).some((entry) => entry?.resolverReason === "no-hit")
+    ), diagnosticCount)).toBe(true);
+    await expect(page.locator(".omni-quick-tooltip")).toHaveCount(0);
+  };
+
+  let radicalTargets = await targetsForStep("Radical transition");
+  let radical = target(radicalTargets, { latex: "\\sqrt", role: "radical", kind: "leaf" });
+  let radicalX = target(radicalTargets, { latex: "x", role: "variable", kind: "leaf" });
+  await assertResolvedPoint(radical);
+  await assertResolvedPoint(radicalX);
+  await assertResolvedPoint(radical);
+  await assertResolvedPoint(radicalX);
+
+  const integralTargets = await targetsForStep("Integral bound transition");
+  const integralSymbol = target(integralTargets, { latex: "\\int", role: "integralSymbol", kind: "leaf" });
+  const integralLower = target(integralTargets, { latex: "0", role: "lowerBound", kind: "leaf" });
+  const signedUpper = target(integralTargets, { latex: "-2", role: "upperBound", kind: "leaf" });
+  const integrandFunction = target(integralTargets, { latex: "f", role: "functionName", kind: "leaf" });
+  const integralDifferential = target(integralTargets, { latex: "d\\theta", role: "differential", kind: "group" });
+  await assertResolvedPoint(integralSymbol);
+  await assertResolvedPoint(integralLower);
+  await assertResolvedPoint(signedUpper, pointIn(signedUpper, 0.15), { latex: "-2", role: "upperBound" });
+  await assertResolvedPoint(signedUpper, pointIn(signedUpper, 0.85), { latex: "-2", role: "upperBound" });
+  await assertResolvedPoint(integrandFunction);
+  await assertResolvedPoint(integralDifferential);
+
+  const signedTargets = await targetsForStep("Signed exponent transition");
+  const signedBase = target(signedTargets, { latex: "x", role: "base", kind: "leaf" });
+  const signedExponent = target(signedTargets, { latex: "-1", role: "exponent", kind: "leaf" });
+  await assertResolvedPoint(signedBase);
+  await assertResolvedPoint(signedExponent, pointIn(signedExponent, 0.15), { latex: "-1", role: "exponent" });
+  await assertResolvedPoint(signedExponent, pointIn(signedExponent, 0.85), { latex: "-1", role: "exponent" });
+  await assertResolvedPoint(signedExponent, pointIn(signedExponent, 0.5), { latex: "-1", role: "exponent" });
+  const signedWhitespace = await page.evaluate((label) => {
+    const step = [...document.querySelectorAll(".step-card")].find((card) => card.textContent?.includes(label));
+    const host = step?.querySelector("[data-inspectable='math-token']");
+    if (!host) return null;
+    const hostRect = host.getBoundingClientRect();
+    const hitboxes = [...step.querySelectorAll(".math-semantic-hitbox[data-token-id]")].map((node) => node.getBoundingClientRect());
+    for (let y = Math.ceil(hostRect.top + 1); y < hostRect.bottom - 1; y += 2) {
+      for (let x = Math.ceil(hostRect.left + 1); x < hostRect.right - 1; x += 2) {
+        if (!hitboxes.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)) return { x, y };
+      }
+    }
+    return null;
+  }, "Signed exponent transition");
+  expect(signedWhitespace).not.toBeNull();
+  await assertNoTargetPoint(signedWhitespace);
+
+  const fractionTargets = await targetsForStep("Fraction transition");
+  const numeratorA = target(fractionTargets, { latex: "a", role: "variable", kind: "leaf" });
+  const numeratorGap = target(fractionTargets, { latex: "a+b", role: "numerator", kind: "group", region: "internal-gap" });
+  const numeratorB = target(fractionTargets, { latex: "b", role: "variable", kind: "leaf" });
+  const fullFraction = target(fractionTargets, { latex: "\\frac{a+b}{c+d}", kind: "group", region: "painted", smallestHeight: true });
+  const denominatorC = target(fractionTargets, { latex: "c", role: "variable", kind: "leaf" });
+  const fractionBarPoint = await page.evaluate((label) => {
+    const step = [...document.querySelectorAll(".step-card")].find((card) => card.textContent?.includes(label));
+    const line = [...(step?.querySelectorAll(".frac-line") || [])]
+      .map((node) => node.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .sort((left, right) => right.width - left.width)[0];
+    return line ? { x: line.left + line.width / 2, y: line.top + line.height / 2 } : null;
+  }, "Fraction transition");
+  expect(fractionBarPoint).not.toBeNull();
+  await assertResolvedPoint(fullFraction, fractionBarPoint);
+  await assertResolvedPoint(numeratorA);
+  await assertResolvedPoint(numeratorGap);
+  await assertResolvedPoint(numeratorB);
+  await assertResolvedPoint(fullFraction, fractionBarPoint);
+  await assertResolvedPoint(denominatorC);
+
+  const differentialTargets = await targetsForStep("Differential transition");
+  const differentialGroupFragments = differentialTargets
+    .filter((candidate) => candidate.latex === "d\\theta" && candidate.role === "differential" && candidate.kind === "group")
+    .sort((left, right) => left.rect.left - right.rect.left);
+  expect(differentialGroupFragments.length).toBeGreaterThanOrEqual(2);
+  const differentialGroup = differentialGroupFragments[0];
+  const differentialTheta = target(differentialTargets, { latex: "\\theta", role: "variable", kind: "leaf" });
+  const neighboringFunction = target(differentialTargets, { latex: "f", role: "functionName", kind: "leaf" });
+  await assertResolvedPoint(differentialGroup);
+  await assertResolvedPoint(differentialTheta);
+  await assertResolvedPoint(differentialGroup);
+  await assertResolvedPoint(neighboringFunction);
+
+  const nestedTargets = await targetsForStep("Nested bound torture");
+  const nestedUpper = target(nestedTargets, {
+    latex: "2^{\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}}",
+    role: "upperBound",
+    kind: "group",
+  });
+  const [upperStart, upperEnd] = nestedUpper.sourceRange.split(":").map(Number);
+  for (const nestedLeaf of [
+    target(nestedTargets, { latex: "2", role: "base", kind: "leaf" }),
+    target(nestedTargets, { latex: "\\pi", role: "numerator", kind: "leaf" }),
+    target(nestedTargets, { latex: "2", role: "constant", kind: "leaf" }),
+    target(nestedTargets, { latex: "\\ln", role: "functionName", kind: "leaf" }),
+    target(nestedTargets, { latex: "\\sec", role: "functionName", kind: "leaf" }),
+    target(nestedTargets, { latex: "\\tan", role: "functionName", kind: "leaf" }),
+  ]) {
+    const result = await assertResolvedPoint(nestedLeaf);
+    expect(result.diagnostic.chosenNodeId).not.toBe(nestedUpper.semanticId);
+    const range = result.diagnostic.selected.sourceRange;
+    expect(range.start).toBeGreaterThanOrEqual(upperStart);
+    expect(range.end).toBeLessThanOrEqual(upperEnd);
+  }
+
+  radicalTargets = await targetsForStep("Radical transition");
+  radical = target(radicalTargets, { latex: "\\sqrt", role: "radical", kind: "leaf" });
+  radicalX = target(radicalTargets, { latex: "x", role: "variable", kind: "leaf" });
+  for (let index = 0; index < 30; index += 1) {
+    const selected = index % 2 === 0 ? radical : radicalX;
+    const diagnosticCount = await page.evaluate(() => (window.__OMNIMATH_HOVER_DIAGNOSTICS__ || []).length);
+    const point = pointIn(selected);
+    await moveSemanticPointer(page, point.x, point.y);
+    await expect.poll(() => page.evaluate(() => window.__OMNIMATH_HOVER_STATE__?.hoverState?.semanticId || ""))
+      .toBe(selected.semanticId);
+    await expect.poll(() => page.evaluate(({ diagnosticCount, semanticId }) => (
+      (window.__OMNIMATH_HOVER_DIAGNOSTICS__ || []).slice(diagnosticCount).some((entry) => entry?.chosenNodeId === semanticId)
+    ), { diagnosticCount, semanticId: selected.semanticId })).toBe(true);
+  }
+  expect(requests.some((request) => (
+    request.endpoint === "hover" && request.body?.semanticId === radicalX.semanticId
+  ))).toBe(true);
+  await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-semantic-id", radicalX.semanticId);
+
+  const pinPoint = pointIn(radicalX);
+  await contextClickSemanticPointer(page, pinPoint.x, pinPoint.y);
+  await expect.poll(() => requests.filter((request) => request.endpoint === "pin").at(-1)?.body?.semanticId || "")
+    .toBe(radicalX.semanticId);
+  await expect(page.locator(".omni-floating-window")).toHaveAttribute("data-semantic-id", radicalX.semanticId);
+});
+
 test("complex improper integral semantic rendering matches plain KaTeX geometry", async ({ page }) => {
   const latex = "\\int_0^\\infty\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
   const semanticTree = buildSemanticTree({ stepId: "visual-complex-integral", displayLatex: latex, enabled: true });
@@ -2034,7 +2678,7 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
           id: "complex-upper-bound-step",
           label: "Complex upper bound fixture",
           math: complexUpperBound,
-          summary: "The nested upper bound should stay one semantic upper-bound target over all visible ink.",
+          summary: "The nested upper bound should retain its role while every visible descendant remains independently reachable.",
           chunks: [{ id: "complex-upper-bound-chunk", display: complexUpperBound, latex: complexUpperBound, text: complexUpperBound, role: "equation" }],
         }],
         finalAnswerLatex: exactIntegral,
@@ -2196,6 +2840,9 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
   await moveSemanticPointer(page, reportedPoint.point.x, reportedPoint.point.y);
   await page.waitForTimeout(520);
   const reportedTooltipVisible = await page.locator(".omni-quick-tooltip").isVisible().catch(() => false);
+  const reportedTooltipSemanticId = reportedTooltipVisible
+    ? await page.locator(".omni-quick-tooltip").getAttribute("data-semantic-id")
+    : null;
   const reportedDiagnostic = await page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ || null);
   const reportedSnapshot = await page.evaluate(() => window.__OMNIMATH_LAST_GEOMETRY_SNAPSHOT__ || null);
   const reportedHoverState = await page.evaluate(() => window.__OMNIMATH_HOVER_STATE__ || null);
@@ -2205,6 +2852,7 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
     requestDelta: reportedHoverRequests.length - previousReportedHoverCount,
     latestRequest: reportedHoverRequests.at(-1)?.body || null,
     tooltipVisible: reportedTooltipVisible,
+    tooltipSemanticId: reportedTooltipSemanticId,
     diagnostic: reportedDiagnostic,
     cachedGeometry: reportedSnapshot,
     hoverState: reportedHoverState,
@@ -2222,6 +2870,9 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
       await moveSemanticPointer(page, probe.point.x, probe.point.y);
       await page.waitForTimeout(520);
       const tooltipVisible = await page.locator(".omni-quick-tooltip").isVisible().catch(() => false);
+      const tooltipSemanticId = tooltipVisible
+        ? await page.locator(".omni-quick-tooltip").getAttribute("data-semantic-id")
+        : null;
       const diagnostic = await page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ || null);
       const snapshot = await page.evaluate(() => window.__OMNIMATH_LAST_GEOMETRY_SNAPSHOT__ || null);
       const hoverState = await page.evaluate(() => window.__OMNIMATH_HOVER_STATE__ || null);
@@ -2232,13 +2883,15 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
         requestDelta: hoverRequests.length - previousHoverCount,
         latestRequest: hoverRequests.at(-1)?.body || null,
         tooltipVisible,
+        tooltipSemanticId,
         diagnostic,
         cachedGeometry: snapshot,
         hoverState,
       };
       if (
-        diagnostic?.chosenRole === "upperBound"
-        && hoverState?.hoverState?.semanticId === trace.complex.upperHitbox.semanticId
+        diagnostic?.chosenNodeId
+        && hoverState?.hoverState?.semanticId === diagnostic.chosenNodeId
+        && hoverRequests.at(-1)?.body?.semanticId === diagnostic.chosenNodeId
       ) {
         break;
       }
@@ -2254,15 +2907,34 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
   expect(trace.reportedProbes[0].diagnostic?.chosenRole).toBe("upperBound");
   expect(trace.reportedProbes[0].diagnostic?.chosenLatex).toBe("\\infty");
   expect(trace.reportedProbes[0].hoverState?.hoverState?.semanticId).toBe(trace.reported.upperHitbox.semanticId);
+  expect(trace.reportedProbes[0].tooltipSemanticId).toBe(trace.reported.upperHitbox.semanticId);
   expect(requests.some((request) => request.endpoint === "hover" && request.body?.selectedNode?.role === "upperBound")).toBe(true);
+  const expectedNestedWinners = new Map([
+    ["highest-visible-ink", { latex: "\\pi", role: "numerator" }],
+    ["nested-numerator", { latex: "\\ln", role: "functionName" }],
+    ["nested-denominator", { latex: "2", role: "constant" }],
+    ["left-visible-edge", { latex: "\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}", role: "exponent" }],
+    ["right-visible-edge", { latex: "\\frac{\\pi}{2+\\frac{\\ln(\\sec t)}{\\tan t}}", role: "exponent" }],
+  ]);
+  const [upperStart, upperEnd] = trace.complex.upperHitbox.sourceRange.split(":").map(Number);
   for (const probe of trace.probes) {
+    const expectedWinner = expectedNestedWinners.get(probe.label);
+    const winnerRange = probe.diagnostic?.selected?.sourceRange;
     expect(probe.tooltipVisible).toBe(true);
-    expect(probe.diagnostic?.chosenRole).toBe("upperBound");
-    expect(probe.diagnostic?.chosenLatex).toBe(trace.complex.upperHitbox.latex);
+    expect(probe.diagnostic?.chosenRole).toBe(expectedWinner.role);
+    expect(probe.diagnostic?.chosenLatex).toBe(expectedWinner.latex);
+    expect(probe.diagnostic?.chosenNodeId).not.toBe(trace.complex.upperHitbox.semanticId);
     expect(probe.diagnostic?.candidateRectCount || 0).toBeGreaterThan(0);
     expect(probe.diagnostic?.resolverReason).toMatch(/deterministic/);
-    expect(probe.hoverState?.hoverState?.semanticId).toBe(trace.complex.upperHitbox.semanticId);
-    expect(probe.diagnostic?.candidateScores?.some((candidate) => candidate.role === "upperBound" && candidate.pointerInsideRect)).toBe(true);
+    expect(probe.hoverState?.hoverState?.semanticId).toBe(probe.diagnostic?.chosenNodeId);
+    expect(probe.tooltipSemanticId).toBe(probe.diagnostic?.chosenNodeId);
+    expect(probe.latestRequest?.semanticId).toBe(probe.diagnostic?.chosenNodeId);
+    expect(probe.latestRequest?.selectedLatex).toBe(expectedWinner.latex);
+    expect(probe.latestRequest?.targetRole).toBe(expectedWinner.role);
+    expect(probe.latestRequest?.semanticSourceRange).toEqual(winnerRange);
+    expect(winnerRange?.start).toBeGreaterThanOrEqual(upperStart);
+    expect(winnerRange?.end).toBeLessThanOrEqual(upperEnd);
+    expect(probe.diagnostic?.candidates?.some((candidate) => candidate.role === "upperBound" && candidate.pointerInsideRect)).toBe(true);
   }
 });
 
@@ -2409,8 +3081,13 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
     }
     await moveSemanticPointer(page, point.x, point.y);
     await page.waitForTimeout(360);
-    const hoverRequests = requests.filter((request) => request.endpoint === "hover");
     const diagnostic = await page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ || null);
+    if (!probe.expectNoTarget && diagnostic?.chosenNodeId) {
+      await expect.poll(() => requests.filter((request) => request.endpoint === "hover").at(-1)?.body?.semanticId || "")
+        .toBe(diagnostic.chosenNodeId);
+    }
+    const hoverRequests = requests.filter((request) => request.endpoint === "hover");
+    const hoverState = await page.evaluate(() => window.__OMNIMATH_HOVER_STATE__ || null);
     const tooltip = await readTooltip();
     const screenshotPath = `${artifactDir}/${probe.label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.png`;
     await page.screenshot({ path: screenshotPath, fullPage: false });
@@ -2420,6 +3097,7 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
       requestCountAfter: hoverRequests.length,
       latestRequest: hoverRequests.at(-1)?.body || null,
       diagnostic,
+      hoverState,
       tooltip,
       screenshotPath,
     });
@@ -2440,15 +3118,15 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
       expectNoTarget: true,
     },
     { label: "step-2-rhs-numerator", stepLabel: "Step 2 transformed integral", role: "numerator", kind: "group", occurrence: 1 },
-    { label: "step-5-complex-upper-bound", stepLabel: "Step 5 bounded auxiliary integral", role: "upperBound", occurrence: 1 },
-    { label: "step-6-rhs-expression", stepLabel: "Step 6 right side", role: "rightSide", occurrence: 0 },
+    { label: "step-5-upper-denominator", stepLabel: "Step 5 bounded auxiliary integral", latex: "2", role: "denominator", occurrence: 0 },
+    { label: "step-6-signed-coefficient", stepLabel: "Step 6 right side", latex: "-2", occurrence: 0 },
     { label: "step-8-lhs-ln-cos", stepLabel: "Step 8 logarithmic identity", latex: "\\ln", occurrence: 0 },
     { label: "step-8-rhs-theta", stepLabel: "Step 8 logarithmic identity", latex: "\\theta", occurrence: 1 },
     { label: "step-8-dtheta", stepLabel: "Step 8 logarithmic identity", latex: "d\\theta", occurrence: 0 },
     { label: "step-9-left-expression", stepLabel: "Step 9 differential expression", latex: "\\ln", occurrence: 0 },
     { label: "final-numerator-plus", stepLabel: "Final answer", latex: "+", occurrence: 0 },
     { label: "final-denominator-plus", stepLabel: "Final answer", latex: "+", occurrence: 1 },
-    { label: "step-7-complex-upper-bound", stepLabel: "Step 7 integration by parts setup", role: "upperBound", kind: "group", occurrence: 1 },
+    { label: "step-7-upper-denominator", stepLabel: "Step 7 integration by parts setup", latex: "2", role: "denominator", occurrence: 0 },
     {
       label: "final-empty-below-fraction",
       stepLabel: "Final answer",
@@ -2529,9 +3207,9 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   expect(sourceRenderSnapshot.length).toBeGreaterThan(0);
 
   const byLabel = new Map(probeResults.map((probe) => [probe.label, probe]));
-  const winnerLatex = (label) => byLabel.get(label)?.diagnostic?.winningCandidate?.expression || byLabel.get(label)?.targetBox?.latex || null;
-  const winner = (label) => byLabel.get(label)?.diagnostic?.winningCandidate || byLabel.get(label)?.targetBox || null;
-  const finalTarget = (label) => byLabel.get(label)?.diagnostic?.finalTarget || (byLabel.get(label)?.tooltip ? byLabel.get(label)?.targetBox : null);
+  const winnerLatex = (label) => byLabel.get(label)?.diagnostic?.winningCandidate?.expression || null;
+  const winner = (label) => byLabel.get(label)?.diagnostic?.winningCandidate || null;
+  const finalTarget = (label) => byLabel.get(label)?.diagnostic?.finalTarget || null;
   const sourceRange = (value) => {
     const raw = typeof value === "string" ? value : value?.sourceRange;
     if (!raw) return null;
@@ -2552,9 +3230,17 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   };
   const assertResolved = (label, options = {}) => {
     const probe = byLabel.get(label);
+    const chosenId = probe?.diagnostic?.chosenNodeId;
     expect(probe?.targetBox?.missing).toBeFalsy();
     expect(probe?.diagnostic?.fallbackUsed).not.toBe(true);
-    expect(finalTarget(label)).toBeTruthy();
+    expect(chosenId).toBeTruthy();
+    expect(finalTarget(label)).toBe(chosenId);
+    expect(probe?.hoverState?.hoverState?.semanticId).toBe(chosenId);
+    expect(probe?.latestRequest?.semanticId).toBe(chosenId);
+    expect(probe?.latestRequest?.selectedLatex).toBe(winnerLatex(label));
+    expect(probe?.latestRequest?.targetRole).toBe(probe?.diagnostic?.chosenRole);
+    expect(probe?.latestRequest?.semanticSourceRange).toEqual(probe?.diagnostic?.selected?.sourceRange);
+    expect(probe?.tooltip?.semanticId).toBe(chosenId);
     if (options.notLatex) expect(winnerLatex(label)).not.toBe(options.notLatex);
     if (options.expectedLatex) {
       const actualLatex = winnerLatex(label);
@@ -2570,6 +3256,8 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   const assertNoTarget = (label) => {
     const probe = byLabel.get(label);
     expect(probe?.tooltip).toBeNull();
+    expect(probe?.diagnostic?.chosenNodeId || null).toBeNull();
+    expect(probe?.hoverState?.hoverState || null).toBeNull();
   };
 
   assertResolved("step-2-rhs-numerator", {
@@ -2587,16 +3275,17 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   });
   expect(["\\sec", "2", "\\theta", "\\sec^2\\theta"]).toContain(winnerLatex("step-4-sec2-denominator"));
   assertNoTarget("step-5-empty-near-lower-bound");
-  assertResolved("step-5-complex-upper-bound", {
-    expectedLatex: "\\pi/2",
-    geometry: ["precise_group", "precise_leaf"],
+  assertResolved("step-5-upper-denominator", {
+    expectedLatex: "2",
+    geometry: ["precise_leaf"],
     withinTargetBox: true,
   });
-  assertResolved("step-6-rhs-expression", {
+  assertResolved("step-6-signed-coefficient", {
     expectedLatex: "-2",
     geometry: ["precise_leaf"],
+    withinTargetBox: true,
   });
-  expect(winnerLatex("step-6-rhs-expression")).not.toBe("2");
+  expect(winnerLatex("step-6-signed-coefficient")).not.toBe("2");
   assertResolved("step-8-lhs-ln-cos", {
     expectedLatex: "\\ln",
     geometry: ["precise_leaf"],
@@ -2609,7 +3298,7 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   });
   assertResolved("step-8-dtheta", {
     expectedLatex: "d\\theta",
-    geometry: ["precise_group"],
+    geometry: ["fragmented_group"],
     withinTargetBox: true,
   });
   assertResolved("step-9-left-expression", {
@@ -2630,9 +3319,9 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
     withinTargetBox: true,
   });
   if (winner("final-denominator-plus")?.nodeKind) expect(winner("final-denominator-plus")?.nodeKind).toBe("operator");
-  assertResolved("step-7-complex-upper-bound", {
-    expectedLatex: "\\pi/2",
-    geometry: ["precise_group", "precise_leaf"],
+  assertResolved("step-7-upper-denominator", {
+    expectedLatex: "2",
+    geometry: ["precise_leaf"],
     withinTargetBox: true,
   });
   assertNoTarget("final-empty-below-fraction");
@@ -2643,14 +3332,29 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   const denominatorHitboxes = step2Hitboxes.filter((box) => box.role === "denominator");
   const boundHitboxes = step2Hitboxes.filter((box) => box.role === "upperBound" || box.role === "lowerBound");
   const differentialHitboxes = step2Hitboxes.filter((box) => box.latex === "d\\theta");
-  const complexNumerator = numeratorHitboxes
+  const semanticGeometry = (hitboxes) => [...Map.groupBy(hitboxes, (box) => box.semanticId).values()]
+    .map((fragments) => {
+      const left = Math.min(...fragments.map((box) => box.rect.left));
+      const top = Math.min(...fragments.map((box) => box.rect.top));
+      const right = Math.max(...fragments.map((box) => box.rect.right));
+      const bottom = Math.max(...fragments.map((box) => box.rect.bottom));
+      return {
+        ...fragments[0],
+        fragmentCount: fragments.length,
+        width: right - left,
+        height: bottom - top,
+      };
+    });
+  const complexNumerator = semanticGeometry(numeratorHitboxes)
     .filter((box) => /\\ln/.test(box.latex || "") && /\\theta/.test(box.latex || ""))
     .sort((left, right) => right.width - left.width)[0];
+  const denominatorGeometry = semanticGeometry(denominatorHitboxes);
 
   expect(complexNumerator?.width || 0).toBeGreaterThan(80);
   expect(complexNumerator?.height || 0).toBeGreaterThan(10);
   expect(complexNumerator?.height || 0).toBeLessThan(70);
-  expect(denominatorHitboxes.some((box) => box.width > 40 && box.height > 10)).toBe(true);
+  expect(complexNumerator?.fragmentCount || 0).toBeGreaterThan(1);
+  expect(denominatorGeometry.some((box) => box.width > 40 && box.height > 10)).toBe(true);
   expect(boundHitboxes.length).toBeGreaterThanOrEqual(4);
   expect(differentialHitboxes.some((box) => box.width > 8 && box.height > 10)).toBe(true);
   expect(sourceRenderSnapshot.flatMap((step) => step.chunks || []).some((chunk) => chunk.semanticFallback)).toBe(false);
@@ -3045,32 +3749,51 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
   };
 
   const hoverFractionGroupGap = async (stepLabel, role, expectedLatexPattern) => {
-    const point = await page.evaluate(({ stepLabel, role }) => {
+    let target = await page.evaluate(({ stepLabel, role }) => {
       const step = [...document.querySelectorAll(".step-card")]
         .find((card) => card.textContent?.includes(stepLabel));
-      const group = [...(step?.querySelectorAll(`.math-semantic-hitbox[data-target-kind='group'][data-token-role='${role}']`) || [])][0];
+      const group = [...(step?.querySelectorAll(`.math-semantic-hitbox[data-target-kind='group'][data-token-role='${role}'][data-hitbox-region='internal-gap']`) || [])]
+        .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+        .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+        .sort((left, right) => (right.rect.width * right.rect.height) - (left.rect.width * left.rect.height))[0];
       if (!group) return null;
-      group.scrollIntoView({ block: "center", inline: "center" });
-      const groupRect = group.getBoundingClientRect();
-      const leafRects = [...(step?.querySelectorAll(".math-semantic-hitbox[data-target-kind='leaf']") || [])]
-        .map((node) => node.getBoundingClientRect())
-        .filter((rect) => (
-          rect.right > groupRect.left
-          && rect.left < groupRect.right
-          && rect.bottom > groupRect.top
-          && rect.top < groupRect.bottom
-        ));
-      const y = groupRect.top + groupRect.height / 2;
-      for (let x = groupRect.left + 1; x < groupRect.right - 1; x += 2) {
-        if (!leafRects.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)) {
-          return { x, y };
-        }
-      }
-      return { x: groupRect.left + Math.max(1, groupRect.width * 0.08), y };
+      group.node.scrollIntoView({ block: "center", inline: "center" });
+      const rect = group.node.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        latex: group.node.getAttribute("data-token-latex") || "",
+        role: group.node.getAttribute("data-token-role") || "",
+        semanticId: group.node.getAttribute("data-semantic-id") || "",
+      };
     }, { stepLabel, role });
-    expect(point).not.toBeNull();
-    await moveSemanticPointer(page, point.x, point.y);
+    expect(target).not.toBeNull();
+    await page.waitForTimeout(80);
+    target = await page.evaluate((semanticId) => {
+      const node = [...document.querySelectorAll(".math-semantic-hitbox[data-hitbox-region='internal-gap']")]
+        .find((candidate) => candidate.getAttribute("data-semantic-id") === semanticId);
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        latex: node.getAttribute("data-token-latex") || "",
+        role: node.getAttribute("data-token-role") || "",
+        semanticId: node.getAttribute("data-semantic-id") || "",
+      };
+    }, target.semanticId);
+    expect(target).not.toBeNull();
+    await moveSemanticPointer(page, target.x, target.y);
     await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__?.chosenNodeId || ""))
+      .toBe(target.semanticId);
+    await expect.poll(() => page.evaluate(() => window.__OMNIMATH_HOVER_STATE__?.hoverState?.semanticId || ""))
+      .toBe(target.semanticId);
+    await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.semanticId || "")
+      .toBe(target.semanticId);
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-semantic-id", target.semanticId);
+    expect(target.role).toBe(role);
+    expect(target.latex).toMatch(expectedLatexPattern);
     await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex || "")
       .toMatch(expectedLatexPattern);
   };
@@ -3161,7 +3884,7 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
   await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("19671800");
   await hoverBox(await tokenBox("Large quadratic formula", "6", "denominator"));
   await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe("6");
-  await hoverFractionGroupGap("Large quadratic formula", "numerator", /^-3634$/);
+  await hoverFractionGroupGap("Large quadratic formula", "numerator", /-3634.*\\pm.*\\sqrt/);
 
   for (const [stepLabel, latex, role] of [
     ["Decimal fraction layout", "5345", "constant"],
@@ -4010,16 +4733,8 @@ test("semantic hitboxes remain interactive across internal horizontal scrolling"
     .filter((target) => target.count > 1)
     .map(({ latex: targetLatex, role, count }) => ({ latex: targetLatex, role, count }))
     .sort((left, right) => left.latex.localeCompare(right.latex));
-  expect(fragmentedTargets).toEqual([
-    { latex: "\\arctan", role: "functionName", count: 6 },
-    { latex: "\\cos", role: "functionName", count: 3 },
-    { latex: "\\cot", role: "functionName", count: 3 },
-    { latex: "\\exp", role: "functionName", count: 3 },
-    { latex: "\\ln", role: "functionName", count: 2 },
-    { latex: "\\sin", role: "functionName", count: 3 },
-    { latex: "\\tan", role: "functionName", count: 3 },
-  ]);
-  expect(initialTargetCount).toBeGreaterThan(initialUniqueTargetIds.length);
+  expect(fragmentedTargets).toEqual([]);
+  expect(initialTargetCount).toBe(initialUniqueTargetIds.length);
   expect(semanticTargetGroups.filter((target) => target.latex === "c")).toEqual([
     expect.objectContaining({ role: "argument", count: 1 }),
   ]);
@@ -4028,7 +4743,7 @@ test("semantic hitboxes remain interactive across internal horizontal scrolling"
   ]);
 
   const sinFragments = step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\sin']");
-  await expect(sinFragments).toHaveCount(3);
+  await expect(sinFragments).toHaveCount(1);
   const sinSemanticId = await sinFragments.first().getAttribute("data-semantic-id");
   for (let index = 0; index < await sinFragments.count(); index += 1) {
     const box = await sinFragments.nth(index).boundingBox();
@@ -4050,7 +4765,7 @@ test("semantic hitboxes remain interactive across internal horizontal scrolling"
   await page.mouse.down();
   await page.mouse.move(lastSinBox.x + lastSinBox.width / 2, lastSinBox.y + lastSinBox.height / 2, { steps: 4 });
   await page.mouse.up();
-  await expect(step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\sin'].omni-token-selected")).toHaveCount(3);
+  await expect(step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\sin'].omni-token-selected")).toHaveCount(1);
   await expect.poll(() => semanticRequests.filter((request) => request.endpoint.endsWith("explain-token")).at(-1)?.body?.semanticSelection?.leafIds || [])
     .toEqual([sinSemanticId]);
   await page.mouse.click(6, 6);

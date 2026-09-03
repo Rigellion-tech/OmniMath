@@ -37,6 +37,29 @@ function assertNodeInHtml(html, node) {
   assert.match(html, new RegExp(`data-semantic-id="${escapeRegExp(node.id)}"`));
 }
 
+function semanticDomText(html, semanticId) {
+  const stack = [];
+  const tokenPattern = /<span\b[^>]*>|<\/span>|[^<]+/gu;
+  let match = null;
+  while ((match = tokenPattern.exec(html))) {
+    const token = match[0];
+    if (token.startsWith("<span")) {
+      stack.push({
+        id: token.match(/\bdata-semantic-id="([^"]+)"/u)?.[1] || "",
+        text: "",
+      });
+      continue;
+    }
+    if (token === "</span>") {
+      const closed = stack.pop();
+      if (closed?.id === semanticId) return closed.text.replace(/\u200b/gu, "").trim();
+      continue;
+    }
+    for (const item of stack) item.text += token;
+  }
+  return "";
+}
+
 function assertSafeSemanticRendering(latex, stepId = "safe-semantic-case") {
   const tree = buildSemanticTree({ stepId, displayLatex: latex });
   const validation = validateSemanticTreeRanges(tree);
@@ -116,6 +139,30 @@ describe("semanticMathRenderer", () => {
     assertNodeInHtml(html, arctan);
     assertNodeInHtml(html, x);
     assert.equal(letterFragments.length, 0);
+  });
+
+  it("makes rendered function-head DOM ownership match canonical semantic heads", () => {
+    const fixtures = [
+      { latex: String.raw`\Gamma(a/2)`, head: String.raw`\Gamma`, visible: "Γ" },
+      { latex: String.raw`\zeta(s)`, head: String.raw`\zeta`, visible: "ζ" },
+      { latex: String.raw`\sin(x)`, head: String.raw`\sin`, visible: "sin" },
+      { latex: String.raw`\cos(x)`, head: String.raw`\cos`, visible: "cos" },
+      { latex: String.raw`\ln(x)`, head: String.raw`\ln`, visible: "ln" },
+      { latex: String.raw`\operatorname{Li}(x)`, head: String.raw`\operatorname{Li}`, visible: "Li" },
+      { latex: String.raw`\operatorname{ArbitraryName}(x)`, head: String.raw`\operatorname{ArbitraryName}`, visible: "ArbitraryName" },
+    ];
+
+    for (const fixture of fixtures) {
+      const { tree, html } = renderSemanticLatex(fixture.latex, "function-head-owner");
+      const head = findNode(tree, (node) => node.role === "functionName" && node.latex === fixture.head);
+      const argument = findNode(tree, (node) => node.role === "argument");
+
+      assert.ok(head, fixture.latex);
+      assert.ok(argument, fixture.latex);
+      assert.equal(semanticDomText(html, head.id), fixture.visible, fixture.latex);
+      assert.notEqual(head.id, argument.id, fixture.latex);
+      assert.notEqual(semanticDomText(html, argument.id), fixture.visible, fixture.latex);
+    }
   });
 
   it("preserves integral operator, bounds, power leaves, and differential identities", () => {
@@ -200,7 +247,7 @@ describe("semanticMathRenderer", () => {
     assert.ok(thetaLeaves.length >= 4);
   });
 
-  it("falls back before serialization when a range would bisect a command", () => {
+  it("degrades a range that bisects a command without discarding valid original TeX", () => {
     const source = "\\theta\\sec^2\\theta";
     const tree = {
       displayLatex: source,
@@ -214,8 +261,41 @@ describe("semanticMathRenderer", () => {
     const rendered = serializeSemanticTreeToLatex(tree);
 
     assert.equal(rendered.annotatedNodeCount, 0);
-    assert.equal(rendered.latex, "");
-    assert.equal(rendered.error, "invalid-semantic-ranges");
-    assert.match(rendered.diagnostics[0].reason, /source-slice-mismatch|range-end-inside-command/);
+    assert.equal(rendered.latex, source);
+    assert.equal(rendered.error, "");
+    assert.equal(rendered.nodeDiagnostics.find((item) => item.semanticId === "bad")?.annotationStatus, "unsupported");
+    assert.match(rendered.nodeDiagnostics.find((item) => item.semanticId === "bad")?.reason || "", /source-slice-mismatch|range-end-inside-command/);
+    katex.renderToString(rendered.latex, { throwOnError: true, strict: "ignore" });
+  });
+
+  it("serializes evaluation wrappers while retaining granular Gamma DOM identities", () => {
+    const latex = String.raw`A=\left.\frac{\partial^2}{\partial a\,\partial b}\frac{\Gamma(a/2)\Gamma(b/2)}{2\Gamma((a+b)/2)}\right|_{a=b=1}`;
+    const { tree, rendered, html } = renderSemanticLatex(latex, "evaluation-render");
+    const evaluation = findNode(tree, (node) => node.type === "evaluation");
+    const condition = findNode(tree, (node) => node.role === "evaluationCondition");
+    const gammaNames = findNodes(tree, (node) => node.role === "functionName" && node.latex === "\\Gamma");
+
+    assert.equal(tree.displayLatex, latex);
+    assert.equal(gammaNames.length, 3);
+    assertNodeInHtml(html, evaluation);
+    assertNodeInHtml(html, condition);
+    for (const gamma of gammaNames) assertNodeInHtml(html, gamma);
+    assert.equal(new Set(gammaNames.map((node) => node.id)).size, 3);
+    assert.equal(rendered.error, "");
+  });
+
+  it("serializes unary expressions and signed-fraction descendants with independent DOM identities", () => {
+    const latex = String.raw`J=-\frac{B}{2}+\frac{\pi A}{4}`;
+    const { tree, rendered, html } = renderSemanticLatex(latex, "unary-render");
+    const unary = findNode(tree, (node) => node.type === "unaryExpression");
+    const unaryOperator = findNode(tree, (node) => node.role === "unaryOperator");
+    const firstFraction = findNode(tree, (node) => node.type === "fraction" && node.sourceRange.start === 3);
+    const b = findNode(tree, (node) => node.latex === "B" && node.role === "numerator");
+    const firstTwo = findNode(tree, (node) => node.latex === "2" && node.role === "denominator");
+
+    for (const node of [unary, unaryOperator, firstFraction, b, firstTwo]) assertNodeInHtml(html, node);
+    assert.equal(new Set([unary.id, unaryOperator.id, firstFraction.id, b.id, firstTwo.id]).size, 5);
+    assert.match(rendered.latex, new RegExp(`semantic-id=${escapeRegExp(b.id)}`));
+    assert.equal(rendered.error, "");
   });
 });

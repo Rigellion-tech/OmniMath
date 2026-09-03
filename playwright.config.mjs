@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 
-const PORT = 4175;
+const PORT = Number(process.env.OMNIMATH_E2E_PORT || 4175);
 const executablePath = process.env.OMNIMATH_E2E_BROWSER_PATH || undefined;
 
 export default defineConfig({

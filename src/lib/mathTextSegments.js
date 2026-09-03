@@ -1,4 +1,11 @@
 import { normalizeDisplayText } from "./mathAnnotator.js";
+import { normalizeLatexTransport } from "./mathNode.js";
+import {
+  parseExplicitMathSegments,
+  segmentMixedTextMath,
+} from "./mixedTextSegments.js";
+
+export { parseExplicitMathSegments } from "./mixedTextSegments.js";
 
 const GREEK_WORDS = {
   alpha: "\\alpha",
@@ -39,12 +46,10 @@ const UNICODE_REPLACEMENTS = [
   { pattern: /\u03b8/g, replacement: "\\theta" },
 ];
 
-const MATH_FUNCTIONS = new Set(["cos", "sec", "sin", "sqrt", "tan"]);
-const SINGLE_VARIABLES = new Set(["C", "r", "u", "v", "w", "x", "y", "z"]);
-const EXPLICIT_MATH_PATTERN = /(\\\[((?:.|\n)*?)\\\]|\\\(((?:.|\n)*?)\\\)|\$\$((?:.|\n)*?)\$\$|\$([^$\n]+?)\$)/g;
-
 function normalizeMathToken(value) {
-  let latex = normalizeDisplayText(value).trim();
+  const source = String(value ?? "");
+  if (source.includes("\\")) return normalizeLatexTransport(source);
+  let latex = normalizeDisplayText(source).trim();
 
   UNICODE_REPLACEMENTS.forEach(({ pattern, replacement }) => {
     latex = latex.replace(pattern, replacement);
@@ -56,33 +61,11 @@ function normalizeMathToken(value) {
     .replace(/\bsqrt\(([^)]+)\)/g, "\\sqrt{$1}")
     .replace(/\bvec\(([^)]+)\)/g, "\\vec{$1}")
     .replace(/\bfrac\(([^,]+),([^)]+)\)/g, "\\frac{$1}{$2}")
-    .replace(/\\(sin|cos|tan|sec)(?=[a-zA-Z0-9])/g, "\\$1 ")
-    .replace(/\b(sin|cos|tan|sec)(?=[a-zA-Z0-9])/g, "$1 ")
-    .replace(/\b(sin|cos|tan|sec)\b/g, "\\$1")
-    .replace(/\b(alpha|beta|gamma|delta|epsilon|lambda|mu|omega|phi|pi|rho|sigma|theta)\b/g, (match) => GREEK_WORDS[match])
+    .replace(/(?<!\\)\b(sin|cos|tan|sec)(?=[a-zA-Z0-9])/g, "$1 ")
+    .replace(/(?<!\\)\b(sin|cos|tan|sec)\b/g, "\\$1")
+    .replace(/(?<!\\)\b(alpha|beta|gamma|delta|epsilon|lambda|mu|omega|phi|pi|rho|sigma|theta)\b/g, (match) => GREEK_WORDS[match])
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function splitAffixes(token) {
-  const leading = token.match(/^["'\u201c\u2018]+/)?.[0] || "";
-  const withoutLeading = token.slice(leading.length);
-  const trailing = withoutLeading.match(/[.,;:!?]+$/)?.[0] || "";
-  const core = withoutLeading.slice(0, withoutLeading.length - trailing.length);
-
-  return { leading, core, trailing };
-}
-
-function isMathToken(value) {
-  if (!value) return false;
-  if (value.includes("\\")) return true;
-  if (MATH_FUNCTIONS.has(value)) return true;
-  if (SINGLE_VARIABLES.has(value)) return true;
-  if (/[=<>^_+\-*/\u00b2\u00b3\u2070-\u2079\u207f\u207b\u2264\u2265\u00b7\u2212\u222b\u221a]/.test(value)) return true;
-  if (/^[A-Za-z]'?\([^)]*\)$/.test(value)) return true;
-  if (/^(vec|frac)\([^)]+\)$/.test(value)) return true;
-  if (/^(dx|dy|dz|dV|du|dv)$/.test(value)) return true;
-  return false;
 }
 
 export function normalizeDisplayTextSegment(value = "") {
@@ -95,34 +78,6 @@ export function normalizeDisplayTextSegment(value = "") {
   return `${leading}${normalized}${trailing}`;
 }
 
-export function parseExplicitMathSegments(text = "") {
-  const segments = [];
-  const source = String(text ?? "");
-  let lastIndex = 0;
-  let match;
-
-  EXPLICIT_MATH_PATTERN.lastIndex = 0;
-  while ((match = EXPLICIT_MATH_PATTERN.exec(source)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ type: "text", value: source.slice(lastIndex, match.index) });
-    }
-
-    segments.push({
-      type: "math",
-      value: match[2] || match[3] || match[4] || match[5] || "",
-      displayMode: Boolean(match[2] || match[4]),
-      explicit: true,
-    });
-    lastIndex = EXPLICIT_MATH_PATTERN.lastIndex;
-  }
-
-  if (lastIndex < source.length) {
-    segments.push({ type: "text", value: source.slice(lastIndex) });
-  }
-
-  return segments;
-}
-
 function appendTextPart(parts, value) {
   if (!value) return;
   const previous = parts[parts.length - 1];
@@ -131,37 +86,6 @@ function appendTextPart(parts, value) {
     return;
   }
   parts.push({ type: "text", value });
-}
-
-function textToAutoMathParts(text, keyPrefix) {
-  const parts = [];
-  const normalized = normalizeDisplayTextSegment(text);
-
-  normalized.split(/(\s+)/).forEach((token, index) => {
-    if (!token) return;
-    if (/^\s+$/.test(token)) {
-      appendTextPart(parts, token);
-      return;
-    }
-
-    const { leading, core, trailing } = splitAffixes(token);
-    if (!isMathToken(core)) {
-      appendTextPart(parts, token);
-      return;
-    }
-
-    appendTextPart(parts, leading);
-    parts.push({
-      type: "math",
-      value: normalizeMathToken(core),
-      displayMode: false,
-      explicit: false,
-      key: `${keyPrefix}-auto-${index}`,
-    });
-    appendTextPart(parts, trailing);
-  });
-
-  return parts;
 }
 
 function lastChar(value = "") {
@@ -209,18 +133,70 @@ function withInlineBoundarySpacing(parts) {
 }
 
 export function getMathTextRenderParts(text = "") {
-  const explicitSegments = parseExplicitMathSegments(text);
-  const parts = explicitSegments.flatMap((segment, index) => (
-    segment.type === "math"
-      ? [{
-        type: "math",
-        value: normalizeMathToken(segment.value),
-        displayMode: segment.displayMode,
-        explicit: true,
-        key: `math-${index}`,
-      }]
-      : textToAutoMathParts(segment.value, `text-${index}`)
-  ));
+  return inspectMathTextPipeline(text).parts;
+}
 
-  return withInlineBoundarySpacing(parts);
+export function inspectMathTextPipeline(text = "") {
+  const source = String(text ?? "");
+  const explicitSegments = parseExplicitMathSegments(text);
+  const mixedSegments = segmentMixedTextMath(text);
+  const detectedMathSpans = [];
+  const parts = mixedSegments.map((segment, index) => {
+    if (segment.type === "text") {
+      return { type: "text", value: normalizeDisplayTextSegment(segment.value) };
+    }
+
+    const usesPlainTextNormalization = !segment.explicit && !segment.escaped;
+    const normalizedValue = usesPlainTextNormalization
+      ? normalizeMathToken(segment.value)
+      : normalizeLatexTransport(segment.value);
+    detectedMathSpans.push({
+      source: segment.value,
+      normalized: normalizedValue,
+      displayMode: segment.displayMode,
+      explicit: segment.explicit,
+      escaped: segment.escaped,
+      normalization: usesPlainTextNormalization ? "plain-ocr" : "transport-only",
+    });
+    return {
+      type: "math",
+      value: normalizedValue,
+      displayMode: segment.displayMode,
+      explicit: segment.explicit,
+      key: `math-${index}`,
+    };
+  }).filter((part) => part.value);
+
+  const renderParts = withInlineBoundarySpacing(parts);
+  return {
+    exactString: source,
+    jsonString: JSON.stringify(source),
+    stringLength: source.length,
+    explicitSegments: explicitSegments.map((segment) => ({
+      type: segment.type,
+      exactString: segment.value,
+      jsonString: JSON.stringify(segment.value),
+      stringLength: segment.value.length,
+      displayMode: Boolean(segment.displayMode),
+      explicit: Boolean(segment.explicit),
+    })),
+    detectedMathSpans: detectedMathSpans.map((span) => ({
+      ...span,
+      sourceJson: JSON.stringify(span.source),
+      normalizedJson: JSON.stringify(span.normalized),
+      sourceLength: span.source.length,
+      normalizedLength: span.normalized.length,
+      dispatch: "katex",
+    })),
+    renderDecisions: renderParts.map((part) => ({
+      type: part.type,
+      exactString: part.value,
+      jsonString: JSON.stringify(part.value),
+      stringLength: part.value.length,
+      dispatch: part.type === "math" ? "katex" : "prose",
+      displayMode: Boolean(part.displayMode),
+      explicit: Boolean(part.explicit),
+    })),
+    parts: renderParts,
+  };
 }

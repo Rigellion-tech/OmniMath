@@ -508,7 +508,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   }, [pinnedLenses, onWindowsChange]);
 
   useEffect(() => {
-    if (!DEBUG_MATH_HOVER || typeof window === "undefined") return undefined;
+    if (!import.meta.env.DEV || typeof window === "undefined") return undefined;
     window["__OMNIMATH_HOVER_STATE__"] = {
       activeChunkId,
       activeStepId,
@@ -942,7 +942,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     selectionStateRef.current = emptySelectionState();
     tokenRegistryRef.current.clear();
     measuredLeafRegistryRef.current.clear();
-    if (DEBUG_MATH_HOVER && typeof window !== "undefined") {
+    if (import.meta.env.DEV && typeof window !== "undefined") {
       delete window["__OMNIMATH_HOVER_STATE__"];
       delete window["__OMNIMATH_HOVER_EVENTS__"];
     }

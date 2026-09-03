@@ -66,11 +66,18 @@ describe("math text render segments", () => {
     assert.equal(readable(parts), "The delta between both values is small.");
   });
 
-  it("converts Greek words only inside explicit math contexts", () => {
+  it("preserves explicit math contents instead of treating them as OCR text", () => {
     const parts = getMathTextRenderParts("Use $delta$ as the perturbation.");
 
     assert.deepEqual(parts.map((part) => part.type), ["text", "math", "text"]);
-    assert.equal(parts[1].value, "\\delta");
-    assert.equal(readable(parts), "Use \\delta as the perturbation.");
+    assert.equal(parts[1].value, "delta");
+    assert.equal(readable(parts), "Use delta as the perturbation.");
+  });
+
+  it("keeps OCR normalization on unescaped auto-detected math runs", () => {
+    const parts = getMathTextRenderParts("Use delta=1 and pi/2.");
+    const math = parts.filter((part) => part.type === "math").map((part) => part.value);
+
+    assert.deepEqual(math, ["\\delta=1", "\\pi/2"]);
   });
 });

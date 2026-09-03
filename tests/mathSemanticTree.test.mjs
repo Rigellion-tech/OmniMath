@@ -543,6 +543,31 @@ describe("math semantic tree", () => {
     assert.equal(nodeByLatex(tree, "y+1", "term").type, "sum");
   });
 
+  it("parses control-word and operatorname functions with coherent function heads", () => {
+    const fixtures = [
+      { latex: String.raw`\Gamma(a)`, head: String.raw`\Gamma`, argument: "a" },
+      { latex: String.raw`\zeta(s)`, head: String.raw`\zeta`, argument: "s" },
+      { latex: String.raw`\operatorname{Li}(x)`, head: String.raw`\operatorname{Li}`, argument: "x" },
+      { latex: String.raw`\operatorname{ArbitraryName}(t)`, head: String.raw`\operatorname{ArbitraryName}`, argument: "t" },
+    ];
+
+    for (const fixture of fixtures) {
+      const tree = semanticTree(fixture.latex, "named-function");
+      const call = tree.nodeMap[tree.rootId];
+      const head = nodeByLatex(tree, fixture.head, "functionName");
+      const argument = nodeByLatex(tree, fixture.argument, "argument");
+
+      assert.equal(call.type, "functionCall", fixture.latex);
+      assert.equal(head.type, "function", fixture.latex);
+      assert.equal(head.parentId, call.id, fixture.latex);
+      assert.equal(argument.parentId, call.id, fixture.latex);
+      assert.deepEqual(head.sourceRange, { start: 0, end: fixture.head.length }, fixture.latex);
+      assert.equal(sourceText(tree, head), fixture.head, fixture.latex);
+      assert.equal(sourceText(tree, argument), fixture.argument, fixture.latex);
+      assert.notEqual(head.id, argument.id, fixture.latex);
+    }
+  });
+
   it("parses adjacent generic functions as an implicit product, not one giant function argument", () => {
     const tree = semanticTree("ln(1+x^2) arctan(x)");
     const product = nodeByLatex(tree, "ln(1+x^2) arctan(x)", "term");
@@ -767,5 +792,166 @@ describe("math semantic tree", () => {
     assertSourceText(tree, left, "a");
     assert.equal(left.sourceRange.end <= equality.sourceRange.start, true);
     assert.equal(fraction.latex.includes("\\qquad"), false);
+  });
+
+  it("parses evaluation wrappers without losing inner semantic ownership or source coordinates", () => {
+    const latex = String.raw`A=\left.\frac{\partial^2}{\partial a\,\partial b}\frac{\Gamma(a/2)\Gamma(b/2)}{2\Gamma((a+b)/2)}\right|_{a=b=1}`;
+    const tree = semanticTree(latex, "evaluation-gamma");
+    const root = tree.nodeMap[tree.rootId];
+    const evaluation = tree.flatNodes.find((node) => node.type === "evaluation");
+    const evaluatedExpression = tree.nodeMap[evaluation?.childIds.find((id) => tree.nodeMap[id]?.role === "evaluatedExpression")];
+    const evaluationBar = tree.nodeMap[evaluation?.childIds.find((id) => tree.nodeMap[id]?.role === "evaluationBar")];
+    const condition = tree.nodeMap[evaluation?.childIds.find((id) => tree.nodeMap[id]?.role === "evaluationCondition")];
+    const gammaCalls = tree.flatNodes.filter((node) => node.type === "functionCall" && node.latex.startsWith("\\Gamma"));
+    const gammaNames = tree.flatNodes.filter((node) => node.role === "functionName" && node.latex === "\\Gamma");
+
+    assert.equal(tree.displayLatex, latex);
+    assert.equal(root.type, "equation");
+    assert.ok(evaluation);
+    assert.notEqual(evaluation.type, "atom");
+    assert.equal(evaluatedExpression.type, "product");
+    assert.equal(evaluationBar.latex, "|");
+    assert.equal(condition.latex, "a=b=1");
+    assert.equal(gammaCalls.length, 3);
+    assert.equal(gammaNames.length, 3);
+    assert.equal(new Set(gammaCalls.map((node) => node.id)).size, 3);
+    assert.equal(new Set(gammaNames.map((node) => node.id)).size, 3);
+
+    const derivative = tree.flatNodes.find((node) => node.type === "fraction" && node.latex.startsWith("\\frac{\\partial^2}"));
+    const gammaFraction = tree.flatNodes.find((node) => node.type === "fraction" && node.latex.includes("\\Gamma(a/2)"));
+    const groupedSum = tree.flatNodes.find((node) => node.type === "parenthesized" && node.latex === "(a+b)");
+    assert.ok(derivative);
+    assert.ok(gammaFraction);
+    assert.ok(groupedSum);
+    for (const expected of ["a", "b", "/", "2", "+"]) {
+      assert.ok(tree.flatNodes.some((node) => node.latex === expected), `missing ${expected}`);
+    }
+
+    for (const node of tree.flatNodes) {
+      assert.ok(node.sourceRange, `missing source range for ${node.id}`);
+      assert.equal(sourceText(tree, node), node.source || node.latex, `${node.id} should use rendered-source coordinates`);
+    }
+  });
+
+  it("parses evaluation notation and ordinary sized delimiters independently of function names", () => {
+    const fixtures = [
+      { latex: String.raw`\left.x^2\right|_{x=1}`, type: "evaluation", condition: "x=1" },
+      { latex: String.raw`\left.\frac{d}{dx}f(x)\right|_{x=0}`, type: "evaluation", condition: "x=0" },
+      { latex: String.raw`\left(x+\frac{1}{2}\right)`, type: "sizedDelimited", condition: null },
+      { latex: String.raw`\left[x+1\right]`, type: "sizedDelimited", condition: null },
+      { latex: String.raw`\left\{x+1\right\}`, type: "sizedDelimited", condition: null },
+      { latex: String.raw`\left|x+1\right|`, type: "sizedDelimited", condition: null },
+      { latex: String.raw`\bigl(x+1\bigr)`, type: "sizedDelimited", condition: null },
+    ];
+
+    for (const fixture of fixtures) {
+      const tree = semanticTree(fixture.latex, "sized-delimiter");
+      assert.equal(tree.displayLatex, fixture.latex);
+      assert.equal(tree.nodeMap[tree.rootId].type, fixture.type);
+      assert.equal(tree.fallback, false);
+      assert.ok(tree.flatNodes.length > 1);
+      if (fixture.condition) assert.ok(nodeByLatex(tree, fixture.condition, "evaluationCondition"));
+      for (const node of tree.flatNodes) assert.equal(sourceText(tree, node), node.source || node.latex);
+    }
+  });
+
+  it("parses leading unary signs as structural expressions with recursively parsed operands", () => {
+    const fixtures = [
+      { latex: "-B", operand: "B", operandType: "symbol" },
+      { latex: "+B", operand: "B", operandType: "symbol" },
+      { latex: String.raw`-\frac{B}{2}`, operand: String.raw`\frac{B}{2}`, operandType: "fraction" },
+      { latex: String.raw`+\frac{x}{y}`, operand: String.raw`\frac{x}{y}`, operandType: "fraction" },
+      { latex: String.raw`-\Gamma(x)`, operand: String.raw`\Gamma(x)`, operandType: "functionCall" },
+      { latex: String.raw`-\sqrt{x}`, operand: String.raw`\sqrt{x}`, operandType: "root" },
+      { latex: "-(a+b)", operand: "(a+b)", operandType: "parenthesized" },
+      { latex: String.raw`-\sin x`, operand: String.raw`\sin x`, operandType: "functionCall" },
+      { latex: "--B", operand: "-B", operandType: "unaryExpression" },
+      { latex: "-(-B)", operand: "(-B)", operandType: "parenthesized" },
+    ];
+
+    for (const [index, fixture] of fixtures.entries()) {
+      const tree = semanticTree(fixture.latex, `unary-${index}`);
+      const unary = tree.nodeMap[tree.rootId];
+      const [operator, operand] = childrenOf(tree, unary);
+      assert.equal(unary.type, "unaryExpression");
+      assert.equal(operator.type, "operator");
+      assert.equal(operator.role, "unaryOperator");
+      assert.equal(operator.latex, fixture.latex[0]);
+      assert.deepEqual(operator.sourceRange, { start: 0, end: 1 });
+      assert.equal(operand.type, fixture.operandType);
+      assert.equal(operand.latex, fixture.operand);
+      for (const node of tree.flatNodes) assert.equal(sourceText(tree, node), node.source || node.latex);
+    }
+  });
+
+  it("represents a leading signed numeric factor as one coefficient inside a product", () => {
+    for (const [index, latex] of [String.raw`-2\theta\ln(\cos\theta)`, String.raw`+3x^2`].entries()) {
+      const tree = semanticTree(latex, `signed-coefficient-${index}`);
+      const product = tree.nodeMap[tree.rootId];
+      const coefficient = childrenOf(tree, product)[0];
+
+      assert.equal(product.type, "product");
+      assert.equal(coefficient.type, "number");
+      assert.equal(coefficient.role, "coefficient");
+      assert.equal(coefficient.latex, index === 0 ? "-2" : "+3");
+      assert.equal(sourceText(tree, coefficient), coefficient.latex);
+    }
+  });
+
+  it("keeps a signed coefficient reachable inside a fraction numerator", () => {
+    const latex = String.raw`\frac{-2\theta\ln(\cos\theta)}{\sin\theta\cos\theta}`;
+    const tree = semanticTree(latex, "signed-integrand-coefficient");
+    const coefficient = nodeByLatex(tree, "-2", "coefficient");
+
+    assert.ok(coefficient);
+    assert.equal(coefficient.type, "number");
+    assert.deepEqual(coefficient.sourceRange, { start: 6, end: 8 });
+    assert.equal(sourceText(tree, coefficient), "-2");
+  });
+
+  it("preserves a unary first term and granular signed-fraction ownership in additive expressions", () => {
+    const latex = String.raw`J=-\frac{B}{2}+\frac{\pi A}{4}`;
+    const tree = semanticTree(latex, "unary-reported-equation");
+    const unary = tree.flatNodes.find((node) => node.type === "unaryExpression");
+    const unaryOperator = nodeByLatex(tree, "-", "unaryOperator");
+    const firstFraction = tree.flatNodes.find((node) => node.type === "fraction" && node.sourceRange.start === 3);
+    const b = nodeByLatex(tree, "B", "numerator");
+    const firstTwo = tree.flatNodes.find((node) => node.latex === "2" && node.role === "denominator");
+    const secondFraction = tree.flatNodes.find((node) => node.type === "fraction" && node.latex.includes("\\pi A"));
+
+    assert.equal(tree.nodeMap[tree.rootId].type, "equation");
+    assert.ok(tree.flatNodes.some((node) => node.type === "sum" && node.role === "rightSide"));
+    assert.ok(unary);
+    assert.ok(unaryOperator);
+    assert.ok(firstFraction);
+    assert.notEqual(firstFraction.type, "atom");
+    assert.ok(secondFraction);
+    assert.deepEqual(unaryOperator.sourceRange, { start: 2, end: 3 });
+    assert.deepEqual(b.sourceRange, { start: 9, end: 10 });
+    assert.equal(tree.displayLatex.slice(9, 10), "B");
+    assert.deepEqual(firstTwo.sourceRange, { start: 12, end: 13 });
+    assert.equal(new Set([unary.id, firstFraction.id, b.id, firstTwo.id]).size, 4);
+    assert.equal(firstFraction.parentId, unary.id);
+    assert.equal(b.parentId, firstFraction.id);
+  });
+
+  it("preserves already-working later signed terms while parsing nested unary operands", () => {
+    const laterSigned = semanticTree(String.raw`\frac{\pi A}{4}-\frac{B}{2}`, "later-signed-fraction");
+    const laterB = nodeByLatex(laterSigned, "B", "numerator");
+    assert.ok(laterB);
+    assert.ok(laterSigned.flatNodes.some((node) => node.type === "fraction" && node.latex === String.raw`\frac{B}{2}`));
+    assert.equal(laterSigned.flatNodes.some((node) => node.type === "atom" && node.latex.includes("\\frac{B}{2}")), false);
+
+    const nestedFixtures = [
+      String.raw`a+-\Gamma(x)`,
+      String.raw`f(-\sqrt{x})`,
+      String.raw`\frac{-B}{+2}`,
+    ];
+    for (const [index, latex] of nestedFixtures.entries()) {
+      const tree = semanticTree(latex, `nested-unary-${index}`);
+      assert.ok(tree.flatNodes.some((node) => node.type === "unaryExpression"), `missing unary node for ${latex}`);
+      assert.equal(tree.flatNodes.some((node) => node.type === "atom" && /^[+-]/u.test(node.latex)), false);
+      for (const node of tree.flatNodes) assert.equal(sourceText(tree, node), node.source || node.latex);
+    }
   });
 });

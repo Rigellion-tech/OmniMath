@@ -1,9 +1,15 @@
+import katex from "katex";
+
+/** @typedef {{ type?: string, family?: string }} KatexSyntaxNode */
+const KATEX_INTERNAL = /** @type {{ __parse: (latex: string, options?: object) => KatexSyntaxNode[] }} */ (
+  /** @type {unknown} */ (katex)
+);
+
 const FUNCTION_COMMANDS = new Set(["sin", "cos", "tan", "sec", "csc", "cot", "ln", "log", "exp", "arcsin", "arccos", "arctan"]);
 const GREEK_COMMANDS = new Set(["theta", "phi", "rho", "pi", "alpha", "beta", "gamma", "delta", "lambda", "mu", "sigma", "omega"]);
 const CONSTANT_COMMANDS = new Set(["pi", "infty"]);
 const OPERATOR_COMMANDS = new Set(["cdot", "times", "nabla", "to", "Rightarrow", "leftarrow", "rightarrow"]);
 const PRESENTATION_COMMANDS = new Set(["mathbf", "mathrm", "mathit", "mathcal", "mathbb", "mathsf", "mathtt", "boldsymbol", "vec", "hat", "bar", "tilde", "overline"]);
-const RELATION_OPERATORS = ["\\approx", "\\le", "\\ge", "<=", ">=", "≈", "=", "<", ">"];
 const SPACING_COMMANDS = ["\\qquad", "\\quad", "\\,", "\\!", "\\:", "\\;"];
 const NUMBER_LITERAL_SOURCE = "-?\\d+(?:\\.\\d+)?";
 const NUMBER_LITERAL_PATTERN = new RegExp(`^${NUMBER_LITERAL_SOURCE}$`);
@@ -56,8 +62,6 @@ function normalizeLatexInput(value = "") {
     .replace(/\\mathrm\{(?:or|and)\}/gi, ",")
     .replace(/\\mathbf\s+([a-zA-Z])/g, "\\mathbf{$1}")
     .replace(/\\rangle\s+(?=d(?:\\[a-zA-Z]+|[a-zA-Z]))/g, "\\rangle\\,")
-    .replace(/\\left\s*/g, "")
-    .replace(/\\right\s*/g, "")
     .replace(/\\pm(?=(?:\\[a-zA-Z]+|[a-zA-Z]))/g, "\\pm ");
   return normalizeUnicodeSuperscripts(normalized);
 }
@@ -135,15 +139,121 @@ function readDelimited(text, startIndex) {
   return close ? readGroup(text, startIndex, open, close) : null;
 }
 
+function readControlSequence(text = "", startIndex = 0) {
+  if (text[startIndex] !== "\\") return "";
+  return text.slice(startIndex).match(/^\\(?:[A-Za-z@]+|.)/u)?.[0] || "";
+}
+
+function readRequiredArgument(text = "", startIndex = 0) {
+  const argumentStart = skipLeadingSpacing(text, startIndex);
+  const group = readGroup(text, argumentStart);
+  if (group) {
+    return {
+      value: group.value,
+      contentStart: group.start + 1,
+      contentEnd: group.end - 1,
+      start: group.start,
+      end: group.end,
+      grouped: true,
+    };
+  }
+  const command = readControlSequence(text, argumentStart);
+  const atom = command || text[argumentStart] || "";
+  return atom ? {
+    value: atom,
+    contentStart: argumentStart,
+    contentEnd: argumentStart + atom.length,
+    start: argumentStart,
+    end: argumentStart + atom.length,
+    grouped: false,
+  } : null;
+}
+
+const SIZED_DELIMITER_COMMANDS = [
+  "\\langle", "\\rangle", "\\lfloor", "\\rfloor", "\\lceil", "\\rceil",
+  "\\lvert", "\\rvert", "\\lVert", "\\rVert", "\\Vert", "\\vert", "\\|",
+  "\\{", "\\}",
+];
+const SIZED_DELIMITER_PAIRS = [
+  { open: "\\left", close: "\\right" },
+  { open: "\\bigl", close: "\\bigr" },
+  { open: "\\Bigl", close: "\\Bigr" },
+  { open: "\\biggl", close: "\\biggr" },
+  { open: "\\Biggl", close: "\\Biggr" },
+];
+
+function readSizedDelimiterToken(text = "", startIndex = 0, command = "\\left") {
+  if (!text.startsWith(command, startIndex)) return null;
+  let delimiterStart = startIndex + command.length;
+  while (/\s/u.test(text[delimiterStart] || "")) delimiterStart += 1;
+  const delimiter = SIZED_DELIMITER_COMMANDS.find((candidate) => text.startsWith(candidate, delimiterStart))
+    || text[delimiterStart]
+    || "";
+  if (!delimiter) return null;
+  return {
+    command,
+    delimiter,
+    start: startIndex,
+    delimiterStart,
+    end: delimiterStart + delimiter.length,
+  };
+}
+
+function readSizedDelimited(text = "", startIndex = 0) {
+  const pair = SIZED_DELIMITER_PAIRS.find((candidate) => text.startsWith(candidate.open, startIndex));
+  if (!pair) return null;
+  const open = readSizedDelimiterToken(text, startIndex, pair.open);
+  if (!open) return null;
+  let depth = 1;
+  let cursor = open.end;
+
+  while (cursor < text.length) {
+    if (text.startsWith(pair.open, cursor)) {
+      const nested = readSizedDelimiterToken(text, cursor, pair.open);
+      if (nested) {
+        depth += 1;
+        cursor = nested.end;
+        continue;
+      }
+    }
+    if (text.startsWith(pair.close, cursor)) {
+      const close = readSizedDelimiterToken(text, cursor, pair.close);
+      if (close) {
+        depth -= 1;
+        if (depth === 0) {
+          return {
+            open,
+            close,
+            value: text.slice(open.end, close.start),
+            innerStart: open.end,
+            innerEnd: close.start,
+            end: close.end,
+          };
+        }
+        cursor = close.end;
+        continue;
+      }
+    }
+    cursor += 1;
+  }
+  return null;
+}
+
 function readNameToken(text = "", startIndex = 0) {
   const source = String(text || "").slice(startIndex);
-  const command = source.match(/^\\[a-zA-Z][a-zA-Z0-9]*/)?.[0];
+  const operatorNameCommand = source.match(/^\\operatorname\*?/)?.[0] || "";
+  if (operatorNameCommand) {
+    const nameGroup = readGroup(source, operatorNameCommand.length);
+    if (nameGroup?.value.trim()) return source.slice(0, nameGroup.end);
+  }
+  const command = source.match(/^\\[a-zA-Z@]+/)?.[0];
   if (command) return command;
   return source.match(/^[A-Za-z][A-Za-z0-9]*/)?.[0] || "";
 }
 
 function readSpacingToken(text = "", index = 0) {
   const source = String(text || "");
+  if (source[index] === "\\" && /\s/u.test(source[index + 1] || "")) return source.slice(index, index + 2);
   if (/\s/.test(source[index] || "")) return source[index];
   for (const command of SPACING_COMMANDS) {
     if (!source.startsWith(command, index)) continue;
@@ -167,6 +277,7 @@ function skipTrailingSpacing(text = "", endIndex = text.length) {
   let end = endIndex;
   while (end > 0) {
     if (/\s/.test(text[end - 1] || "")) {
+      if (end >= 2 && text[end - 2] === "\\") end -= 1;
       end -= 1;
       continue;
     }
@@ -271,6 +382,10 @@ function readScriptsAfter(text = "", startIndex = 0) {
 function readAtomicFactorEnd(text = "", startIndex = 0) {
   const source = String(text || "");
   if (startIndex >= source.length) return -1;
+  const sizedDelimited = readSizedDelimited(source, startIndex);
+  if (sizedDelimited) {
+    return readScriptsAfter(source, sizedDelimited.end).endIndex;
+  }
   const delimited = readDelimited(source, startIndex);
   let endIndex = delimited?.end || -1;
   if (endIndex < 0) {
@@ -286,6 +401,24 @@ function readAtomicFactorEnd(text = "", startIndex = 0) {
   if (endIndex <= startIndex) return -1;
   const scriptInfo = readScriptsAfter(source, endIndex);
   return scriptInfo.endIndex;
+}
+
+function readAtomicBaseEnd(text = "", startIndex = 0) {
+  const source = String(text || "");
+  if (startIndex >= source.length) return -1;
+  const sizedDelimited = readSizedDelimited(source, startIndex);
+  if (sizedDelimited) return sizedDelimited.end;
+  const delimited = readDelimited(source, startIndex);
+  if (delimited) return delimited.end;
+  const command = readControlSequence(source, startIndex);
+  if (command && source[startIndex + command.length] === "{") {
+    const argument = readGroup(source, startIndex + command.length);
+    if (argument) return argument.end;
+  }
+  const number = source.slice(startIndex).match(new RegExp(`^${NUMBER_LITERAL_SOURCE}`))?.[0];
+  const symbol = source.slice(startIndex).match(/^[A-Za-z]/)?.[0];
+  const atom = command || number || symbol || "";
+  return atom ? startIndex + atom.length : -1;
 }
 
 function trailingNameToken(text = "") {
@@ -373,10 +506,30 @@ function findTopLevelOperator(text, operators) {
   return -1;
 }
 
+const KATEX_ATOM_FAMILY_CACHE = new Map();
+
+function katexAtomFamily(latex = "") {
+  if (KATEX_ATOM_FAMILY_CACHE.has(latex)) return KATEX_ATOM_FAMILY_CACHE.get(latex);
+  let family = "";
+  try {
+    const parsed = KATEX_INTERNAL.__parse(latex, { strict: "ignore", throwOnError: true });
+    if (parsed.length === 1 && parsed[0]?.type === "atom") family = parsed[0].family || "";
+  } catch {
+    family = "";
+  }
+  KATEX_ATOM_FAMILY_CACHE.set(latex, family);
+  return family;
+}
+
+function readRelationAtom(text = "", index = 0) {
+  const command = readControlSequence(text, index);
+  const candidate = command || text[index] || "";
+  return candidate && katexAtomFamily(candidate) === "rel" ? candidate : "";
+}
+
 function findTopLevelRelation(text) {
   let braceDepth = 0;
-  let parenDepth = 0;
-  let bracketDepth = 0;
+  let delimiterDepth = 0;
   let angleDepth = 0;
   for (let index = 0; index < text.length; index += 1) {
     if (text.startsWith("\\langle", index)) {
@@ -392,13 +545,18 @@ function findTopLevelRelation(text) {
     const char = text[index];
     if (char === "{") braceDepth += 1;
     else if (char === "}") braceDepth -= 1;
-    else if (char === "(") parenDepth += 1;
-    else if (char === ")") parenDepth -= 1;
-    else if (char === "[") bracketDepth += 1;
-    else if (char === "]") bracketDepth -= 1;
-    if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0 || angleDepth !== 0) continue;
-    const operator = RELATION_OPERATORS.find((candidate) => text.startsWith(candidate, index));
-    if (operator) return { index, operator };
+    else if (char === "(" || char === "[") delimiterDepth += 1;
+    else if (char === ")" || char === "]") delimiterDepth = Math.max(0, delimiterDepth - 1);
+    if (braceDepth !== 0 || delimiterDepth !== 0 || angleDepth !== 0) continue;
+    const first = readRelationAtom(text, index);
+    if (!first || index === 0) continue;
+    let end = index + first.length;
+    while (end < text.length) {
+      const next = readRelationAtom(text, end);
+      if (!next) break;
+      end += next.length;
+    }
+    if (end < text.length) return { index, operator: text.slice(index, end) };
   }
   return null;
 }
@@ -462,7 +620,9 @@ function splitTopLevelTerms(text) {
     else if (char === "]") bracketDepth -= 1;
     if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0 || angleDepth !== 0) continue;
     const pmOperator = text.startsWith("\\pm", index);
-    if (((char === "+" || char === "-") && index > start) || (pmOperator && index > start)) {
+    const prefix = text.slice(start, index).trim();
+    const hasOperandBeforeSign = index > start && !/^[+-]+$/u.test(prefix);
+    if (((char === "+" || char === "-") && hasOperandBeforeSign) || (pmOperator && index > start)) {
       terms.push({ value: text.slice(start, index), operator, operatorIndex, start });
       operator = pmOperator ? "\\pm" : char;
       operatorIndex = index;
@@ -613,8 +773,7 @@ function splitVectorComponents(text = "") {
 function splitTopLevelCommas(text = "") {
   const parts = [];
   let braceDepth = 0;
-  let parenDepth = 0;
-  let bracketDepth = 0;
+  let delimiterDepth = 0;
   let angleDepth = 0;
   let start = 0;
   for (let index = 0; index < text.length; index += 1) {
@@ -631,11 +790,9 @@ function splitTopLevelCommas(text = "") {
     const char = text[index];
     if (char === "{") braceDepth += 1;
     else if (char === "}") braceDepth -= 1;
-    else if (char === "(") parenDepth += 1;
-    else if (char === ")") parenDepth -= 1;
-    else if (char === "[") bracketDepth += 1;
-    else if (char === "]") bracketDepth -= 1;
-    if (braceDepth === 0 && parenDepth === 0 && bracketDepth === 0 && angleDepth === 0 && char === "," && text[index - 1] !== "\\") {
+    else if (char === "(" || char === "[") delimiterDepth += 1;
+    else if (char === ")" || char === "]") delimiterDepth = Math.max(0, delimiterDepth - 1);
+    if (braceDepth === 0 && delimiterDepth === 0 && angleDepth === 0 && char === "," && text[index - 1] !== "\\") {
       parts.push({ value: text.slice(start, index), start, commaIndex: index });
       start = index + 1;
     }
@@ -647,15 +804,17 @@ function splitTopLevelCommas(text = "") {
 }
 
 function hasBalancedGroups(text = "") {
-  const stack = [];
-  const pairs = { "{": "}", "(": ")", "[": "]" };
+  const braceStack = [];
+  let delimiterDepth = 0;
   for (const char of String(text || "")) {
-    if (char === "{" || char === "(" || char === "[") stack.push(pairs[char]);
-    else if (char === "}" || char === ")" || char === "]") {
-      if (stack.pop() !== char) return false;
-    }
+    if (char === "{") braceStack.push("}");
+    else if (char === "}") {
+      if (braceStack.pop() !== char) return false;
+    } else if (braceStack.length === 0 && (char === "(" || char === "[")) delimiterDepth += 1;
+    else if (braceStack.length === 0 && (char === ")" || char === "]")) delimiterDepth -= 1;
+    if (delimiterDepth < 0) return false;
   }
-  return stack.length === 0;
+  return braceStack.length === 0 && delimiterDepth === 0;
 }
 
 function createBuilder(stepId, displayLatex) {
@@ -824,10 +983,26 @@ function createDifferentialNode(builder, rawLatex, parentId, depth, start, end, 
 function parseDelimitedExpression(builder, text, parentId, depth, start, role) {
   if (!text || text.length < 2) return null;
   const open = text[0];
-  const close = DELIMITER_PAIRS[open];
-  if (!close || text[text.length - 1] !== close) return null;
-  const group = readDelimited(text, 0);
-  if (!group || group.end !== text.length) return null;
+  const close = text[text.length - 1];
+  if (!(open === "(" || open === "[") || !(close === ")" || close === "]")) {
+    if (open !== "{" || close !== "}") return null;
+  }
+  const group = open === "{" ? readDelimited(text, 0) : null;
+  if (open === "{" && (!group || group.end !== text.length)) return null;
+  if (open !== "{") {
+    let delimiterDepth = 0;
+    let braceDepth = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (char === "{") braceDepth += 1;
+      else if (char === "}") braceDepth -= 1;
+      else if (braceDepth === 0 && (char === "(" || char === "[")) delimiterDepth += 1;
+      else if (braceDepth === 0 && (char === ")" || char === "]")) delimiterDepth -= 1;
+      if (delimiterDepth === 0 && index < text.length - 1) return null;
+    }
+    if (delimiterDepth !== 0) return null;
+  }
+  const innerValue = text.slice(1, -1);
   const nodeType = open === "(" ? "parenthesized" : open === "[" ? "delimited" : "group";
   const nodeRole = open === "("
     ? (role === "expression" || role === "term" || role === "factor" ? "parenthesized" : role)
@@ -836,14 +1011,222 @@ function parseDelimitedExpression(builder, text, parentId, depth, start, role) {
     ? role
     : "expression";
   const node = builder.createNode({ type: nodeType, role: nodeRole, latex: text, parentId, depth, start, end: start + text.length });
-  const inner = parseExpression(builder, group.value, node.id, depth + 1, start + 1, innerRole);
-  if (open === "(") {
+  const inner = parseExpression(builder, innerValue, node.id, depth + 1, start + 1, innerRole);
+  if (open === "(" && close === ")") {
     node.childIds = [inner?.id].filter(Boolean);
     return node;
   }
   const openNode = builder.createNode({ type: "operator", role: "delimiter", latex: open, parentId: node.id, depth: depth + 1, start, end: start + 1 });
   const closeNode = builder.createNode({ type: "operator", role: "delimiter", latex: close, parentId: node.id, depth: depth + 1, start: start + text.length - 1, end: start + text.length });
   node.childIds = [openNode.id, inner?.id, closeNode.id].filter(Boolean);
+  return node;
+}
+
+function parseFractionExpression(builder, text, parentId, depth, start, role) {
+  if (!text.startsWith("\\frac")) return null;
+  const numerator = readRequiredArgument(text, "\\frac".length);
+  const denominator = numerator ? readRequiredArgument(text, numerator.end) : null;
+  if (!numerator || !denominator) return null;
+
+  if (denominator.end < text.length) {
+    const node = builder.createNode({
+      type: "product",
+      role: role === "expression" ? "term" : role,
+      latex: text,
+      parentId,
+      depth,
+      start,
+      end: start + text.length,
+    });
+    const first = parseExpression(builder, text.slice(0, denominator.end), node.id, depth + 1, start, "factor");
+    const secondStart = skipLeadingSpacing(text, denominator.end);
+    const second = parseExpression(builder, text.slice(secondStart), node.id, depth + 1, start + secondStart, "factor");
+    node.childIds = [first?.id, second?.id].filter(Boolean);
+    return node;
+  }
+
+  const node = builder.createNode({
+    type: "fraction",
+    role: role === "expression" || role === "term" ? "fraction" : role,
+    latex: text,
+    parentId,
+    depth,
+    start,
+    end: start + text.length,
+  });
+  const top = parseExpression(builder, numerator.value, node.id, depth + 1, start + numerator.contentStart, "numerator");
+  const bottom = parseExpression(builder, denominator.value, node.id, depth + 1, start + denominator.contentStart, "denominator");
+  if (top) top.role = "numerator";
+  if (bottom) bottom.role = "denominator";
+  const childIds = [top?.id];
+  if (numerator.grouped && denominator.grouped) {
+    const bar = builder.createNode({
+      type: "operator",
+      role: "fractionBar",
+      latex: "/",
+      parentId: node.id,
+      depth: depth + 1,
+      start: start + numerator.contentEnd,
+      end: start + denominator.contentStart,
+    });
+    bar.source = text.slice(numerator.contentEnd, denominator.contentStart);
+    bar.normalizedSource = "/";
+    childIds.push(bar.id);
+  }
+  childIds.push(bottom?.id);
+  node.childIds = childIds.filter(Boolean);
+  return node;
+}
+
+function parseScriptedExpression(builder, text, parentId, depth, start, role) {
+  const exponentIndex = findTopLevelOperator(text, ["^"]);
+  if (exponentIndex > 0) {
+    const exponent = readScriptAtom(text, exponentIndex);
+    if (!exponent || exponent.endIndex !== text.length) return null;
+    const node = builder.createNode({
+      type: "power",
+      role: "power",
+      latex: text,
+      parentId,
+      depth,
+      start,
+      end: start + text.length,
+    });
+    const base = parseExpression(builder, text.slice(0, exponentIndex), node.id, depth + 1, start, "base");
+    const marker = builder.createNode({
+      type: "operator",
+      role: "operator",
+      latex: "^",
+      parentId: node.id,
+      depth: depth + 1,
+      start: start + exponentIndex,
+      end: start + exponentIndex + 1,
+    });
+    const exponentNode = parseExpression(builder, exponent.value, node.id, depth + 1, start + exponent.start, "exponent");
+    node.childIds = [base?.id, marker.id, exponentNode?.id].filter(Boolean);
+    return node;
+  }
+
+  const baseEnd = readAtomicBaseEnd(text, 0);
+  if (baseEnd <= 0 || baseEnd >= text.length) return null;
+  const scriptInfo = readScriptsAfter(text, baseEnd);
+  if (scriptInfo.scripts.length === 1 && scriptInfo.scripts[0].marker === "_" && scriptInfo.endIndex === text.length) {
+    return builder.createNode({
+      type: "subscript",
+      role: role === "expression" ? "variable" : role,
+      latex: text,
+      parentId,
+      depth,
+      start,
+      end: start + text.length,
+    });
+  }
+  return null;
+}
+
+function parseCommandApplication(builder, text, parentId, depth, start, role) {
+  const command = readControlSequence(text, 0);
+  if (!command) return null;
+  const argument = readRequiredArgument(text, command.length);
+  if (!argument?.grouped || argument.end !== text.length) return null;
+  try {
+    const parsed = KATEX_INTERNAL.__parse(text, { strict: "ignore", throwOnError: true });
+    if (parsed.length !== 1 || parsed[0]?.type !== "accent") return null;
+  } catch {
+    return null;
+  }
+  const node = builder.createNode({
+    type: "commandApplication",
+    role: role === "expression" || role === "term" || role === "factor" ? "decorated" : role,
+    latex: text,
+    parentId,
+    depth,
+    start,
+    end: start + text.length,
+  });
+  const argumentNode = parseExpression(builder, argument.value, node.id, depth + 1, start + argument.contentStart, "argument");
+  node.childIds = [argumentNode?.id].filter(Boolean);
+  return node;
+}
+
+function isEvaluationBarDelimiter(delimiter = "") {
+  return ["|", "\\|", "\\vert", "\\Vert", "\\rvert", "\\rVert"].includes(delimiter);
+}
+
+function sizedDelimiterRole(delimiter = "") {
+  if (delimiter === "(") return "parenthesized";
+  if (delimiter === "[") return "delimited";
+  if (delimiter === "\\{" || delimiter === "{") return "group";
+  if (isEvaluationBarDelimiter(delimiter)) return "absoluteValue";
+  return "delimited";
+}
+
+function createSizedDelimiterNode(builder, token, parentId, depth, start) {
+  return builder.createNode({
+    type: "operator",
+    role: "delimiter",
+    latex: token.delimiter,
+    parentId,
+    depth,
+    start: start + token.delimiterStart,
+    end: start + token.end,
+  });
+}
+
+function parseSizedDelimitedExpression(builder, text, parentId, depth, start, role) {
+  const sized = readSizedDelimited(text, 0);
+  if (!sized) return null;
+  const scriptInfo = readScriptsAfter(text, sized.end);
+  const isEvaluation = sized.open.delimiter === "."
+    && isEvaluationBarDelimiter(sized.close.delimiter)
+    && scriptInfo.scripts.some((script) => script.marker === "_")
+    && scriptInfo.endIndex === text.length;
+  if (!isEvaluation && sized.end !== text.length) return null;
+  const node = builder.createNode({
+    type: isEvaluation ? "evaluation" : "sizedDelimited",
+    role: isEvaluation
+      ? "evaluation"
+      : (role === "expression" || role === "term" || role === "factor"
+        ? sizedDelimiterRole(sized.open.delimiter)
+        : role),
+    latex: text,
+    parentId,
+    depth,
+    start,
+    end: start + text.length,
+  });
+  const open = createSizedDelimiterNode(builder, sized.open, node.id, depth + 1, start);
+  const inner = parseExpression(
+    builder,
+    sized.value,
+    node.id,
+    depth + 1,
+    start + sized.innerStart,
+    isEvaluation ? "evaluatedExpression" : "expression",
+  );
+  const close = createSizedDelimiterNode(builder, sized.close, node.id, depth + 1, start);
+  if (isEvaluation) {
+    close.role = "evaluationBar";
+    close.latex = sized.close.delimiter;
+  }
+
+  const childIds = [open.id, inner?.id, close.id].filter(Boolean);
+  for (const script of scriptInfo.scripts) {
+    const scriptRole = script.marker === "_" ? "evaluationCondition" : "evaluationSuperscript";
+    const scriptNode = parseExpression(
+      builder,
+      script.value,
+      node.id,
+      depth + 1,
+      start + script.start,
+      scriptRole,
+    );
+    if (scriptNode) {
+      scriptNode.role = scriptRole;
+      childIds.push(scriptNode.id);
+    }
+  }
+  node.childIds = childIds;
   return node;
 }
 
@@ -946,8 +1329,9 @@ function parseDerivative(builder, text, parentId, depth, start, role) {
   const ordinary = text.match(/^d\/d(\\[a-zA-Z]+|[a-zA-Z])(.+)$/);
   if (ordinary) {
     const [, variable, argumentRaw] = ordinary;
-    const operatorLatex = `d/d${variable}`;
-    const argumentStart = skipLeadingSpacing(text, operatorLatex.length);
+    const derivativeHead = `d/d${variable}`;
+    const operatorLatex = "d/d";
+    const argumentStart = skipLeadingSpacing(text, derivativeHead.length);
     const argumentGroup = readDelimited(text, argumentStart);
     const argumentLatex = argumentGroup ? argumentGroup.value : stripOuterParens(argumentRaw);
     const argumentOffset = argumentGroup ? argumentGroup.start + 1 : text.indexOf(argumentRaw);
@@ -1162,6 +1546,9 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
   start = trimmed.start;
   if (!text) return null;
 
+  const sizedDelimited = parseSizedDelimitedExpression(builder, text, parentId, depth, start, role);
+  if (sizedDelimited) return sizedDelimited;
+
   const environment = parseEnvironment(builder, text, parentId, depth, start, role);
   if (environment) return environment;
 
@@ -1190,7 +1577,13 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
 
   const relation = findTopLevelRelation(text);
   if (relation?.index > 0) {
-    const relationRole = relation.operator === "=" ? "equality" : relation.operator === "\\approx" ? "approximation" : "inequality";
+    const relationRole = relation.operator === "="
+      ? "equality"
+      : relation.operator === "\\approx"
+        ? "approximation"
+      : relation.operator.length > 1 && relation.operator.endsWith("=")
+        ? "definition"
+        : "relation";
     const nodeRole = role === "expression" || role === "term"
       ? (relationRole === "equality" ? "equation" : relationRole)
       : role;
@@ -1244,6 +1637,9 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
   const derivative = parseDerivative(builder, text, parentId, depth, start, role);
   if (derivative) return derivative;
 
+  const fraction = parseFractionExpression(builder, text, parentId, depth, start, role);
+  if (fraction) return fraction;
+
   const integral = parseIntegralExpression(builder, text, parentId, depth, start, role);
   if (integral) return integral;
 
@@ -1283,6 +1679,66 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
     return node;
   }
 
+  const unaryOperator = text[0];
+  const signedProductParts = (unaryOperator === "+" || unaryOperator === "-") && text.length > 1
+    ? (splitImplicitProduct(text) || (() => {
+        if (unaryOperator !== "+") return null;
+        const unsignedParts = splitImplicitProduct(text.slice(1));
+        if (!unsignedParts || !NUMBER_LITERAL_PATTERN.test(unsignedParts[0]?.value || "")) return null;
+        return [
+          { ...unsignedParts[0], value: `+${unsignedParts[0].value}`, start: 0 },
+          { ...unsignedParts[1], start: unsignedParts[1].start + 1 },
+        ];
+      })())
+    : null;
+  if (signedProductParts && /^[+-]\d/.test(signedProductParts[0]?.value || "")) {
+    const node = builder.createNode({ type: "product", role: role === "expression" ? "term" : role, latex: text, parentId, depth, start, end: start + text.length });
+    const [coefficientPart, factorPart] = signedProductParts;
+    const coefficient = builder.createNode({
+      type: "number",
+      role: "coefficient",
+      latex: coefficientPart.value,
+      parentId: node.id,
+      depth: depth + 1,
+      start: start + coefficientPart.start,
+      end: start + coefficientPart.start + coefficientPart.value.length,
+    });
+    const factor = parseExpression(builder, factorPart.value, node.id, depth + 1, start + factorPart.start, "factor");
+    node.childIds = [coefficient.id, factor?.id].filter(Boolean);
+    return node;
+  }
+  const isSignedNumberLiteral = NUMBER_LITERAL_PATTERN.test(text);
+  if ((unaryOperator === "+" || unaryOperator === "-") && text.length > 1 && !isSignedNumberLiteral) {
+    const node = builder.createNode({
+      type: "unaryExpression",
+      role,
+      latex: text,
+      parentId,
+      depth,
+      start,
+      end: start + text.length,
+    });
+    const operator = builder.createNode({
+      type: "operator",
+      role: "unaryOperator",
+      latex: unaryOperator,
+      parentId: node.id,
+      depth: depth + 1,
+      start,
+      end: start + 1,
+    });
+    const operand = parseExpression(
+      builder,
+      text.slice(1),
+      node.id,
+      depth + 1,
+      start + 1,
+      "operand",
+    );
+    node.childIds = [operator.id, operand?.id].filter(Boolean);
+    return node;
+  }
+
   const partialMatch = text.match(/^\\partial\/\\partial([a-zA-Z]|\\[a-zA-Z]+)(.+)$/);
   if (partialMatch) {
     const [, variable, argumentRaw] = partialMatch;
@@ -1306,23 +1762,6 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
     if (bottom) bottom.role = "denominator";
     node.childIds = [top?.id, slash.id, bottom?.id].filter(Boolean);
     return node;
-  }
-
-  if (text.startsWith("\\frac")) {
-    const numerator = readGroup(text, "\\frac".length);
-    const denominator = numerator ? readGroup(text, numerator.end) : null;
-    if (numerator && denominator) {
-      const node = builder.createNode({ type: "fraction", role: role === "expression" || role === "term" ? "fraction" : role, latex: text, parentId, depth, start, end: start + text.length });
-      const top = parseExpression(builder, numerator.value, node.id, depth + 1, start + numerator.start + 1, "numerator");
-      const bar = builder.createNode({ type: "operator", role: "operator", latex: "/", parentId: node.id, depth: depth + 1, start: start + numerator.end - 1, end: start + denominator.start + 1 });
-      bar.source = text.slice(numerator.end - 1, denominator.start + 1);
-      bar.normalizedSource = "/";
-      const bottom = parseExpression(builder, denominator.value, node.id, depth + 1, start + denominator.start + 1, "denominator");
-      if (top) top.role = "numerator";
-      if (bottom) bottom.role = "denominator";
-      node.childIds = [top?.id, bar.id, bottom?.id].filter(Boolean);
-      return node;
-    }
   }
 
   if (text.startsWith("\\sqrt")) {
@@ -1409,27 +1848,11 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
     return node;
   }
 
-  const powerIndex = findTopLevelOperator(text, ["^"]);
-  if (powerIndex > 0) {
-    const exponentScript = readScriptAtom(text, powerIndex);
-    if (!exponentScript || exponentScript.endIndex !== text.length) {
-      return builder.createNode({ type: "atom", role: role === "expression" ? "factor" : role, latex: text, parentId, depth, start, end: start + text.length });
-    }
-    const node = builder.createNode({ type: "power", role: "power", latex: text, parentId, depth, start, end: start + text.length });
-    const base = parseExpression(builder, text.slice(0, powerIndex), node.id, depth + 1, start, "base");
-    const caret = builder.createNode({ type: "operator", role: "operator", latex: "^", parentId: node.id, depth: depth + 1, start: start + powerIndex, end: start + powerIndex + 1 });
-    const exponent = parseExpression(builder, exponentScript.value, node.id, depth + 1, start + exponentScript.start, "exponent");
-    node.childIds = [base?.id, caret.id, exponent?.id].filter(Boolean);
-    return node;
-  }
+  const scripted = parseScriptedExpression(builder, text, parentId, depth, start, role);
+  if (scripted) return scripted;
 
-  const subscriptIndex = findTopLevelOperator(text, ["_"]);
-  if (
-    subscriptIndex > 0
-    && /^((?:[a-zA-Z]|\\mathbf\{?[a-zA-Z]\}?|\\(?:theta|phi|rho|alpha|beta|gamma|delta|lambda|mu|sigma|omega)))(?:_\{?[^{}]+\}?)$/.test(text)
-  ) {
-    return builder.createNode({ type: "subscript", role: role === "expression" ? "variable" : role, latex: text, parentId, depth, start, end: start + text.length });
-  }
+  const commandApplication = parseCommandApplication(builder, text, parentId, depth, start, role);
+  if (commandApplication) return commandApplication;
 
   const tokenMeta = tokenTypeForLatex(text);
   const inheritedRole = role === "expression" || (role === "term" && ["number", "symbol", "operator"].includes(tokenMeta.type))

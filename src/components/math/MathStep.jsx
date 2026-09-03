@@ -400,7 +400,7 @@ function SolutionStepView({ step, index, selected, expanded, onSelect, onToggleE
                     ? "border-emerald-300/30 text-emerald-50/82"
                     : "border-teal-300/22 text-slate-300/78"
                 )}>
-                  <MathText>{step.summary}</MathText>
+                  <MathText diagnosticStepIndex={index}>{step.summary}</MathText>
                 </p>
               )}
             </div>

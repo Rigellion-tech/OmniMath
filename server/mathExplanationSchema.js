@@ -10,6 +10,7 @@ import {
   inspectLatexControlCharacterStage,
   recoverDeclaredLatexControlCharacters,
 } from "./latexControlCharacterRecovery.js";
+import { logBackendReasoningLatexStage } from "./reasoningLatexDiagnostics.js";
 
 export const difficultyExplanationSchema = {
   type: "object",
@@ -1338,6 +1339,7 @@ export function convertFastSolveToMathExplanation(value, {
   preserveProblemLatex = false,
 } = {}) {
   const solve = assertFastSolveResponse(value, originalProblem, { includeProblemStep });
+  logBackendReasoningLatexStage("3a.reasoning_before_structural_normalization", solve);
   summarizeSolvePipelineStage("schema validation", solve.steps, { finalAnswerLatex: solve.finalAnswerLatex });
   let anchorBudget = 20;
   const anchorsByStepId = new Map();
@@ -1422,6 +1424,7 @@ export function convertFastSolveToMathExplanation(value, {
     tokens,
     steps,
   });
+  logBackendReasoningLatexStage("3b.reasoning_after_structural_normalization", annotated);
   summarizeSolvePipelineStage("annotation generation", annotated.steps || [], {
     finalAnswerLatex: solve.finalAnswerLatex,
     semanticNodeCount: (annotated.steps || []).reduce((count, step) => (

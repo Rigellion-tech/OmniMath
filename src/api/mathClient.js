@@ -1,4 +1,5 @@
 import { getSolutionSteps } from "../lib/solutionSteps.js";
+import { inspectReasoningCandidate } from "../lib/reasoningLatexDiagnostics.js";
 import {
   canonicalProblemFromExtraction,
   createCanonicalProblemPayload,
@@ -101,6 +102,14 @@ function objectOrEmpty(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+function logFrontendReasoningLatexStage(stage, candidate) {
+  if (!import.meta.env?.DEV || import.meta.env.VITE_DEBUG_REASONING_LATEX !== "true") return;
+  console.info("[omnimath:reasoning-latex]", inspectReasoningCandidate(candidate, {
+    stage,
+    stepSelector: import.meta.env.VITE_DEBUG_REASONING_LATEX_STEPS || "1,2",
+  }));
+}
+
 /** @returns {Record<string, any>} */
 export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {}) {
   const raw = objectOrEmpty(rawResponse);
@@ -109,6 +118,7 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {})
   const solution = objectOrEmpty(raw.solution);
   const problem = objectOrEmpty(raw.problem);
   const source = [raw, explanation, result, solution, problem].find((item) => Array.isArray(item.steps)) || raw;
+  logFrontendReasoningLatexStage("4a.frontend_received_field", source);
   const steps = getSolutionSteps(raw);
   const saveWarning = raw.runtime?.saveWarning || explanation.runtime?.saveWarning || result.runtime?.saveWarning || raw.saveWarning || "";
   const warnings = [
@@ -137,6 +147,7 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {})
       saveWarning: saveWarning || raw.runtime?.saveWarning || null,
     },
   };
+  logFrontendReasoningLatexStage("4b.frontend_response_normalization", normalized);
   return normalized;
 }
 

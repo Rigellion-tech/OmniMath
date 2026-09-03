@@ -1,22 +1,30 @@
+import katex from "katex";
+
 const SAFE_DATA_VALUE_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const HIDDEN_SYNTAX_LATEX = new Set(["^", "_"]);
-const HIDDEN_ROLES = new Set(["delimiter"]);
+const HIDDEN_ROLES = new Set(["delimiter", "evaluationBar"]);
 const GROUP_ANNOTATION_ROLES = new Set([
   "argument",
   "base",
   "bound",
   "denominator",
+  "decorated",
   "differential",
+  "evaluatedExpression",
+  "evaluation",
+  "evaluationCondition",
   "exponent",
   "fraction",
   "function",
   "integral",
   "lowerBound",
   "numerator",
+  "operand",
   "power",
   "radicand",
   "root",
   "upperBound",
+  "unaryExpression",
 ]);
 
 function cleanDataValue(value = "", fallback = "node") {
@@ -102,6 +110,139 @@ function isHiddenSyntaxNode(node = {}, source = "") {
   return false;
 }
 
+/*
+ * TeX source ranges describe characters, not grammar productions.  In
+ * particular, a range ending after `\\binom` or `\\sqrt[3]` is not a
+ * renderable expression even though it is a meaningful prefix to our math
+ * parser.  Keep the grammar-sensitive parts explicit so they can never
+ * become hover targets by accident.  This scanner identifies TeX grammar
+ * tokens; it does not attempt to know the argument signature of individual
+ * macros.  The public KaTeX renderer below remains the authority for whether
+ * a proposed set of annotations is a valid expression.
+ */
+export function scanTexSyntaxRanges(source = "") {
+  const text = String(source || "");
+  const ranges = [];
+  const push = (start, end, kind) => {
+    if (end > start) ranges.push({ start, end, kind, source: text.slice(start, end) });
+  };
+
+  for (let index = 0; index < text.length;) {
+    const char = text[index];
+    if (char === "\\") {
+      const command = readTexControlSequence(text, index);
+      const end = index + command.length;
+      if (command === "\\\\") push(index, end, "row-separator");
+
+      if (command === "\\begin" || command === "\\end") {
+        const groupStart = skipTexWhitespace(text, end);
+        const groupEnd = readBalancedTexContainer(text, groupStart, "{", "}");
+        push(index, groupEnd > groupStart ? groupEnd : end, "environment-marker");
+        index = groupEnd > groupStart ? groupEnd : end;
+        continue;
+      }
+
+      if (["\\left", "\\right", "\\middle"].includes(command)) {
+        const delimiterStart = skipTexWhitespace(text, end);
+        const delimiter = readTexControlSequence(text, delimiterStart);
+        push(index, delimiter ? delimiterStart + delimiter.length : delimiterStart + 1, "delimiter-grammar");
+        index = delimiter ? delimiterStart + delimiter.length : delimiterStart + 1;
+        continue;
+      }
+
+      index = Math.max(index + 1, end);
+      continue;
+    }
+
+    const kind = char === "{" || char === "}"
+      ? "group-marker"
+      : char === "[" || char === "]"
+        ? "optional-argument-marker"
+        : char === "^" || char === "_"
+          ? "script-marker"
+          : char === "&"
+            ? "alignment-marker"
+            : "";
+    if (kind) push(index, index + 1, kind);
+    index += 1;
+  }
+
+  // Array-like grammar is especially layout-sensitive when it is used as a
+  // script. KaTeX intentionally compacts constructs such as a two-line limit
+  // condition. Although htmlData remains syntactically valid inside those
+  // rows, inserting ordinary atoms there can change the script's measured
+  // width. Treat the complete scripted structural container as a protected
+  // syntax scope. This is based on grammar relationships (script + structural
+  // separators), not on the name of the macro that happens to create it.
+  const structuralKinds = new Set(["alignment-marker", "environment-marker", "row-separator"]);
+  const grammarRanges = [...ranges];
+  for (const script of grammarRanges.filter((range) => range.kind === "script-marker")) {
+    const argumentStart = skipTexWhitespace(text, script.end);
+    if (text[argumentStart] !== "{") continue;
+    const argumentEnd = readBalancedTexContainer(text, argumentStart, "{", "}");
+    if (argumentEnd <= argumentStart) continue;
+    const containsStructuralGrammar = grammarRanges.some((range) => (
+      structuralKinds.has(range.kind)
+      && range.start >= argumentStart + 1
+      && range.end <= argumentEnd - 1
+    ));
+    if (containsStructuralGrammar) {
+      push(argumentStart + 1, argumentEnd - 1, "scripted-structural-container");
+    }
+  }
+
+  return ranges;
+}
+
+function readTexControlSequence(source = "", start = 0) {
+  if (source[start] !== "\\") return "";
+  return source.slice(start).match(/^\\(?:[A-Za-z@]+|.)/u)?.[0] || "";
+}
+
+function skipTexWhitespace(source = "", start = 0) {
+  let index = start;
+  while (/\s/u.test(source[index] || "")) index += 1;
+  return index;
+}
+
+function readBalancedTexContainer(source = "", start = 0, open = "{", close = "}") {
+  if (source[start] !== open) return -1;
+  let depth = 0;
+  for (let index = start; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      const command = readTexControlSequence(source, index);
+      index += Math.max(0, command.length - 1);
+      continue;
+    }
+    if (source[index] === open) depth += 1;
+    else if (source[index] === close) depth -= 1;
+    if (depth === 0) return index + 1;
+  }
+  return -1;
+}
+
+function isPureTexSyntaxRange(range, syntaxRanges = []) {
+  return syntaxRanges.some((syntax) => syntax.start === range.start && syntax.end === range.end);
+}
+
+export function classifySemanticNodeInteraction(node = {}, source = "") {
+  if (!isLeafNode(node)) {
+    return {
+      interactive: false,
+      classification: "non-leaf-interactive",
+      reason: "structural-node-represented-by-semantic-descendants",
+    };
+  }
+  if (isHiddenSyntaxNode(node, source)) {
+    return {
+      interactive: false,
+      classification: "structural-parent-only",
+      reason: "rendered-primitive-or-syntax-owned-by-structural-parent",
+    };
+  }
+  return { interactive: true, classification: "interactive-leaf", reason: "" };
+}
+
 function shouldAnnotateNode(node = {}, source = "") {
   const range = numericRange(node.sourceRange || { start: node.start, end: node.end });
   if (!range || isHiddenSyntaxNode(node, source)) return false;
@@ -134,8 +275,13 @@ function htmlDataAttributesForNode(node = {}, source = "") {
   return attrs.map(([key, value]) => `${key}=${value}`).join(",");
 }
 
-function wrapWithSemanticData(node, content, source) {
-  return `{\\htmlData{${htmlDataAttributesForNode(node, source)}}{${content}}}`;
+function wrapWithSemanticData(node, content, source, wrapperMode = "direct") {
+  const annotation = `\\htmlData{${htmlDataAttributesForNode(node, source)}}{${content}}`;
+  // htmlData is normally layout-transparent without another TeX group.
+  // Grammar slots that consume exactly one token (for example shorthand
+  // scripts) need the annotation command and its arguments grouped as that
+  // token. The annotation planner selects this mode transactionally.
+  return wrapperMode === "grouped" ? `{${annotation}}` : annotation;
 }
 
 function sortNodesByRange(left, right) {
@@ -288,9 +434,247 @@ export function validateSemanticTreeRanges(tree = null) {
 export function hasSerializableSemanticRanges(tree = null) {
   const validation = validateSemanticTreeRanges(tree);
   const canonical = validation.canonicalTree;
-  if (!validation.valid || !canonical) return false;
+  if (!canonical) return false;
   const source = canonical.displayLatex;
-  return canonical.flatNodes.some((node) => shouldAnnotateNode(node, source));
+  const invalidIds = new Set(validation.errors.map((error) => error.nodeId).filter(Boolean));
+  return canonical.flatNodes.some((node) => shouldAnnotateNode(node, source) && !invalidIds.has(node.id));
+}
+
+function rangesCross(left, right) {
+  return (
+    left.start < right.start && right.start < left.end && left.end < right.end
+  ) || (
+    right.start < left.start && left.start < right.end && right.end < left.end
+  );
+}
+
+function annotationPriority(left, right) {
+  const leftRange = numericRange(left.sourceRange);
+  const rightRange = numericRange(right.sourceRange);
+  return (
+    Number(isLeafNode(right)) - Number(isLeafNode(left))
+    || ((leftRange?.end - leftRange?.start) || 0) - ((rightRange?.end - rightRange?.start) || 0)
+    || sortNodesByRange(left, right)
+  );
+}
+
+function createAnnotationForest(nodes = []) {
+  const roots = [];
+  const stack = [];
+  const entries = [...nodes]
+    .sort((left, right) => {
+      const leftNode = left.node || left;
+      const rightNode = right.node || right;
+      const byRange = sortNodesByRange(leftNode, rightNode);
+      if (byRange) return byRange;
+      // Identical ranges remain deterministic. Structural owners surround
+      // their more precise leaf owner when both are intentionally retained.
+      return Number(isLeafNode(leftNode)) - Number(isLeafNode(rightNode));
+    })
+    .map((candidate) => ({
+      node: candidate.node || candidate,
+      wrapperMode: candidate.wrapperMode || "direct",
+      children: [],
+    }));
+
+  for (const entry of entries) {
+    const range = numericRange(entry.node.sourceRange);
+    while (stack.length > 0) {
+      const parentRange = numericRange(stack.at(-1).node.sourceRange);
+      const contains = parentRange
+        && range
+        && parentRange.start <= range.start
+        && parentRange.end >= range.end;
+      if (contains) break;
+      stack.pop();
+    }
+    if (stack.length > 0) stack.at(-1).children.push(entry);
+    else roots.push(entry);
+    stack.push(entry);
+  }
+  return roots;
+}
+
+function serializeAnnotationNodes(source = "", nodes = []) {
+  const renderEntries = (entries, start, end) => {
+    let cursor = start;
+    let output = "";
+    for (const entry of entries) {
+      const range = numericRange(entry.node.sourceRange);
+      if (!range || range.start < cursor || range.end > end) continue;
+      output += source.slice(cursor, range.start);
+      const content = renderEntries(entry.children, range.start, range.end);
+      output += wrapWithSemanticData(entry.node, content, source, entry.wrapperMode);
+      cursor = range.end;
+    }
+    return `${output}${source.slice(cursor, end)}`;
+  };
+  return renderEntries(createAnnotationForest(nodes), 0, source.length);
+}
+
+function preferredWrapperMode(node, source = "") {
+  const range = numericRange(node.sourceRange);
+  if (!range) return "direct";
+  // An unbraced script consumes one TeX atom. Group the generated annotation
+  // command so its metadata/content arguments remain attached to that atom.
+  return source[range.start - 1] === "^" || source[range.start - 1] === "_"
+    ? "grouped"
+    : "direct";
+}
+
+function katexAcceptsAnnotation(latex = "") {
+  try {
+    // renderToString is the public KaTeX parser/rendering contract.  Keeping
+    // this boundary out of katex.__parse isolates OmniMath from private AST
+    // changes while still making KaTeX itself authoritative for its grammar.
+    katex.renderToString(latex, {
+      throwOnError: true,
+      strict: "ignore",
+      trust: createSemanticKatexTrust(),
+      output: "html",
+    });
+    return { valid: true, error: "" };
+  } catch (error) {
+    return { valid: false, error: error?.message || "KaTeX rejected semantic annotations." };
+  }
+}
+
+function planSafeSemanticAnnotations(canonical, rangeValidation) {
+  const source = canonical.displayLatex;
+  const syntaxRanges = scanTexSyntaxRanges(source);
+  const diagnostics = new Map();
+  const invalidReasons = new Map();
+  for (const error of rangeValidation.errors) {
+    if (error.nodeId && !invalidReasons.has(error.nodeId)) invalidReasons.set(error.nodeId, error.reason);
+  }
+
+  const eligible = [];
+  for (const node of canonical.flatNodes) {
+    const range = numericRange(node.sourceRange);
+    if (!shouldAnnotateNode(node, source)) {
+      diagnostics.set(node.id, {
+        annotationStatus: "unsupported",
+        reason: classifySemanticNodeInteraction(node, source).reason || "intentionally-not-annotated",
+      });
+      continue;
+    }
+    if (invalidReasons.has(node.id)) {
+      diagnostics.set(node.id, { annotationStatus: "unsupported", reason: invalidReasons.get(node.id) });
+      continue;
+    }
+    if (range && isPureTexSyntaxRange(range, syntaxRanges)) {
+      diagnostics.set(node.id, { annotationStatus: "unsupported", reason: "pure-tex-syntax" });
+      continue;
+    }
+    const containedStructuralSyntax = range && syntaxRanges.find((syntax) => (
+      ["environment-marker", "alignment-marker", "row-separator"].includes(syntax.kind)
+      && syntax.start >= range.start
+      && syntax.end <= range.end
+    ));
+    if (containedStructuralSyntax) {
+      diagnostics.set(node.id, {
+        annotationStatus: "unsupported",
+        reason: `contains-tex-structural-syntax:${containedStructuralSyntax.kind}`,
+      });
+      continue;
+    }
+    const enclosingProtectedSyntax = range && syntaxRanges.find((syntax) => (
+      syntax.kind === "scripted-structural-container"
+      && syntax.start <= range.start
+      && syntax.end >= range.end
+    ));
+    if (enclosingProtectedSyntax) {
+      diagnostics.set(node.id, {
+        annotationStatus: "unsupported",
+        reason: "inside-layout-sensitive-script-structure",
+      });
+      continue;
+    }
+    if (range && (source[range.start] === "^" || source[range.start] === "_")) {
+      diagnostics.set(node.id, { annotationStatus: "unsupported", reason: "detached-script-syntax" });
+      continue;
+    }
+    if (range && !isLeafNode(node) && (source[range.end] === "^" || source[range.end] === "_")) {
+      diagnostics.set(node.id, { annotationStatus: "unsupported", reason: "script-attached-to-structural-boundary" });
+      continue;
+    }
+    eligible.push(node);
+  }
+
+  const laminar = [];
+  for (const node of [...eligible].sort(annotationPriority)) {
+    const range = numericRange(node.sourceRange);
+    const conflict = laminar.find((accepted) => rangesCross(range, numericRange(accepted.sourceRange)));
+    if (conflict) {
+      diagnostics.set(node.id, {
+        annotationStatus: "unsupported",
+        reason: `crossing-semantic-range:${conflict.id}`,
+      });
+      continue;
+    }
+    laminar.push(node);
+  }
+
+  const completeCandidates = laminar.map((node) => ({ node, wrapperMode: preferredWrapperMode(node, source) }));
+  const completeLatex = serializeAnnotationNodes(source, completeCandidates);
+  const completeValidation = katexAcceptsAnnotation(completeLatex);
+  if (completeValidation.valid) {
+    for (const node of laminar) diagnostics.set(node.id, { annotationStatus: "exact", reason: "" });
+    return {
+      latex: completeLatex,
+      accepted: completeCandidates,
+      diagnostics,
+      syntaxRanges,
+      originalKatexValid: true,
+      completeAnnotationValid: true,
+    };
+  }
+
+  // A grammar-sensitive construct invalidated the all-at-once annotation.
+  // Rebuild transactionally from precise leaves outward. Each accepted node
+  // is tested together with every previously accepted node, so the final
+  // result is guaranteed to remain valid KaTeX while only the offending
+  // ownership ranges are downgraded.
+  const accepted = [];
+  for (const node of [...laminar].sort(annotationPriority)) {
+    const preferredMode = preferredWrapperMode(node, source);
+    const modes = preferredMode === "grouped" ? ["grouped", "direct"] : ["direct", "grouped"];
+    let acceptedCandidate = null;
+    let lastValidation = null;
+    for (const wrapperMode of modes) {
+      const candidate = { node, wrapperMode };
+      const candidateLatex = serializeAnnotationNodes(source, [...accepted, candidate]);
+      lastValidation = katexAcceptsAnnotation(candidateLatex);
+      if (lastValidation.valid) {
+        acceptedCandidate = candidate;
+        break;
+      }
+    }
+    if (acceptedCandidate) {
+      accepted.push(acceptedCandidate);
+      diagnostics.set(node.id, {
+        annotationStatus: "exact",
+        reason: "",
+        wrapperMode: acceptedCandidate.wrapperMode,
+      });
+    } else {
+      diagnostics.set(node.id, {
+        annotationStatus: "unsupported",
+        reason: "katex-rejected-wrapper-boundary",
+        katexError: lastValidation?.error || "KaTeX rejected semantic wrapper boundary.",
+      });
+    }
+  }
+
+  return {
+    latex: serializeAnnotationNodes(source, accepted),
+    accepted,
+    diagnostics,
+    syntaxRanges,
+    originalKatexValid: true,
+    completeAnnotationValid: false,
+    completeAnnotationError: completeValidation.error,
+  };
 }
 
 export function serializeSemanticTreeToLatex(tree = null) {
@@ -299,82 +683,56 @@ export function serializeSemanticTreeToLatex(tree = null) {
     return {
       latex: "",
       annotatedNodeCount: 0,
+      annotatedNodeIds: [],
       canonicalTree: canonical,
       error: "missing-canonical-tree",
     };
   }
 
-  const rangeValidation = validateSemanticTreeRanges(canonical);
-  if (!rangeValidation.valid) {
+  const originalValidation = katexAcceptsAnnotation(canonical.displayLatex);
+  if (!originalValidation.valid) {
     return {
       latex: "",
       annotatedNodeCount: 0,
+      annotatedNodeIds: [],
       canonicalTree: canonical,
-      error: "invalid-semantic-ranges",
-      rangeValidation,
-      diagnostics: rangeValidation.errors,
+      error: "original-katex-invalid",
+      diagnostics: [{ reason: "original-katex-invalid", katexError: originalValidation.error }],
     };
   }
 
-  const source = canonical.displayLatex;
-  const root = canonical.nodes[canonical.rootId] || canonical.semanticTree;
-  const rootStart = 0;
-  const rootEnd = source.length;
-  const nodesByParent = new Map();
-
-  for (const node of canonical.flatNodes) {
-    const range = numericRange(node.sourceRange);
-    if (!range || range.start < rootStart || range.end > rootEnd) continue;
-    const key = node.parentId || "__root__";
-    const list = nodesByParent.get(key) || [];
-    list.push(node);
-    nodesByParent.set(key, list);
-  }
-
-  for (const [key, nodes] of nodesByParent) {
-    nodesByParent.set(key, nodes.sort(sortNodesByRange));
-  }
-
-  let annotatedNodeCount = 0;
-
-  const renderRange = (start, end, parentId) => {
-    const children = (nodesByParent.get(parentId || "__root__") || [])
-      .filter((child) => {
-        const range = numericRange(child.sourceRange);
-        return range && range.start >= start && range.end <= end;
-      });
-    let cursor = start;
-    let output = "";
-
-    for (const child of children) {
-      const range = numericRange(child.sourceRange);
-      if (!range || range.start < cursor || range.start < start || range.end > end) continue;
-      output += source.slice(cursor, range.start);
-      output += renderNode(child);
-      cursor = range.end;
-    }
-
-    return `${output}${source.slice(cursor, end)}`;
-  };
-
-  const renderNode = (node) => {
-    const range = numericRange(node.sourceRange);
-    if (!range) return "";
-    const content = renderRange(range.start, range.end, node.id);
-    if (!shouldAnnotateNode(node, source)) return content;
-    annotatedNodeCount += 1;
-    return wrapWithSemanticData(node, content, source);
-  };
-
-  const latex = root?.sourceRange
-    ? renderRange(rootStart, rootEnd, root.id)
-    : renderRange(rootStart, rootEnd, "__root__");
+  const rangeValidation = validateSemanticTreeRanges(canonical);
+  const plan = planSafeSemanticAnnotations(canonical, rangeValidation);
+  const annotatedNodeIds = plan.accepted.map((candidate) => (candidate.node || candidate).id);
 
   return {
-    latex,
-    annotatedNodeCount,
+    latex: plan.latex,
+    annotatedNodeCount: annotatedNodeIds.length,
+    annotatedNodeIds,
+    nodeDiagnostics: canonical.flatNodes.map((node) => ({
+      semanticId: node.id,
+      serialized: annotatedNodeIds.includes(node.id),
+      annotationStatus: plan.diagnostics.get(node.id)?.annotationStatus || "unsupported",
+      reason: plan.diagnostics.get(node.id)?.reason || "",
+      katexError: plan.diagnostics.get(node.id)?.katexError || "",
+      wrapperMode: plan.diagnostics.get(node.id)?.wrapperMode || "",
+    })),
+    annotationPlan: {
+      originalKatexValid: plan.originalKatexValid,
+      completeAnnotationValid: plan.completeAnnotationValid,
+      completeAnnotationError: plan.completeAnnotationError || "",
+      syntaxRanges: plan.syntaxRanges,
+      exactNodeIds: annotatedNodeIds,
+      unsupportedNodeIds: canonical.flatNodes
+        .filter((node) => !annotatedNodeIds.includes(node.id))
+        .map((node) => node.id),
+    },
+    rangeValidation,
     canonicalTree: canonical,
-    error: annotatedNodeCount > 0 ? "" : "no-serializable-nodes",
+    // Valid original TeX is always returned, even when no semantic range is
+    // safe. This makes degradation local and prevents MathRenderer from
+    // treating semantic limitations as a whole-expression render failure.
+    error: "",
   };
 }
 

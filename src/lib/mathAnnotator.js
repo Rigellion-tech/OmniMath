@@ -5,6 +5,7 @@ import {
   shouldPreserveLatex,
   traceMathStage,
 } from "./mathNode.js";
+import { segmentMixedTextMath } from "./mixedTextSegments.js";
 
 const GREEK_COMMANDS = new Map([
   ["alpha", "\\alpha"],
@@ -670,6 +671,23 @@ function compactStructuralLatex(value = "") {
   const text = String(value || "").replace(/\\\s+/g, "\\,");
   if (/\\text\{/.test(text)) return text;
   return removeMathWhitespace(text);
+}
+
+function normalizeMixedProseSegment(value = "") {
+  const source = String(value ?? "");
+  const normalized = normalizeDisplayText(source);
+  if (!normalized) return /\s/u.test(source) ? " " : "";
+  const leading = /^\s/u.test(source) ? " " : "";
+  const trailing = /\s$/u.test(source) ? " " : "";
+  return `${leading}${normalized}${trailing}`;
+}
+
+export function normalizeMixedDisplayText(value = "") {
+  return segmentMixedTextMath(value).map((segment) => {
+    if (segment.type === "text") return normalizeMixedProseSegment(segment.value);
+    if (!segment.explicit) return segment.value;
+    return `${segment.openDelimiter}${segment.value}${segment.closeDelimiter}`;
+  }).join("");
 }
 
 function splitTopLevelVectorOperations(text) {
@@ -1688,7 +1706,7 @@ export function annotateMathExplanation(value) {
     problem: value.problem || value.originalProblem || value.expression || "",
     title: normalizeDisplayText(value.title || ""),
     description: normalizeDisplayText(value.description || ""),
-    summary: normalizeDisplayText(value.summary || value.description || value.explanations?.intermediate || ""),
+    summary: normalizeMixedDisplayText(value.summary || value.description || value.explanations?.intermediate || ""),
     originalProblem: value.originalProblem || value.problem || value.expression || "",
     expression: value.expression ? normalizeMathValue(value.expression) : value.expression,
     finalAnswer: value.finalAnswer ? normalizeMathValue(value.finalAnswer) : value.finalAnswer,
@@ -1731,8 +1749,8 @@ export function annotateMathExplanation(value) {
             label: normalizeDisplayText(step.label || step.title || `Step ${stepIndex + 1}`),
             title: normalizeDisplayText(step.title || step.label),
             math: step.math ? normalizeMathValue(step.math) : step.math,
-            summary: normalizeDisplayText(step.summary || ""),
-            plainExplanation: normalizeDisplayText(step.plainExplanation || step.summary),
+            summary: normalizeMixedDisplayText(step.summary || ""),
+            plainExplanation: normalizeMixedDisplayText(step.plainExplanation || step.summary),
             expressions,
             chunks,
             lines: normalizeStepLines(hasModelExpressions ? { ...step, expressions } : { ...step, expressions: [] }, chunks),

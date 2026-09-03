@@ -21,6 +21,7 @@ import {
 } from "./mathExplanationSchema.js";
 import { sanitizeStringValues } from "../src/lib/textSanitization.js";
 import { inspectLatexControlCharacterStage } from "./latexControlCharacterRecovery.js";
+import { logBackendReasoningLatexStage } from "./reasoningLatexDiagnostics.js";
 import {
   buildResponsesModelParameters,
   estimateModelCostUsd,
@@ -1473,6 +1474,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       "raw_json_text"
     ));
     parsed = JSON.parse(extracted.text);
+    logBackendReasoningLatexStage("1.raw_provider_json_field", parsed);
     logOpenAiDebug("latex_control_character_stage", inspectLatexControlCharacterStage(
       parsed,
       "parsed_javascript_object"
@@ -1514,6 +1516,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       ...outputDiagnostics,
       parsedJson: parsed,
     });
+    logBackendReasoningLatexStage("2.backend_parsed_normalized_candidate", asserted);
     logOpenAiDebug("latex_control_character_stage", inspectLatexControlCharacterStage(
       asserted,
       "post_schema_normalization"

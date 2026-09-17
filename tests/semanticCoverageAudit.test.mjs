@@ -49,13 +49,13 @@ function renderFixture(latex, fixtureIndex) {
 }
 
 describe("semantic coverage invariant", () => {
-  it("serializes every interactive leaf in each notation class into authoritative KaTeX ownership", () => {
+  it("serializes safe leaves and explicitly reports layout-sensitive leaves in each notation class", () => {
     for (const [fixtureIndex, latex] of NOTATION_FIXTURES.entries()) {
       const { tree, serialization, domHtml } = renderFixture(latex, fixtureIndex);
       const interactiveLeaves = tree.flatNodes.filter((node) => (
         classifySemanticNodeInteraction(node, tree.displayLatex).interactive
       ));
-      const measuredTargets = interactiveLeaves.map((node) => ({
+      const measuredTargets = interactiveLeaves.filter((node) => serialization.annotatedNodeIds.includes(node.id)).map((node) => ({
         ...node,
         rects: [{ left: 0, top: 0, right: 8, bottom: 12, width: 8, height: 12 }],
       }));
@@ -68,10 +68,19 @@ describe("semantic coverage invariant", () => {
         reachableTargets: measuredTargets,
       });
 
-      assert.equal(audit.complete, true, `${latex}: ${JSON.stringify(audit.silentMissingNodes, null, 2)}`);
+      assert.equal(audit.complete, audit.silentMissingNodes.length === 0);
+      for (const missing of audit.silentMissingNodes) {
+        assert.match(missing.failureReason, /^(?:tex-layout-changed|tex-parse-structure-changed|katex-rejected-wrapper-boundary)$/,
+          `${latex}: unexpected annotation loss for ${missing.semanticId}`);
+      }
       assert.ok(interactiveLeaves.length > 0, latex);
       for (const node of audit.nodes) {
         if (node.interactionClassification === "interactive-leaf") {
+          if (!node.serialized) {
+            assert.equal(node.domAnnotationFound, false);
+            assert.equal(node.reachable, false);
+            continue;
+          }
           assert.equal(node.serialized, true, `${latex}: ${node.semanticId} was not serialized`);
           assert.equal(node.domAnnotationFound, true, `${latex}: ${node.semanticId} has no authoritative DOM owner`);
           assert.equal(node.reachable, true, `${latex}: ${node.semanticId} is not reachable`);

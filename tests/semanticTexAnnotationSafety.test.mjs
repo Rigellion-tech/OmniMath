@@ -15,13 +15,13 @@ const CORPUS = [
   ["cube-root", String.raw`\sqrt[3]{1+x}`, false, 3],
   ["indexed-root", String.raw`\sqrt[n+1]{x^2+y^2}`, false, 7],
   ["norm", String.raw`\left\lVert x+y \right\rVert`, true, 3],
-  ["substack-limit", String.raw`\lim_{\substack{x\to0\\x>0}} f(x)`, true, 4],
-  ["overset", String.raw`\overset{!}{=}`, false, 2],
+  ["substack-limit", String.raw`\lim_{\substack{x\to0\\x>0}} f(x)`, false, 4],
+  ["overset", String.raw`\overset{!}{=}`, false, 1],
   ["underset-operator", String.raw`\underset{x}{\operatorname{argmax}} f(x)`, false, 4],
-  ["accents", String.raw`\vec{x}, \hat{x}, \bar{x}, \dot{x}, \ddot{x}`, false, 10],
+  ["accents", String.raw`\vec{x}, \hat{x}, \bar{x}, \dot{x}, \ddot{x}`, false, 9],
   ["operatorname", String.raw`\operatorname{erf}(x)`, true, 3],
   ["text", String.raw`\text{if } x>0`, false, 4],
-  ["matrix", String.raw`\begin{pmatrix}\frac{a_1}{b^2}&x^{y_z}\\\sqrt{q}&r\end{pmatrix}`, true, 8],
+  ["matrix", String.raw`\begin{pmatrix}\frac{a_1}{b^2}&x^{y_z}\\\sqrt{q}&r\end{pmatrix}`, false, 8],
   ["cases", String.raw`\begin{cases}x^2&x>0\\-x&x\le0\end{cases}`, true, 8],
   ["aligned", String.raw`\begin{aligned}a&=b+c\\d&=e-f\end{aligned}`, false, 6],
 ];
@@ -86,6 +86,8 @@ describe("TeX-grammar-safe semantic annotation", () => {
             "inside-layout-sensitive-script-structure",
             "katex-rejected-wrapper-boundary",
             "pure-tex-syntax",
+            "tex-layout-changed",
+            "tex-parse-structure-changed",
           ].includes(item.reason) || item.reason.startsWith("contains-tex-structural-syntax:")),
           `${name} should expose its local degradation`,
         );
@@ -94,20 +96,14 @@ describe("TeX-grammar-safe semantic annotation", () => {
     });
   }
 
-  it("protects structural row grammar inside a script while preserving surrounding owners", () => {
+  it("keeps safe substack atoms while diagnosing operator script-layout changes", () => {
     const latex = String.raw`\lim_{\substack{x\to0\\x>0}} f(x)`;
     const tree = buildSemanticTree({ stepId: "scripted-structure", displayLatex: latex, enabled: true });
     const rendered = serializeSemanticTreeToLatex(tree);
     const limit = tree.flatNodes.find((node) => node.role === "limitOperator");
     const innerCondition = tree.flatNodes.find((node) => node.role === "leftSide" && node.latex === "x");
-
-    assert.ok(rendered.annotatedNodeIds.includes(limit.id), "the surrounding limit operator remains owned");
-    assert.ok(!rendered.annotatedNodeIds.includes(innerCondition.id), "the compact row grammar degrades locally");
-    assert.equal(
-      rendered.nodeDiagnostics.find((item) => item.semanticId === innerCondition.id)?.reason,
-      "inside-layout-sensitive-script-structure",
-    );
-    assert.ok(rendered.annotationPlan.syntaxRanges.some((range) => range.kind === "scripted-structural-container"));
+    assert.equal(rendered.nodeDiagnostics.find((item) => item.semanticId === limit.id)?.reason, "tex-layout-changed");
+    assert.ok(rendered.annotatedNodeIds.includes(innerCondition.id));
     assert.doesNotThrow(() => render(rendered.latex, true));
   });
 

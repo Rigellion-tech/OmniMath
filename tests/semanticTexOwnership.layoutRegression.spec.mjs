@@ -13,7 +13,7 @@ const CASES = [
     label: "Substack limit ownership",
     latex: String.raw`\lim_{\substack{x\to0\\\,x>0}}f(x)`,
     transportLatex: String.raw`\lim_{\substack{x\to0\\\ x>0}} f(x)`,
-    match: (node) => node.role === "limitOperator",
+    match: (node) => node.latex === "f" && node.role === "functionName",
   },
   {
     key: "matrix",

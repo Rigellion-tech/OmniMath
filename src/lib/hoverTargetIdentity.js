@@ -54,7 +54,13 @@ function stableSemanticNode(item = {}, identity = {}) {
 }
 
 function stableAncestors(item = {}) {
-  const ancestors = item.ancestors || item.semanticAncestors || item.context?.ancestors || [];
+  const token = firstSelectedToken(item);
+  const ancestors = item.ancestors
+    || item.semanticAncestors
+    || token?.ancestors
+    || token?.semanticAncestors
+    || item.context?.ancestors
+    || [];
   if (!Array.isArray(ancestors)) return [];
   return ancestors.map((ancestor) => ({
     id: ancestor.id || ancestor.semanticNodeId || "",

@@ -1293,10 +1293,30 @@ test("complete clauses and shorthand fractions have no silent interactive hover 
     const interactiveLeaves = tree.flatNodes.filter((node) => (
       classifySemanticNodeInteraction(node, tree.displayLatex).interactive
     ));
-    await expect.poll(() => step.locator(".math-semantic-hitbox[data-target-kind='leaf']").count())
-      .toBeGreaterThanOrEqual(interactiveLeaves.length);
+    const rendering = serializeSemanticTreeToLatex(tree);
+    const serializedIds = new Set(rendering.annotatedNodeIds);
+    const safeInteractiveLeaves = interactiveLeaves.filter((node) => serializedIds.has(node.id));
+    expect(safeInteractiveLeaves.length, `${fixture.label} lost all safely serializable interactive leaves`).toBeGreaterThan(0);
+    await expect.poll(async () => {
+      const emittedIds = new Set(await step.locator(".math-semantic-hitbox[data-target-kind='leaf']")
+        .evaluateAll((hitboxes) => hitboxes.map((hitbox) => hitbox.getAttribute("data-semantic-id"))));
+      return safeInteractiveLeaves.every((node) => emittedIds.has(node.id));
+    }).toBe(true);
+    const emittedIds = new Set(await step.locator(".math-semantic-hitbox[data-target-kind='leaf']")
+      .evaluateAll((hitboxes) => hitboxes.map((hitbox) => hitbox.getAttribute("data-semantic-id"))));
+    const emittedInteractiveLeaves = interactiveLeaves.filter((node) => emittedIds.has(node.id));
+    const unsupportedInteractiveLeaves = interactiveLeaves.filter((node) => !emittedIds.has(node.id));
 
-    for (const [leafIndex, leaf] of interactiveLeaves.entries()) {
+    for (const leaf of unsupportedInteractiveLeaves) {
+      const diagnostic = rendering.nodeDiagnostics.find((item) => item.semanticId === leaf.id);
+      expect(diagnostic?.annotationStatus, `${leaf.id} was omitted without an explicit annotation status`).toBe("unsupported");
+      expect(diagnostic?.reason || "", `${leaf.id} was omitted without a layout or grammar diagnostic`)
+        .toMatch(/^(?:tex-layout-changed|tex-parse-structure-changed|katex-rejected-wrapper-boundary)$/);
+      await expect(step.locator(`.katex-html [data-semantic-id="${leaf.id}"]`)).toHaveCount(0);
+      await expect(step.locator(`.math-semantic-hitbox[data-semantic-id="${leaf.id}"]`)).toHaveCount(0);
+    }
+
+    for (const [leafIndex, leaf] of emittedInteractiveLeaves.entries()) {
       const hitbox = step.locator(`.math-semantic-hitbox[data-semantic-id="${leaf.id}"]`).first();
       const owner = step.locator(`.katex-html [data-semantic-id="${leaf.id}"]`).first();
       await expect(hitbox, `missing reachable hitbox for ${leaf.id}`).toBeVisible();
@@ -1310,7 +1330,7 @@ test("complete clauses and shorthand fractions have no silent interactive hover 
       expect(box, `missing measured geometry for ${leaf.id}`).not.toBeNull();
       expect(box.width).toBeGreaterThan(0);
       expect(box.height).toBeGreaterThan(0);
-      if (leafIndex === 0 || leafIndex === interactiveLeaves.length - 1) {
+      if (leafIndex === 0 || leafIndex === emittedInteractiveLeaves.length - 1) {
         await hitbox.scrollIntoViewIfNeeded();
         const currentBox = await hitbox.boundingBox();
         await moveSemanticPointer(page, currentBox.x + currentBox.width / 2, currentBox.y + currentBox.height / 2);
@@ -1777,14 +1797,28 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
   expect(denominatorBody.selectedNode?.role).toBe("denominator");
   expect(denominatorBody.selectedNode?.aggregate).toBe(true);
 
-  await expect(page.locator(".omni-quick-tooltip")).toContainText(/wrap cleanly|selected/i);
-  const tooltipBox = await page.locator(".omni-quick-tooltip").boundingBox();
+  const tooltip = page.locator(".omni-quick-tooltip");
+  await expect(tooltip).toHaveAttribute("data-lazy-phase", "ready");
+  await expect(tooltip).toContainText(/long hover explanation must wrap cleanly/i);
+  await expect.poll(() => tooltip.evaluate((node) => new Promise((resolve) => {
+    const before = node.getBoundingClientRect();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const after = node.getBoundingClientRect();
+      resolve(
+        Math.abs(after.x - before.x) < 1
+        && Math.abs(after.y - before.y) < 1
+        && Math.abs(after.width - before.width) < 1
+        && Math.abs(after.height - before.height) < 1
+      );
+    }));
+  }))).toBe(true);
+  const tooltipBox = await tooltip.boundingBox();
   expect(tooltipBox).not.toBeNull();
   expect(tooltipBox.x).toBeGreaterThanOrEqual(11);
   expect(tooltipBox.y).toBeGreaterThanOrEqual(11);
   expect(tooltipBox.x + tooltipBox.width).toBeLessThanOrEqual(521);
   expect(tooltipBox.y + tooltipBox.height).toBeLessThanOrEqual(421);
-  const overflow = await page.locator(".omni-quick-tooltip").evaluate((node) => ({
+  const overflow = await tooltip.evaluate((node) => ({
     scrollWidth: node.scrollWidth,
     clientWidth: node.clientWidth,
     scrollHeight: node.scrollHeight,
@@ -1796,7 +1830,7 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
 
   await page.mouse.move(tooltipBox.x + tooltipBox.width / 2, tooltipBox.y + Math.min(tooltipBox.height - 2, 20));
   await page.waitForTimeout(220);
-  await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+  await expect(tooltip).toBeVisible();
 });
 
 test("malformed solver math does not render as raw LaTeX text", async ({ page }) => {
@@ -3367,6 +3401,34 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
 
 test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) => {
   test.slow();
+  const largeDiscriminantLatex = "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)";
+  const largeDiscriminantTree = buildSemanticTree({
+    stepId: "large-discriminant-step-chunk-large-discriminant-step",
+    displayLatex: largeDiscriminantLatex,
+    enabled: true,
+  });
+  const largeDiscriminantRender = serializeSemanticTreeToLatex(largeDiscriminantTree);
+  const largeDiscriminantNode = (latex, role) => largeDiscriminantTree.flatNodes.find((node) => (
+    node.latex === latex && node.role === role
+  ));
+  const largeDiscriminantBase = largeDiscriminantNode("68068", "base");
+  const largeDiscriminantPower = largeDiscriminantNode("68068^2", "power");
+  const largeDiscriminantExponent = largeDiscriminantNode("2", "exponent");
+  const largeDiscriminantFactor = largeDiscriminantNode("-4455969793", "factor");
+  const baseDiagnostic = largeDiscriminantRender.nodeDiagnostics.find((item) => (
+    item.semanticId === largeDiscriminantBase?.id
+  ));
+
+  expect(largeDiscriminantBase).toBeTruthy();
+  expect(baseDiagnostic).toMatchObject({
+    annotationStatus: "unsupported",
+    reason: "tex-parse-structure-changed",
+    serialized: false,
+  });
+  for (const acceptedNode of [largeDiscriminantPower, largeDiscriminantExponent, largeDiscriminantFactor]) {
+    expect(acceptedNode).toBeTruthy();
+    expect(largeDiscriminantRender.annotatedNodeIds).toContain(acceptedNode.id);
+  }
   const lazyRequests = [];
   await page.route("**/api/explain", async (route) => {
     await route.fulfill({
@@ -3469,13 +3531,13 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
         }, {
           id: "large-discriminant-step",
           label: "Large discriminant step",
-          math: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
+          math: largeDiscriminantLatex,
           summary: "Power bases and large negative grouped constants should remain token-sized hover targets.",
           chunks: [{
             id: "large-discriminant-step-chunk",
-            display: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
-            latex: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
-            text: "\\Delta=68068²-4\\cdot2\\cdot(-4455969793)",
+            display: largeDiscriminantLatex,
+            latex: largeDiscriminantLatex,
+            text: largeDiscriminantLatex,
             role: "equation",
           }],
         }, {
@@ -3603,6 +3665,31 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
   await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect quadratic hitboxes.");
   await page.getByRole("button", { name: /Explain/i }).click();
   await expect(page.getByRole("button", { name: /Quadratic source/i })).toBeVisible();
+
+  const largeDiscriminantStep = page.locator(".step-card")
+    .filter({ hasText: "Large discriminant step" });
+  await expect(largeDiscriminantStep.locator(
+    `.katex-html [data-semantic-id="${largeDiscriminantBase.id}"]`,
+  )).toHaveCount(0);
+  await expect(largeDiscriminantStep.locator(
+    `.math-semantic-hitbox[data-semantic-id="${largeDiscriminantBase.id}"]`,
+  )).toHaveCount(0);
+  const largeDiscriminantPowerHitbox = largeDiscriminantStep.locator(
+    `.math-semantic-hitbox[data-semantic-id="${largeDiscriminantPower.id}"][data-target-kind="group"]`,
+  );
+  await expect.poll(() => largeDiscriminantPowerHitbox.count()).toBeGreaterThan(0);
+  const largeDiscriminantPowerBox = await largeDiscriminantPowerHitbox.evaluateAll((hitboxes) => {
+    const rects = hitboxes.map((hitbox) => hitbox.getBoundingClientRect());
+    const left = Math.min(...rects.map((rect) => rect.left));
+    const right = Math.max(...rects.map((rect) => rect.right));
+    const top = Math.min(...rects.map((rect) => rect.top));
+    const bottom = Math.max(...rects.map((rect) => rect.bottom));
+    return { width: right - left, height: bottom - top };
+  });
+  const largeDiscriminantStepBox = await largeDiscriminantStep.boundingBox();
+  expect(largeDiscriminantStepBox).not.toBeNull();
+  expect(largeDiscriminantPowerBox.width).toBeLessThan(180);
+  expect(largeDiscriminantPowerBox.height).toBeLessThan(largeDiscriminantStepBox.height * 0.55);
 
   const tokenBox = async (stepLabel, latex, role = null) => {
     await page.waitForFunction(({ stepLabel, latex, role }) => {
@@ -3890,7 +3977,6 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
     ["Decimal fraction layout", "5345", "constant"],
     ["Decimal fraction layout", "-5902.71", "constant"],
     ["Decimal fraction layout", "6", "denominator"],
-    ["Large discriminant step", "68068", "base"],
     ["Large discriminant step", "2", "exponent"],
     ["Large discriminant step", "-4455969793", "factor"],
     ["Large root final evaluation", "-68068", "constant"],
@@ -3913,7 +3999,6 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
     await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").at(-1)?.body?.selectedLatex).toBe(latex);
   }
   const rowTightTargets = [
-    await tokenBox("Large discriminant step", "68068", "base"),
     await tokenBox("Large discriminant step", "-4455969793", "factor"),
     await tokenBox("Large root final evaluation", "-200681.07", "constant"),
     await tokenBox("Large root final evaluation", "-66937.77"),
@@ -3938,10 +4023,20 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
   await hoverFractionGroupGap("Nested fraction radical layout", "numerator", /\\frac\{1\}\{2\}|\\sqrt/);
 
   const imaginaryUnit = await tokenBox("Imaginary root final answer", "i", "imaginaryUnit");
+  const [currentImaginaryUnit, currentImaginaryRadicand] = await freshTokenBoxPair(imaginaryUnit, imaginaryRadicand);
+  expect(currentImaginaryUnit).not.toBeNull();
+  expect(currentImaginaryRadicand).not.toBeNull();
   const hoverRequestCountBeforeImaginaryDrag = lazyRequests.filter((request) => request.endpoint === "hover").length;
-  await page.mouse.move(imaginaryUnit.x + imaginaryUnit.width / 2, imaginaryUnit.y + imaginaryUnit.height / 2);
+  await page.mouse.move(
+    currentImaginaryUnit.x + currentImaginaryUnit.width / 2,
+    currentImaginaryUnit.y + currentImaginaryUnit.height / 2,
+  );
   await page.mouse.down();
-  await page.mouse.move(imaginaryRadicand.x + imaginaryRadicand.width / 2, imaginaryRadicand.y + imaginaryRadicand.height / 2, { steps: 8 });
+  await page.mouse.move(
+    currentImaginaryRadicand.x + currentImaginaryRadicand.width / 2,
+    currentImaginaryRadicand.y + currentImaginaryRadicand.height / 2,
+    { steps: 8 },
+  );
   await page.mouse.up();
   await expect(page.locator(".omni-quick-tooltip")).toContainText(/Selected region/i);
   await expect.poll(() => lazyRequests.filter((request) => request.endpoint === "hover").length)
@@ -4745,6 +4840,10 @@ test("semantic hitboxes remain interactive across internal horizontal scrolling"
   const sinFragments = step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\sin']");
   await expect(sinFragments).toHaveCount(1);
   const sinSemanticId = await sinFragments.first().getAttribute("data-semantic-id");
+  const iSemanticId = semanticTargetGroups.find((target) => target.latex === "i")?.semanticId;
+  expect(iSemanticId).toBeTruthy();
+  const sinOwner = step.locator(`.katex-html [data-semantic-id="${sinSemanticId}"]`).first();
+  await expect(sinOwner.locator(`[data-semantic-id="${iSemanticId}"]`)).toHaveCount(0);
   for (let index = 0; index < await sinFragments.count(); index += 1) {
     const box = await sinFragments.nth(index).boundingBox();
     expect(box).not.toBeNull();
@@ -4808,7 +4907,28 @@ test("semantic hitboxes remain interactive across internal horizontal scrolling"
     const renderedNode = [...owner.querySelectorAll(`[data-semantic-id="${CSS.escape(semanticId)}"]`)]
       .find((node) => !node.closest(".math-semantic-overlay-layer"));
     const hitboxRect = hitbox.getBoundingClientRect();
-    const domRect = renderedNode?.getBoundingClientRect();
+    const paintedRects = [];
+    if (renderedNode) {
+      const walker = document.createTreeWalker(renderedNode, NodeFilter.SHOW_TEXT);
+      let textNode = walker.nextNode();
+      while (textNode) {
+        if (textNode.textContent) {
+          const range = document.createRange();
+          range.selectNodeContents(textNode);
+          paintedRects.push(...[...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0));
+          range.detach?.();
+        }
+        textNode = walker.nextNode();
+      }
+    }
+    const domRect = paintedRects.length > 0 ? {
+      left: Math.min(...paintedRects.map((rect) => rect.left)),
+      right: Math.max(...paintedRects.map((rect) => rect.right)),
+      top: Math.min(...paintedRects.map((rect) => rect.top)),
+      bottom: Math.max(...paintedRects.map((rect) => rect.bottom)),
+      get width() { return this.right - this.left; },
+      get height() { return this.bottom - this.top; },
+    } : renderedNode?.getBoundingClientRect();
     return domRect ? {
       left: Math.abs(hitboxRect.left - domRect.left),
       top: Math.abs(hitboxRect.top - domRect.top),

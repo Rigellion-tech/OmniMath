@@ -15,6 +15,40 @@ function uniqueTargets(targets = []) {
   )))];
 }
 
+function finiteScrollOffset(value) {
+  const offset = Number(value);
+  return Number.isFinite(offset) ? offset : 0;
+}
+
+/**
+ * Scroll events are queued by the browser. A pointer event can therefore
+ * observe moved content before the coordinator has received the scroll event.
+ * Compare the cached offsets at the pointer boundary so "valid" never means
+ * "valid for an older scroll position".
+ */
+export function hasMathScrollStateDrift(cached = null, current = null, tolerance = 0.5) {
+  if (!cached || !current) return true;
+  const differs = (left, right) => (
+    Math.abs(finiteScrollOffset(left) - finiteScrollOffset(right)) > tolerance
+  );
+  if (
+    differs(cached.windowX, current.windowX)
+    || differs(cached.windowY, current.windowY)
+    || differs(cached.rootLeft, current.rootLeft)
+    || differs(cached.rootTop, current.rootTop)
+    || differs(cached.visualLeft, current.visualLeft)
+    || differs(cached.visualTop, current.visualTop)
+  ) return true;
+
+  const cachedAncestors = Array.isArray(cached.scrollAncestors) ? cached.scrollAncestors : [];
+  const currentAncestors = Array.isArray(current.scrollAncestors) ? current.scrollAncestors : [];
+  if (cachedAncestors.length !== currentAncestors.length) return true;
+  return cachedAncestors.some((ancestor, index) => (
+    differs(ancestor?.left, currentAncestors[index]?.left)
+    || differs(ancestor?.top, currentAncestors[index]?.top)
+  ));
+}
+
 export function createMathScrollCoordinator({
   scheduleFrame = defaultScheduleFrame,
   cancelFrame = defaultCancelFrame,

@@ -86,9 +86,9 @@ export function reconcileLogicalHoverOwnership({
   const sourceInHitStack = Boolean(currentSource) && hitStack.some((element) => (
     element === currentSource
     || currentSource.contains?.(element)
-    || element?.contains?.(currentSource)
   ));
-  const activeRectHit = measuredTarget?.rects?.some((rect) => pointInRect(rect, pointer)) || false;
+  const activeRectHit = measuredTarget?.geometryValid !== false
+    && (measuredTarget?.rects?.some((rect) => pointInRect(rect, pointer)) || false);
   const sourceRectHit = !measuredTarget && currentSource?.getBoundingClientRect
     ? pointInRect(currentSource.getBoundingClientRect(), pointer)
     : false;

@@ -380,6 +380,7 @@ export function isHoverEligibleTarget(target = {}) {
 
 function candidateHits(targets = [], x, y) {
   return targets
+    .filter((target) => target?.geometryValid !== false)
     .flatMap((target, targetIndex) => (
       Array.isArray(target?.rects)
         ? target.rects.map((rect, rectIndex) => {
@@ -1180,8 +1181,8 @@ export function resolveSemanticTarget({
     .sort(compareScoredCandidates);
   const best = scoredHits[0];
   if (!best) {
-    const fallbackTarget = isHighlightableHoverTarget(fallback, options)
-      && (fallback.rects || []).some((rect) => rectContainsPoint(rect, x, y) && rectArea(rect) > 0)
+    const fallbackTarget = fallback?.geometryValid !== false && isHighlightableHoverTarget(fallback, options)
+      && candidateHits([fallback], x, y).length > 0
       ? fallback
       : null;
     return {

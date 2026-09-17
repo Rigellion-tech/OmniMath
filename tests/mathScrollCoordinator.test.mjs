@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createMathScrollCoordinator } from "../src/lib/mathScrollCoordinator.js";
+import { createMathScrollCoordinator, hasMathScrollStateDrift } from "../src/lib/mathScrollCoordinator.js";
 
 function fakeScrollTarget() {
   const listeners = new Set();
@@ -46,6 +46,44 @@ function immediateFrameHarness() {
 }
 
 describe("math scroll coordinator", () => {
+  it("detects scroll-offset drift before a queued scroll callback is delivered", () => {
+    const cached = {
+      windowX: 0,
+      windowY: 120,
+      rootLeft: 0,
+      rootTop: 0,
+      visualLeft: 0,
+      visualTop: 0,
+      scrollAncestors: [{ owner: "math-shell", left: 640, top: 0 }],
+    };
+
+    assert.equal(hasMathScrollStateDrift(cached, structuredClone(cached)), false);
+    assert.equal(hasMathScrollStateDrift(cached, {
+      ...structuredClone(cached),
+      scrollAncestors: [{ owner: "math-shell", left: 0, top: 0 }],
+    }), true);
+    assert.equal(hasMathScrollStateDrift(cached, {
+      ...structuredClone(cached),
+      scrollAncestors: [],
+    }), true);
+    assert.equal(hasMathScrollStateDrift(cached, {
+      ...structuredClone(cached),
+      windowY: 121,
+    }), true);
+    assert.equal(hasMathScrollStateDrift(cached, {
+      ...structuredClone(cached),
+      rootLeft: 1,
+    }), true);
+    assert.equal(hasMathScrollStateDrift(cached, {
+      ...structuredClone(cached),
+      scrollAncestors: [{ owner: "renamed-shell", left: 640.5, top: 0 }],
+    }), false);
+    assert.equal(hasMathScrollStateDrift(cached, {
+      ...structuredClone(cached),
+      scrollAncestors: [{ owner: "math-shell", left: 640.51, top: 0 }],
+    }), true);
+  });
+
   it("shares one physical listener across chunks and batches notifications", () => {
     const frames = immediateFrameHarness();
     const coordinator = createMathScrollCoordinator({

@@ -75,6 +75,7 @@ function createExtractionResponse({
   confidenceTier = "high",
   critical = false,
 } = {}) {
+  const directSolveAllowed = confidenceTier === "high" && !critical;
   return {
     extractedProblemText: text,
     rawExtractedText: text,
@@ -94,6 +95,14 @@ function createExtractionResponse({
       mathIntegrityScore: 96,
       ocrConfidence: 96,
       issues: [],
+    },
+    ocrSolveDecision: {
+      solveDecision: "direct",
+      reviewRequired: !directSolveAllowed,
+      allowed: directSolveAllowed,
+      reason: directSolveAllowed
+        ? "ocr-no-structural-review-finding"
+        : "ocr-review-required",
     },
     usage: { kind: "image", remaining: 998, limit: 999 },
   };

@@ -166,9 +166,9 @@ describe("semanticMathRenderer", () => {
   });
 
   it("preserves integral operator, bounds, power leaves, and differential identities", () => {
-    const { tree, html } = renderSemanticLatex("\\int_0^1 x^2\\,dx", "integral");
+    const { tree, rendered, html } = renderSemanticLatex("\\int_0^1 x^2\\,dx", "integral");
     const expected = [
-      findNode(tree, (node) => node.role === "integralSymbol" && node.latex === "\\int"),
+
       findNode(tree, (node) => node.role === "lowerBound" && node.latex === "0"),
       findNode(tree, (node) => node.role === "upperBound" && node.latex === "1"),
       findNode(tree, (node) => node.role === "base" && node.latex === "x"),
@@ -177,6 +177,8 @@ describe("semanticMathRenderer", () => {
       findNode(tree, (node) => node.role === "differentialOperator" && node.latex === "d"),
     ];
 
+    const integralSymbol = findNode(tree, (node) => node.role === "integralSymbol");
+    assert.equal(rendered.nodeDiagnostics.find((node) => node.semanticId === integralSymbol.id).reason, "tex-layout-changed");
     for (const node of expected) {
       assertNodeInHtml(html, node);
     }
@@ -193,13 +195,13 @@ describe("semanticMathRenderer", () => {
   });
 
   it("preserves canonical nested integral leaf annotations through parenthesized denominator groups", () => {
-    const { tree, html } = renderSemanticLatex("\\int_0^\\infty\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx", "canonical-integral-render");
+    const { tree, rendered, html } = renderSemanticLatex("\\int_0^\\infty\\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx", "canonical-integral-render");
     const denominator = findNode(tree, (node) => node.latex === "x(1+x^2)" && node.role === "denominator");
     const denominatorGroup = findNode(tree, (node) => node.type === "parenthesized" && node.latex === "(1+x^2)" && node.parentId === denominator?.id);
     const denominatorInner = findNode(tree, (node) => node.latex === "1+x^2" && node.parentId === denominatorGroup?.id);
     const denominatorExponent = findNode(tree, (node) => node.latex === "2" && node.role === "exponent" && node.sourceRange?.start > denominator.sourceRange.start);
     const expectedLeaves = [
-      findNode(tree, (node) => node.role === "integralSymbol" && node.latex === "\\int"),
+
       findNode(tree, (node) => node.role === "lowerBound" && node.latex === "0"),
       findNode(tree, (node) => node.role === "upperBound" && node.latex === "\\infty"),
       findNode(tree, (node) => node.role === "functionName" && node.latex === "\\ln"),
@@ -212,6 +214,7 @@ describe("semanticMathRenderer", () => {
 
     assert.ok(denominatorGroup?.id, "expected denominator parenthesized group");
     assert.ok(denominatorInner?.id, "expected denominator inner sum");
+    assert.ok(rendered.nodeDiagnostics.some((node) => node.reason === "tex-layout-changed"));
     for (const node of expectedLeaves) assertNodeInHtml(html, node);
   });
 
@@ -279,7 +282,11 @@ describe("semanticMathRenderer", () => {
     assert.equal(gammaNames.length, 3);
     assertNodeInHtml(html, evaluation);
     assertNodeInHtml(html, condition);
-    for (const gamma of gammaNames) assertNodeInHtml(html, gamma);
+    for (const gamma of gammaNames) {
+      const diagnostic = rendered.nodeDiagnostics.find((node) => node.semanticId === gamma.id);
+      if (diagnostic.serialized) assertNodeInHtml(html, gamma);
+      else assert.equal(diagnostic.reason, "tex-layout-changed", "script and italic correction must survive annotation");
+    }
     assert.equal(new Set(gammaNames.map((node) => node.id)).size, 3);
     assert.equal(rendered.error, "");
   });

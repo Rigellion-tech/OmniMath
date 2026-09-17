@@ -1,4 +1,5 @@
 import katex from "katex";
+import { getTexSourceAtoms } from "./texAnnotationGrammar.js";
 
 /** @typedef {{ type?: string, family?: string }} KatexSyntaxNode */
 const KATEX_INTERNAL = /** @type {{ __parse: (latex: string, options?: object) => KatexSyntaxNode[] }} */ (
@@ -1372,7 +1373,7 @@ function parseDerivative(builder, text, parentId, depth, start, role) {
 }
 
 function parseLargeOperator(builder, text, parentId, depth, start, role) {
-  const operator = text.match(/^(?:\\(?:sum|prod|lim)|lim)/)?.[0];
+  const operator = text.match(/^(?:\\(?:sum|prod|lim)|lim)(?![A-Za-z])/)?.[0];
   if (!operator) return null;
   const { scripts, endIndex } = readScriptsAfter(text, operator.length);
   const body = text.slice(endIndex);
@@ -1913,6 +1914,41 @@ function ingestExplicitNode(input, builder, parentId = null, depth = 0) {
   return node;
 }
 
+// The tutor parser supplies mathematical roles. KaTeX supplies source-backed
+// atoms when that parser leaves an opaque compound (e.g. an array's cells).
+// Refine only opaque leaves, preserving existing IDs and multi-digit numbers.
+function refineOpaqueTexLeaves(builder, source) {
+  const opaque = [...builder.nodes.values()].filter((node) => !node.childIds.length
+    && ["atom", "fallback"].includes(node.type) && node.sourceRange);
+  if (!opaque.length) return;
+  const atoms = getTexSourceAtoms(source);
+  const counts = new Map();
+  for (const atom of atoms) {
+    const key = `${atom.start}:${atom.end}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  for (const parent of opaque) {
+    const children = atoms.filter((atom) => atom.start >= parent.start && atom.end <= parent.end
+      && (atom.start > parent.start || atom.end < parent.end)
+      && counts.get(`${atom.start}:${atom.end}`) === 1);
+    if (!children.length) continue;
+    parent.childIds = children.map((atom) => {
+      const latex = source.slice(atom.start, atom.end);
+      const meta = tokenTypeForLatex(latex);
+      if (atom.type === "atom") {
+        meta.type = "operator";
+        meta.role = ["open", "close"].includes(atom.family) ? "delimiter" : latex === "=" ? "equality" : "operator";
+      }
+      const child = builder.createNode({ ...meta, latex, parentId: parent.id,
+        depth: parent.depth + 1, start: atom.start, end: atom.end });
+      child.provenance = "katex-source-atom";
+      return child.id;
+    });
+    parent.type = "expression";
+    parent.role = "expression";
+  }
+}
+
 export function buildSemanticTree({ stepId = "step", displayLatex = "", explicitTree = null, tokens = null, enabled = undefined } = {}) {
   if (!semanticLayerEnabled(enabled)) return null;
   const latex = normalizeLatexInput(displayLatex);
@@ -1929,6 +1965,7 @@ export function buildSemanticTree({ stepId = "step", displayLatex = "", explicit
   }
   if (!root) root = parseExpression(builder, latex, null, 0, 0, "expression");
   if (!root) return null;
+  if (!explicitTree) refineOpaqueTexLeaves(builder, latex);
 
   const nodes = Object.fromEntries(builder.nodes);
   const tree = {

@@ -527,6 +527,7 @@ export default function ProblemBlock({ problem: rawProblem, loading = false }) {
           ) : (
             <SolutionFlow
               steps={steps}
+              requestId={problem.requestId || problem.metadata?.requestId || ""}
               selectedStepId={selectedStepId}
               expandedStepIds={expandedStepIds}
               onSelect={selectStep}

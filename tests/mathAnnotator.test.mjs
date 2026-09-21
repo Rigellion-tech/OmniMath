@@ -241,6 +241,37 @@ describe("mathAnnotator", () => {
     assert.equal(html.includes("katex-error"), false);
   });
 
+  it("keeps valid TeX rows intact when annotating accepted solution lines", () => {
+    const values = [
+      String.raw`\begin{aligned}x=1\\u=2\end{aligned}`,
+      String.raw`\begin{gathered}x+y=1\\x-y=0\end{gathered}`,
+      String.raw`\begin{cases}x=1\\f=2\end{cases}`,
+      String.raw`\begin{array}{cc}a=b&c=d\\f=g&h=i\end{array}`,
+      String.raw`M=\begin{bmatrix}a&b\\e&f\end{bmatrix}`,
+      String.raw`x=1\\u=2`,
+      String.raw`x\ y+\frac{1}{2}`,
+    ];
+
+    for (const [index, latex] of values.entries()) {
+      const result = annotateMathExplanation({
+        steps: [{
+          id: `row-${index}`,
+          math: latex,
+          chunks: [{ id: `chunk-${index}`, display: latex }],
+          lines: [{ id: `line-${index}`, kind: "math", latex, tokens: [] }],
+        }],
+      });
+      assert.equal(result.steps[0].math, latex);
+      assert.equal(result.steps[0].lines[0].latex, latex);
+      assert.equal(result.steps[0].chunks[0].display, latex);
+      assert.equal(renderMathLatex(result.steps[0].lines[0].latex), latex);
+      assert.doesNotThrow(() => katex.renderToString(latex, { throwOnError: true }));
+    }
+
+    assert.equal(renderMathLatex(String.raw`\\frac{1}{2}`), String.raw`\frac{1}{2}`);
+    assert.equal(annotateMathExplanation({ steps: [{ math: String.raw`\alpha+\frac{1}{2}` }] }).steps[0].math, String.raw`\alpha+\frac{1}{2}`);
+  });
+
   it("normalizes comma-separated integration-by-parts chunks without blank artifacts", () => {
     assert.equal(renderMathLatex("u = x, dv = e^x dx"), "u=x,dv=e^{x}\\,dx");
     assert.equal(renderMathLatex("du = dx, v = e^x"), "du=dx,v=e^{x}");

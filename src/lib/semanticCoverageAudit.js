@@ -1,4 +1,5 @@
 import { classifySemanticNodeInteraction, normalizeCanonicalSemanticTree } from "./semanticMathRenderer.js";
+import { getTexSourceAtoms } from "./texAnnotationGrammar.js";
 
 function asIdSet(value = []) {
   if (value instanceof Set) return value;
@@ -46,6 +47,23 @@ export function auditSemanticCoverage({
   const reachableSource = reachableTargets ?? acceptedSource;
   const acceptedIds = asIdSet(acceptedSource || []);
   const reachableIds = asIdSet(reachableSource || []);
+
+  // Compare KaTeX's visible source atoms with leaf ranges independently of
+  // the node pipeline. A parser can omit an entire suffix while every node it
+  // did create still passes annotation, geometry, and reachability checks.
+  const leafNodes = (canonical?.linearLeaves || [])
+    .map((id) => canonical?.nodeMap?.[id])
+    .filter((node) => node?.sourceRange);
+  const sourceAtomGaps = getTexSourceAtoms(source).flatMap((atom) => {
+    // KaTeX includes trailing command whitespace in some source locations;
+    // that whitespace has no painted glyph or independent hover target.
+    const atomText = source.slice(atom.start, atom.end);
+    const end = atom.end - (atomText.match(/\s+$/u)?.[0].length || 0);
+    if (end <= atom.start) return [];
+    if (leafNodes.some((node) => node.sourceRange.start <= atom.start && node.sourceRange.end >= end)) return [];
+    return [{ sourceRange: { start: atom.start, end }, latex: source.slice(atom.start, end), type: atom.type,
+      failureReason: "visible-source-atom-without-semantic-leaf" }];
+  });
 
   const nodes = (canonical?.flatNodes || []).map((node) => {
     const interaction = classifySemanticNodeInteraction(node, source);
@@ -95,6 +113,8 @@ export function auditSemanticCoverage({
     serializationError: serialization?.error || "",
     nodes,
     silentMissingNodes,
+    sourceAtomGaps,
+    sourceAtomCoverageComplete: sourceAtomGaps.length === 0,
     complete: silentMissingNodes.length === 0,
   };
 }

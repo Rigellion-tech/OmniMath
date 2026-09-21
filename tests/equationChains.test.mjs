@@ -48,4 +48,30 @@ describe("equation chain layout helpers", () => {
       "x=\\frac{-5\\pm\\sqrt{493}}{6}",
     ]);
   });
+
+  it("preserves complete TeX environments through equation-chain preparation", () => {
+    const expressions = [
+      String.raw`\begin{aligned}A&=B \quad C+D&=E\\F&=G\end{aligned}`,
+      String.raw`\begin{gathered}A=B\\C+D=E\end{gathered}`,
+      String.raw`\begin{cases}x+y=1\\x-y=0\end{cases}`,
+      String.raw`\begin{array}{cc}a=b&c+d=e\\f=g&h=i\end{array}`,
+      String.raw`M=\begin{bmatrix}a=b&c+d\\e&f=g\end{bmatrix}`,
+      String.raw`\begin{aligned}-\operatorname{div}((1+\alpha|\nabla u|^2)\nabla u)+\beta u-\lambda|u|^{p-2}u&=0\\u|_{\partial\Omega}&=0\end{aligned}`,
+    ];
+
+    for (const source of expressions) {
+      assert.deepEqual(splitEquationChainLatex(source), [source]);
+      assert.doesNotThrow(() => katex.renderToString(source, {
+        throwOnError: true,
+        strict: "ignore",
+        displayMode: true,
+      }));
+    }
+  });
+
+  it("still splits a top-level equation chain around an embedded matrix", () => {
+    const first = String.raw`x=\begin{bmatrix}a=b&c+d\\e&f=g\end{bmatrix}`;
+    const second = "y+1=2";
+    assert.deepEqual(splitEquationChainLatex(`${first} ${second}`), [first, second]);
+  });
 });

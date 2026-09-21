@@ -5164,6 +5164,11 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     };
     geometrySnapshotRef.current = translatedSnapshot;
     semanticTargetsRef.current = translatedTargets;
+    recordGeometrySnapshotDiagnostic(translatedSnapshot, {
+      phase: "translate",
+      stepId,
+      chunkId: safeChunk.id,
+    });
 
     const selectableTargets = childTargets.filter(isSelectableLeafTarget);
     measuredTargetCleanupRef.current?.();
@@ -5187,6 +5192,32 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     });
     return true;
   }, [measureSemanticTargets, registerMeasuredTargets, safeChunk.id, stepId]);
+
+  const refreshMovedGeometryRoot = useCallback((reason) => {
+    const snapshot = geometrySnapshotRef.current;
+    const root = tokenRef.current;
+    if (!snapshot?.valid || !snapshot.rootRect || !root?.isConnected) return false;
+    recordSemanticHoverCounter("getBoundingClientRectCalls", 1, { reason: `root-drift-check:${reason}` });
+    const current = normalizeSemanticRect(root.getBoundingClientRect());
+    if (!current) return false;
+    const previous = snapshot.rootRect;
+    const moved = Math.abs(current.left - previous.left) > 0.5
+      || Math.abs(current.top - previous.top) > 0.5
+      || Math.abs(current.width - previous.width) > 0.5
+      || Math.abs(current.height - previous.height) > 0.5;
+    if (!moved) return false;
+    recordSemanticHoverPerf("geometryRootDriftDetected", {
+      reason,
+      stepId,
+      chunkId: safeChunk.id,
+      previous: rectSnapshot(previous),
+      current: rectSnapshot(current),
+    });
+    // The rendered owner and overlay move with their ancestors. Translate the
+    // cached root-local rectangles before resolving the same viewport pointer.
+    translateSemanticGeometry({ changedTargets: [] });
+    return true;
+  }, [safeChunk.id, stepId, translateSemanticGeometry]);
 
   const resolvePointerToken = useCallback((event) => {
     const resolveStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -5634,6 +5665,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       hoverPhaseLoggedRef.current = true;
       logReadinessSnapshot("first-hover");
     }
+    refreshMovedGeometryRoot("pointer-enter");
     const token = resolvePointerToken(event);
     if (!token) {
       if (pointerSnapshotNeedsRetry()) {
@@ -5668,7 +5700,10 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       hoverPhaseLoggedRef.current = true;
       logReadinessSnapshot("first-hover");
     }
-    const token = resolvePointerToken(event);
+    let token = resolvePointerToken(event);
+    if (!token && refreshMovedGeometryRoot("pointer-no-hit")) {
+      token = resolvePointerToken(event);
+    }
     if (!token) {
       if (lastResolvedHoverIdRef.current !== null || activeChunkId) {
         lastResolvedHoverIdRef.current = null;

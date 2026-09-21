@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { semanticRenderingCorpus } from "./fixtures/semanticRenderingCorpus.mjs";
+import { submitCurrentComposer } from "./helpers/submitCurrentComposer.mjs";
 
 test("adversarial annotations preserve browser glyph and primitive geometry in both math styles", async ({ page }) => {
   await page.goto("/?mockAuth=1");
@@ -88,8 +89,7 @@ test("native hover and pin preserve repeated identities after scrolling, resize 
   }
   await page.setViewportSize({ width: 800, height: 800 });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect repeated math.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect repeated math.");
   const step = page.locator(".step-card").first();
   await expect(step).toBeVisible();
   const ids = await step.locator(".katex-html [data-semantic-selectable='true']").evaluateAll((owners) => owners

@@ -1,6 +1,6 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo } from "react";
 import { ChevronDown } from "lucide-react";
-import { MathRenderShell, looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
+import MathRenderer, { MathRenderShell, looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
 import MathChunk from "./MathChunk";
 import MathText from "./MathText";
 import { useHoverActions, useHoverSemanticState } from "@/lib/HoverContext";
@@ -234,6 +234,23 @@ export function InteractiveMathLine({ line, stepId }) {
     && !showLineText
     && singleTokenBlocks.some((block) => block.type === "separator");
 
+  useEffect(() => {
+    if (
+      !import.meta.env.DEV
+      || import.meta.env.VITE_DEBUG_MATH_RENDER !== "true"
+      || line?.role !== "final_answer"
+    ) return;
+    console.info("[omnimath:final-answer-render-boundary]", {
+      stepId,
+      lineId: line?.id || null,
+      uiSelectedFinalAnswerLatex: line?.latex || singleTokenLatex || line?.text || "",
+      tokenLatex: singleTokenLatex || null,
+      selectedBlocks: hasTokens
+        ? shouldSplitSingleToken ? singleTokenBlocks : [{ type: "math", latex: singleTokenLatex }]
+        : line?.latex ? latexBlocks : textMathBlocks,
+    });
+  }, [hasTokens, latexBlocks, line?.id, line?.latex, line?.role, line?.text, shouldSplitSingleToken, singleTokenBlocks, singleTokenLatex, stepId, textMathBlocks]);
+
   if (hasTokens) {
     if (shouldSplitSingleToken) {
       return (
@@ -267,6 +284,16 @@ export function InteractiveMathLine({ line, stepId }) {
     );
   }
 
+  if ((line?.latex && latexBlocks.length === 0) || (textAsMath && textMathBlocks.length === 0)) {
+    // A block split can normalize layout-only input to nothing. Keep that
+    // position and send it through the real render-input diagnostic boundary.
+    return (
+      <MathLineShell>
+        <MathRenderer math={line.latex || line.text} componentName="InteractiveMathLine.empty-split" />
+      </MathLineShell>
+    );
+  }
+
   if (line?.latex) {
     return (
       <SplitMathBlocks
@@ -296,7 +323,7 @@ export function InteractiveMathLine({ line, stepId }) {
   return null;
 }
 
-function SolutionStepView({ step, index, selected, expanded, onSelect, onToggleExpanded, hoverSemantic, hoverActions }) {
+function SolutionStepView({ step, index, requestId, selected, expanded, onSelect, onToggleExpanded, hoverSemantic, hoverActions }) {
   const {
     activeStepId,
     openReferenceIds = [],
@@ -327,6 +354,9 @@ function SolutionStepView({ step, index, selected, expanded, onSelect, onToggleE
   return (
     <article
       data-state={state}
+      data-solve-request-id={requestId || undefined}
+      data-step-id={step.id || undefined}
+      data-step-index={index}
       data-final-answer={isFinalAnswer ? "true" : undefined}
       onMouseLeave={handleStepLeave}
       className={cn(
@@ -421,6 +451,7 @@ function solutionStepHoverSignature(stepId, state = {}) {
 function sameSolutionStepViewProps(previous, next) {
   return previous.step === next.step
     && previous.index === next.index
+    && previous.requestId === next.requestId
     && previous.selected === next.selected
     && previous.expanded === next.expanded
     && previous.onSelect === next.onSelect

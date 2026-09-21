@@ -111,13 +111,14 @@ function logFrontendReasoningLatexStage(stage, candidate) {
 }
 
 /** @returns {Record<string, any>} */
-export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {}) {
+export function normalizeSolveResponse(rawResponse = {}, { endpoint = "", requestId: requestedRequestId = "" } = {}) {
   const raw = objectOrEmpty(rawResponse);
   const explanation = objectOrEmpty(raw.explanation);
   const result = objectOrEmpty(raw.result);
   const solution = objectOrEmpty(raw.solution);
   const problem = objectOrEmpty(raw.problem);
   const source = [raw, explanation, result, solution, problem].find((item) => Array.isArray(item.steps)) || raw;
+  const requestId = raw.requestId || raw.metadata?.requestId || requestedRequestId || "";
   logFrontendReasoningLatexStage("4a.frontend_received_field", source);
   const steps = getSolutionSteps(raw);
   const saveWarning = raw.runtime?.saveWarning || explanation.runtime?.saveWarning || result.runtime?.saveWarning || raw.saveWarning || "";
@@ -128,6 +129,7 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {})
   const metadata = {
     ...(raw.metadata || {}),
     endpoint,
+    requestId: requestId || null,
     runtime: raw.runtime || explanation.runtime || result.runtime || null,
     usage: raw.usage || explanation.usage || result.usage || null,
     savedExplanationId: raw.savedExplanationId || explanation.savedExplanationId || result.savedExplanationId || null,
@@ -137,6 +139,7 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {})
   const normalized = {
     ...raw,
     ...source,
+    requestId: requestId || null,
     steps,
     finalAnswer: firstValue(raw.finalAnswer, raw.finalAnswerLatex, explanation.finalAnswer, explanation.finalAnswerLatex, result.finalAnswer, result.finalAnswerLatex, solution.finalAnswer, solution.finalAnswerLatex, source.finalAnswer, source.finalAnswerLatex) || "",
     concepts: firstArray(raw.concepts, explanation.concepts, result.concepts, solution.concepts, source.concepts),
@@ -147,6 +150,19 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "" } = {})
       saveWarning: saveWarning || raw.runtime?.saveWarning || null,
     },
   };
+  if (import.meta.env?.DEV && import.meta.env.VITE_DEBUG_MATH_RENDER === "true") {
+    const responseFinalLine = raw.steps?.flatMap((step) => step?.lines || [])
+      .find((line) => line?.role === "final_answer")?.latex || "";
+    const selectedFinalLine = steps.flatMap((step) => step?.lines || [])
+      .find((line) => line?.role === "final_answer")?.latex || "";
+    console.info("[omnimath:final-answer-api-boundary]", {
+      requestId: requestId || null,
+      apiResponseFinalAnswerLatex: raw.finalAnswerLatex || "",
+      apiResponseFinalLineLatex: responseFinalLine,
+      selectedFinalAnswerLatex: normalized.finalAnswer,
+      selectedFinalLineLatex: selectedFinalLine,
+    });
+  }
   logFrontendReasoningLatexStage("4b.frontend_response_normalization", normalized);
   return normalized;
 }

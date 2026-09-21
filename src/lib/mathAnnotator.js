@@ -5,6 +5,7 @@ import {
   shouldPreserveLatex,
   traceMathStage,
 } from "./mathNode.js";
+import { isRenderableExplicitLatex } from "./latexRenderability.js";
 import { segmentMixedTextMath } from "./mixedTextSegments.js";
 
 const GREEK_COMMANDS = new Map([
@@ -185,11 +186,15 @@ function normalizeEscapedLatexInput(value = "") {
   let text = String(value || "");
   let previous = "";
 
-  while (text !== previous) {
-    previous = text;
-    text = text
-      .replace(/\\\\(?=([a-zA-Z]+|[,;!]))/g, "\\")
-      .replace(/\\\\(?=[{}_^])/g, "\\");
+  // KaTeX accepts row breaks in complete TeX. Repair only doubled slashes in
+  // input that is not already renderable, such as transport-escaped commands.
+  if (!text.includes("\\\\") || !isRenderableExplicitLatex(text)) {
+    while (text !== previous) {
+      previous = text;
+      text = text
+        .replace(/\\\\(?=([a-zA-Z]+|[,;!]))/g, "\\")
+        .replace(/\\\\(?=[{}_^])/g, "\\");
+    }
   }
 
   return text
@@ -968,7 +973,7 @@ function renderFunctionName(name) {
 
 function normalizeMathValue(value = "") {
   const input = normalizeEscapedLatexInput(value);
-  return shouldPreserveLatex(input)
+  return (isRenderableExplicitLatex(input) || shouldPreserveLatex(input))
     ? normalizeLatexTransport(input)
     : normalizeMathText(input, { preserveFunctionBoundaries: true });
 }
@@ -1122,6 +1127,12 @@ function renderLatexForKatex(value, depth = 0) {
 }
 
 export function renderMathLatex(value = "") {
+  const explicitLatex = normalizeLatexTransport(value);
+  if (isRenderableExplicitLatex(explicitLatex)) {
+    traceMathStage("Markdown conversion", value, explicitLatex, "preserved renderable explicit LaTeX");
+    return explicitLatex;
+  }
+
   const input = normalizeEscapedLatexInput(value);
   if (shouldPreserveLatex(input)) {
     const preserved = normalizeLatexForKatex(input);

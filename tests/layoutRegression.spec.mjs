@@ -6,6 +6,7 @@ import { annotateMathExplanation } from "../src/lib/mathAnnotator.js";
 import { buildSemanticTree } from "../src/lib/mathSemanticTree.js";
 import { classifySemanticNodeInteraction, createSemanticKatexTrust, serializeSemanticTreeToLatex } from "../src/lib/semanticMathRenderer.js";
 import { createLocalRuleExplanation } from "../server/localRules.js";
+import { submitCurrentComposer } from "./helpers/submitCurrentComposer.mjs";
 
 const ARTIFACT_DIR = "test-artifacts/layout-regression";
 const ZOOM_LEVELS = [
@@ -910,8 +911,7 @@ test("Stokes theorem solution stays contained and renderable at browser zoom lev
   });
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill(STOKES_PROBLEM);
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, STOKES_PROBLEM);
 
   await expect(page.getByText("Stokes' theorem setup")).toBeVisible();
   await expect(page.locator(".omni-solution-line").first()).toBeVisible();
@@ -943,8 +943,7 @@ test("Stokes theorem solution stays contained and renderable at browser zoom lev
 test("hierarchical math tokens expose nested hover, pin, drag, tooltip, and KaTeX targets", async ({ page }) => {
   await installHierarchicalTokenApiFixtures(page);
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect 3x + 45 = 67 and a Stokes surface integral.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect 3x + 45 = 67 and a Stokes surface integral.");
 
   await expect(page.getByRole("button", { name: /Algebra target/i })).toBeVisible();
   await expect(page.getByRole("button", { name: /Vector calculus target/i })).toBeVisible();
@@ -980,8 +979,7 @@ test("hierarchical math tokens expose nested hover, pin, drag, tooltip, and KaTe
   await assertLayoutIntegrity(page);
 
   await page.reload();
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Reload hierarchy fixture.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Reload hierarchy fixture.");
   await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='dS']").first()).toBeVisible();
   await expect(page.locator(".omni-solution-flow .katex")).not.toHaveCount(0);
   await assertLayoutIntegrity(page);
@@ -991,9 +989,8 @@ test("local semantic layer creates subtoken targets without solver annotations",
   const lazyRequests = [];
   await installLocalSemanticLayerFixture(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect local semantic parsing.");
-  await page.getByRole("button", { name: /Explain/i }).click();
-  await expect(page.getByText("AI: 7/50 used today")).toBeVisible();
+  await submitCurrentComposer(page, "Inspect local semantic parsing.");
+  await expect(page.getByText(/Explanation ready/i)).toBeVisible();
 
   const hoverLatex = async (latex, expectedLatex = latex, xRatio = 0.5, stepLabel = null) => {
     await expect.poll(() => page.evaluate(({ targetLatex, stepLabel: label }) => {
@@ -1089,8 +1086,7 @@ test("evaluation wrappers preserve reachable granular Gamma hitboxes", async ({ 
   const lazyRequests = [];
   await installLocalSemanticLayerFixture(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect evaluation wrapper hitboxes.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect evaluation wrapper hitboxes.");
 
   const tree = buildSemanticTree({
     stepId: "browser-evaluation-fixture",
@@ -1145,8 +1141,7 @@ test("evaluation wrappers preserve reachable granular Gamma hitboxes", async ({ 
 test("render-time semantic ownership keeps named function heads distinct from arguments", async ({ page }) => {
   await installLocalSemanticLayerFixture(page);
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect named function ownership.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect named function ownership.");
 
   const stepId = "local-semantic-function-ownership-step";
   const chunkId = "local-semantic-function-ownership-chunk";
@@ -1231,8 +1226,7 @@ test("leading unary fractions preserve pointer-reachable numerator and denominat
   const lazyRequests = [];
   await installLocalSemanticLayerFixture(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect signed fraction hitboxes.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect signed fraction hitboxes.");
 
   const step = page.locator(".step-card").filter({ hasText: "Signed fraction unary fixture" });
   await expect(step).toBeVisible();
@@ -1261,8 +1255,7 @@ test("leading unary fractions preserve pointer-reachable numerator and denominat
 test("complete clauses and shorthand fractions have no silent interactive hover gaps", async ({ page }) => {
   await installLocalSemanticLayerFixture(page);
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Audit complete semantic hover coverage.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Audit complete semantic hover coverage.");
 
   const fixtures = [
     {
@@ -1348,8 +1341,7 @@ test("quick tooltip owns hover across portal insertion and stale source clears",
     lazyDelayMs: 50,
   });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect hover lifetime.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect hover lifetime.");
 
   const xToken = page.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
   await expect(xToken).toBeVisible();
@@ -1459,9 +1451,8 @@ test("one typed submission produces one initial solve request despite rapid dupl
 test("debug hover performance counters prove pointer movement uses cached semantic geometry", async ({ page }) => {
   await installLocalSemanticLayerFixture(page);
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect local semantic hover performance.");
-  await page.getByRole("button", { name: /Explain/i }).click();
-  await expect(page.getByText("AI: 7/50 used today")).toBeVisible();
+  await submitCurrentComposer(page, "Inspect local semantic hover performance.");
+  await expect(page.getByText(/Explanation ready/i)).toBeVisible();
 
   const target = page.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
   await expect(target).toBeVisible();
@@ -1565,8 +1556,7 @@ test("shared scroll coordinator translates cached geometry without semantic reco
   await installLocalSemanticLayerFixture(page);
   await page.setViewportSize({ width: 760, height: 420 });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect local semantic hover performance.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect local semantic hover performance.");
 
   const firstTarget = page.locator("[data-inspectable='math-subtoken'][data-token-latex='x']").first();
   const lowerTarget = page.locator(".step-card", { has: page.getByRole("button", { name: /Arctangent argument/i }) })
@@ -1675,8 +1665,7 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
   await installLocalSemanticLayerFixture(page, { lazyRequests, longLazyContent: true, lazyDelayMs: 150 });
   await page.setViewportSize({ width: 520, height: 420 });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect aggregate semantic parsing.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect aggregate semantic parsing.");
   await expect(page.getByRole("button", { name: /Aggregate integral/i })).toBeVisible();
 
   const targetBox = async (stepLabel, role, kind = "group", occurrence = 0) => page.evaluate(({ stepLabel, role, kind, occurrence }) => {
@@ -1839,6 +1828,7 @@ test("malformed solver math does not render as raw LaTeX text", async ({ page })
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
+        requestId: "render-malformed-request",
         title: "Malformed fixture",
         problem: "Malformed fixture",
         expression: "{frac}",
@@ -1860,12 +1850,17 @@ test("malformed solver math does not render as raw LaTeX text", async ({ page })
   });
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Malformed fixture.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Malformed fixture.");
   await expect(page.getByText("Malformed generated math")).toBeVisible();
   await expect(page.locator("body")).not.toContainText("{frac}");
   await expect(page.locator("[data-math-render-error='true']")).not.toHaveCount(0);
+  const failed = page.locator("article[data-step-id='malformed-step'] [data-math-render-outcome='render_failed']").first();
+  await expect(failed).toContainText("Equation could not be rendered.");
+  await expect(failed).toBeVisible();
+  await expect(failed.locator("xpath=ancestor::article[1]")).toHaveAttribute("data-solve-request-id", "render-malformed-request");
+  await expect(failed.locator("xpath=ancestor::article[1]")).toHaveAttribute("data-step-id", "malformed-step");
 });
+
 
 test("semantic geometry covers composite KaTeX leaves without whole-step fallback", async ({ page }) => {
   const lazyRequests = [];
@@ -1934,8 +1929,7 @@ test("semantic geometry covers composite KaTeX leaves without whole-step fallbac
   });
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect composite geometry.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect composite geometry.");
   await expect(page.getByRole("button", { name: /Geometry integral/i })).toBeVisible();
 
   const coverage = await page.evaluate(() => {
@@ -2094,8 +2088,7 @@ test("semantic identity stays stable from function hitbox through tooltip, API, 
   }
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Audit repeated function identity.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Audit repeated function identity.");
   await expect(page.getByRole("button", { name: /Identity functions/i })).toBeVisible();
 
   const audit = await page.evaluate(() => {
@@ -2206,8 +2199,7 @@ test("nested integral and signed exponent targets preserve semantic identity", a
   }
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect nested math selection.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect nested math selection.");
   await expect(page.getByRole("button", { name: /Canonical nested integral/i })).toBeVisible();
 
   const tokenBox = async (stepLabel, latex, role = null, occurrence = 0) => page.evaluate(({ stepLabel, latex, role, occurrence }) => {
@@ -2359,8 +2351,7 @@ test("pointer trajectories replace stale identities across nested semantic struc
   }
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect semantic pointer transitions.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect semantic pointer transitions.");
   await expect(page.getByRole("button", { name: /Nested bound torture/i })).toBeVisible();
 
   const targetsForStep = async (stepLabel) => {
@@ -2738,8 +2729,7 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
   }
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill(exactIntegral);
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, exactIntegral);
   await expect(page.getByRole("button", { name: /Complex upper bound fixture/i })).toBeVisible();
   await expect(page.locator(".step-card").filter({ hasText: "Reported integral" }).locator(".math-semantic-hitbox[data-token-role='upperBound']").first()).toBeVisible();
   await expect(page.locator(".step-card").filter({ hasText: "Complex upper bound fixture" }).locator(".math-semantic-hitbox[data-token-role='upperBound']").first()).toBeVisible();
@@ -2895,13 +2885,18 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
   for (const probe of trace.complex.points) {
     let collected = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      // Re-read the visible ink immediately before moving the pointer. The
+      // solution board can finish its entrance transform after the initial
+      // diagnostic trace was captured.
+      const liveProbe = (await readUpperBoundTrace("Complex upper bound fixture"))
+        .points.find((candidate) => candidate.label === probe.label) || probe;
       await page.mouse.move(4, 4, { steps: 1 });
       await page.waitForTimeout(180);
       await page.evaluate(() => {
         window.__OMNIMATH_LAST_HOVER_DIAGNOSTIC__ = null;
       });
       const previousHoverCount = requests.filter((request) => request.endpoint === "hover").length;
-      await moveSemanticPointer(page, probe.point.x, probe.point.y);
+      await moveSemanticPointer(page, liveProbe.point.x, liveProbe.point.y);
       await page.waitForTimeout(520);
       const tooltipVisible = await page.locator(".omni-quick-tooltip").isVisible().catch(() => false);
       const tooltipSemanticId = tooltipVisible
@@ -2912,7 +2907,7 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
       const hoverState = await page.evaluate(() => window.__OMNIMATH_HOVER_STATE__ || null);
       const hoverRequests = requests.filter((request) => request.endpoint === "hover");
       collected = {
-        ...probe,
+        ...liveProbe,
         attempt,
         requestDelta: hoverRequests.length - previousHoverCount,
         latestRequest: hoverRequests.at(-1)?.body || null,
@@ -3000,8 +2995,7 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   }
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Investigate complex improper integral hover behavior.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Investigate complex improper integral hover behavior.");
   await expect(page.getByRole("button", { name: /Step 1 tangent substitution/i })).toBeVisible();
 
   const findTargetBox = async ({ stepLabel, latex = null, role = null, kind = null, occurrence = 0, contains = false }) => page.evaluate((options) => {
@@ -3662,8 +3656,7 @@ test("semantic DOM hitboxes stay tight for quadratic leaves", async ({ page }) =
   }
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect quadratic hitboxes.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect quadratic hitboxes.");
   await expect(page.getByRole("button", { name: /Quadratic source/i })).toBeVisible();
 
   const largeDiscriminantStep = page.locator(".step-card")
@@ -4195,8 +4188,7 @@ test("fraction result hit-testing exposes leaves and pins fraction only through 
   const lazyRequests = [];
   await installHierarchicalTokenApiFixtures(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Evaluate the cosine power integral.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Evaluate the cosine power integral.");
 
   await expect(page.getByRole("button", { name: /Cosine power integral/i })).toBeVisible();
   await expect(page.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\frac{3\\\\pi}{4}']")).toHaveCount(0);
@@ -4244,8 +4236,7 @@ test("radial integral hit-testing resolves visible subexpressions before parent 
   const lazyRequests = [];
   await installHierarchicalTokenApiFixtures(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Evaluate the radial integral.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Evaluate the radial integral.");
 
   await expect(page.getByRole("button", { name: /Radial final integral/i })).toBeVisible();
 
@@ -4296,8 +4287,7 @@ test("tiny leading coefficient before an integral resolves before the wider inte
   const lazyRequests = [];
   await installHierarchicalTokenApiFixtures(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect the odd-function coefficient.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect the odd-function coefficient.");
   const step = page.locator(".step-card", { has: page.getByRole("button", { name: "Select step 5" }) });
   await expect(step).toBeVisible({ timeout: 20000 });
   const coefficient = step.locator("[data-inspectable='math-subtoken'][data-token-latex='3']").first();
@@ -4371,8 +4361,7 @@ test("radical operator geometry stays separate from the radicand", async ({ page
   });
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect radical hitboxes.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect radical hitboxes.");
   await expect(page.getByRole("button", { name: /Imaginary root final answer/i })).toBeVisible();
 
   const readBox = async (latex, role) => page.evaluate(({ latex, role }) => {
@@ -4406,11 +4395,13 @@ test("radical operator geometry stays separate from the radicand", async ({ page
   expect(radicand.quality).toBe("precise_leaf");
   expect(radical.width).toBeLessThan(radicand.width * 0.6);
 
-  await moveSemanticPointer(page, radical.x + radical.width / 2, radical.y + radical.height / 2);
+  const currentRadical = await readBox("\\sqrt", "radical");
+  await moveSemanticPointer(page, currentRadical.x + currentRadical.width / 2, currentRadical.y + currentRadical.height / 2);
   await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
   await expect.poll(() => lazyRequests.at(-1)?.selectedLatex || "").toBe("\\sqrt");
 
-  await moveSemanticPointer(page, radicand.x + radicand.width * 0.97, radicand.y + radicand.height / 2);
+  const currentRadicand = await readBox("278471", "radicand");
+  await moveSemanticPointer(page, currentRadicand.x + currentRadicand.width * 0.97, currentRadicand.y + currentRadicand.height / 2);
   await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
   await expect.poll(() => lazyRequests.at(-1)?.selectedLatex || "").toBe("278471");
   await expect.poll(() => lazyRequests.at(-1)?.targetRole || "").toBe("radicand");
@@ -4423,8 +4414,7 @@ test("compound function hover targets stay leaf-sized", async ({ page }) => {
   const lazyRequests = [];
   await installHierarchicalTokenApiFixtures(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect zero-product simplifications.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect zero-product simplifications.");
 
   const hoverExactLatex = async (latex, expectedLatex, xRatio = 0.5) => {
     const stepLabel = "Zero product simplification";
@@ -4476,8 +4466,7 @@ test("small product hover prefers coefficient, function name, exponent, and vari
   const lazyRequests = [];
   await installHierarchicalTokenApiFixtures(page, { lazyRequests });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect 4r squared cosine squared theta.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect 4r squared cosine squared theta.");
 
   await expect(page.getByRole("button", { name: /Small token product/i })).toBeVisible();
   const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Small token product/i }) });
@@ -4507,8 +4496,7 @@ test("long vector-field equations scroll inside math containers without page ove
   await page.setViewportSize({ width: 1680, height: 1050 });
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill(LONG_STOKES_PROBLEM);
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, LONG_STOKES_PROBLEM);
 
   await expect(page.getByRole("button", { name: /Apply Stokes['’] theorem/i })).toBeVisible();
   await expect(page.getByRole("button", { name: /Final answer/i })).toBeVisible();
@@ -4692,8 +4680,7 @@ test("spaced evaluation delimiters do not collapse to an arrow-only step", async
     });
   });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Evaluate the antiderivative at the bounds.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Evaluate the antiderivative at the bounds.");
 
   const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Evaluate at the bounds/i }) });
   await expect(step).toBeVisible();
@@ -4736,8 +4723,7 @@ test("bare trig applications keep command boundaries through client annotation a
     });
   });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Preserve bare trig command boundaries.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Preserve bare trig command boundaries.");
 
   const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Preserve bare trig commands/i }) });
   await expect(step).toBeVisible();
@@ -4790,8 +4776,7 @@ test("semantic hitboxes remain interactive across internal horizontal scrolling"
     });
   });
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect a long equation.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect a long equation.");
 
   const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Inspect the long equation/i }) });
   await expect(step).toBeVisible();

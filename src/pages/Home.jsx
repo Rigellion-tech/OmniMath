@@ -252,6 +252,18 @@ export default function Home() {
       sessionId: activeSession?.id,
     };
   }, [activeSession]);
+  useEffect(() => {
+    if (!import.meta.env.DEV || import.meta.env.VITE_DEBUG_MATH_RENDER !== "true") return;
+    const finalLine = getSolutionSteps(problem).flatMap((step) => step?.lines || [])
+      .find((line) => line?.role === "final_answer");
+    if (finalLine) {
+      console.info("[omnimath:final-answer-session-boundary]", {
+        sessionId: activeSession?.id || null,
+        problemFinalAnswerLatex: problem.finalAnswerLatex || "",
+        activeProblemFinalLineLatex: finalLine.latex || "",
+      });
+    }
+  }, [activeSession?.id, problem]);
   const providerKey = activeSession?.id ?? "default";
 
   useEffect(() => {

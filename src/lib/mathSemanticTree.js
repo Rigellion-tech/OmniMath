@@ -635,6 +635,29 @@ function splitTopLevelTerms(text) {
   return terms.map(trimSourcePart).filter((term) => term.value);
 }
 
+function splitCompletedIntegralTerms(text) {
+  const terms = splitTopLevelTerms(text);
+  if (terms.length < 2 || !readIntegralHead(text)) return terms;
+  const grouped = [];
+  let current = terms[0];
+  for (const next of terms.slice(1)) {
+    const head = readIntegralHead(current.value);
+    const hasCompletedIntegral = head && findDifferentials(current.value)
+      .some((match) => match.index >= head.endIndex);
+    if (head && !hasCompletedIntegral) {
+      current = {
+        ...current,
+        value: text.slice(current.start, next.start + next.value.length),
+      };
+    } else {
+      grouped.push(current);
+      current = next;
+    }
+  }
+  grouped.push(current);
+  return grouped;
+}
+
 function splitImplicitProduct(text) {
   const compact = String(text || "");
   const splitAt = (leftStart, leftEnd, rightStart, rightEnd = compact.length) => {
@@ -1541,6 +1564,31 @@ function parseGenericFunctionCall(builder, text, parentId, depth, start, role) {
   return node;
 }
 
+function parseSumTerms(builder, text, terms, parentId, depth, start, role) {
+  const node = builder.createNode({ type: "sum", role, latex: text, parentId, depth, start, end: start + text.length });
+  const childIds = [];
+  for (const term of terms) {
+    if (term.operator) {
+      childIds.push(builder.createNode({ type: "operator", role: "operator", latex: term.operator, parentId: node.id, depth: depth + 1, start: start + term.operatorIndex, end: start + term.operatorIndex + term.operator.length }).id);
+    }
+    const isSignedNumericSubtrahend = term.operator === "-" && NUMBER_LITERAL_PATTERN.test(term.value);
+    const child = isSignedNumericSubtrahend
+      ? builder.createNode({
+          type: "number",
+          role: "constant",
+          latex: `-${term.value}`,
+          parentId: node.id,
+          depth: depth + 1,
+          start: start + term.operatorIndex,
+          end: start + term.start + term.value.length,
+        })
+      : parseExpression(builder, term.value, node.id, depth + 1, start + term.start, "term");
+    if (child) childIds.push(child.id);
+  }
+  node.childIds = childIds;
+  return node;
+}
+
 function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, role = "expression") {
   const trimmed = trimExpressionSource(latex, start);
   const text = trimmed.text;
@@ -1641,6 +1689,11 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
   const fraction = parseFractionExpression(builder, text, parentId, depth, start, role);
   if (fraction) return fraction;
 
+  const completedIntegralTerms = readIntegralHead(text) ? splitCompletedIntegralTerms(text) : [];
+  if (completedIntegralTerms.length > 1) {
+    return parseSumTerms(builder, text, completedIntegralTerms, parentId, depth, start, role);
+  }
+
   const integral = parseIntegralExpression(builder, text, parentId, depth, start, role);
   if (integral) return integral;
 
@@ -1649,35 +1702,7 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
 
   const terms = splitTopLevelTerms(text);
   if (terms.length > 1) {
-    const node = builder.createNode({ type: "sum", role, latex: text, parentId, depth, start, end: start + text.length });
-    const childIds = [];
-    for (const term of terms) {
-      if (term.operator) {
-        childIds.push(builder.createNode({ type: "operator", role: "operator", latex: term.operator, parentId: node.id, depth: depth + 1, start: start + term.operatorIndex, end: start + term.operatorIndex + term.operator.length }).id);
-      }
-      const isSignedNumericSubtrahend = term.operator === "-" && NUMBER_LITERAL_PATTERN.test(term.value);
-      const child = isSignedNumericSubtrahend
-        ? builder.createNode({
-            type: "number",
-            role: "constant",
-            latex: `-${term.value}`,
-            parentId: node.id,
-            depth: depth + 1,
-            start: start + term.operatorIndex,
-            end: start + term.start + term.value.length,
-          })
-        : parseExpression(
-            builder,
-            term.value,
-            node.id,
-            depth + 1,
-            start + term.start,
-            "term"
-          );
-      if (child) childIds.push(child.id);
-    }
-    node.childIds = childIds;
-    return node;
+    return parseSumTerms(builder, text, terms, parentId, depth, start, role);
   }
 
   const unaryOperator = text[0];

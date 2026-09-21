@@ -124,16 +124,39 @@ function findEquationChainBoundary(source, relationIndex, previousStart) {
   return findGluedEquationBoundary(source, relationIndex, previousStart);
 }
 
+function maskTexEnvironments(source) {
+  const masked = source.split("");
+  const stack = [];
+  const command = /\\(begin|end)\s*\{([A-Za-z*]+)\}/gu;
+  for (const match of source.matchAll(command)) {
+    const [, action, name] = match;
+    if (action === "begin") {
+      stack.push({ name, start: match.index });
+    } else if (stack.at(-1)?.name === name) {
+      const opening = stack.pop();
+      if (stack.length === 0) {
+        for (let index = opening.start; index < match.index + match[0].length; index += 1) {
+          masked[index] = "M";
+        }
+      }
+    }
+  }
+  return masked.join("");
+}
+
 export function splitEquationChainLatex(value = "") {
   const source = String(value || "").trim();
-  const relationIndexes = topLevelRelationIndexes(source);
+  // A complete environment is one math atom for equation-chain detection.
+  // Preserve string offsets so top-level chains around a matrix still split.
+  const boundarySource = maskTexEnvironments(source);
+  const relationIndexes = topLevelRelationIndexes(boundarySource);
   if (relationIndexes.length < 2) return [source].filter(Boolean);
 
   const nextSegmentStart = (boundary) => (/\s/.test(source[boundary] || "") ? boundary + 1 : boundary);
   const boundaries = [];
   let previousStart = 0;
   for (const relationIndex of relationIndexes.slice(1)) {
-    const boundary = findEquationChainBoundary(source, relationIndex, previousStart);
+    const boundary = findEquationChainBoundary(boundarySource, relationIndex, previousStart);
     if (boundary > previousStart) {
       boundaries.push(boundary);
       previousStart = nextSegmentStart(boundary);

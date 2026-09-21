@@ -49,6 +49,23 @@ function renderFixture(latex, fixtureIndex) {
 }
 
 describe("semantic coverage invariant", () => {
+  it("detects source atoms omitted by the parser before annotation or geometry", () => {
+    const latex = String.raw`\int x+y\,dx+\int z\,dS`;
+    const tree = buildSemanticTree({ stepId: "source-atom-gap", displayLatex: latex, enabled: true });
+    const complete = auditSemanticCoverage({ tree });
+    assert.equal(complete.sourceAtomCoverageComplete, true);
+    assert.deepEqual(complete.sourceAtomGaps, []);
+
+    const secondIntegralStart = latex.indexOf("\\int", latex.indexOf("+\\int") + 1);
+    const missingSuffix = {
+      ...tree,
+      flatNodes: tree.flatNodes.filter((node) => node.sourceRange.start < secondIntegralStart),
+    };
+    const audit = auditSemanticCoverage({ tree: missingSuffix });
+    assert.equal(audit.sourceAtomCoverageComplete, false);
+    assert.ok(audit.sourceAtomGaps.some((gap) => gap.latex === "z"));
+    assert.ok(audit.sourceAtomGaps.every((gap) => gap.failureReason === "visible-source-atom-without-semantic-leaf"));
+  });
   it("serializes safe leaves and explicitly reports layout-sensitive leaves in each notation class", () => {
     for (const [fixtureIndex, latex] of NOTATION_FIXTURES.entries()) {
       const { tree, serialization, domHtml } = renderFixture(latex, fixtureIndex);

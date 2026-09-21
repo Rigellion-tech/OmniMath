@@ -89,6 +89,56 @@ function assertImaginaryRootTree(displayLatex) {
 }
 
 describe("math semantic tree", () => {
+  it("keeps both variational integrals and the equation suffix in ranged semantic leaves", () => {
+    const equations = [
+      String.raw`J'[u](v)=\int_{\Omega}\left[-\nabla\cdot\left((1+\alpha|\nabla u|^2)\nabla u\right)+\beta u-\lambda|u|^{p-2}u\right]v\,dx+\int_{\partial\Omega}(1+\alpha|\nabla u|^2)\frac{\partial u}{\partial n}v\,dS`,
+      String.raw`\int_{\Omega}(1+\alpha|\nabla u|^2)\nabla u\cdot\nabla v\,dx+\int_{\Omega}(\beta u-\lambda|u|^{p-2}u)v\,dx=0`,
+    ];
+    for (const [index, latex] of equations.entries()) {
+      const tree = semanticTree(latex, `variational-${index}`);
+      const leaves = tree.linearLeaves.map((id) => tree.nodeMap[id]);
+      const boundary = latex.indexOf("dx+") + 2;
+      const boundaryPlus = leaves.find((node) => node.latex === "+" && node.sourceRange.start === boundary);
+      assert.ok(boundaryPlus, `missing top-level additive boundary in ${latex}`);
+      assert.equal(leaves.filter((node) => node.latex === "\\int").length, 2);
+      assert.ok(tree.flatNodes.some((node) => node.sourceRange.start > boundary && node.latex === (index === 0 ? "dS" : "0")));
+      assert.ok(leaves.some((node) => node.sourceRange.start > boundary && node.latex === "\\lambda") || index === 0);
+    }
+  });
+
+  it("splits additive expressions after a completed integral but keeps integrand additions inside it", () => {
+    const latex = String.raw`\int_0^1 x+y\,dx+\int_{\partial\Omega} z+w\,dS+q`;
+    const tree = semanticTree(latex);
+    const root = tree.nodeMap[tree.rootId];
+    const leaves = tree.linearLeaves.map((id) => tree.nodeMap[id]);
+    assert.equal(root.type, "sum");
+    assert.equal(childrenOf(tree, root).filter((node) => node.type === "integral").length, 2);
+    assert.equal(leaves.filter((node) => node.latex === "+").length, 4);
+    assert.ok(leaves.some((node) => node.latex === "q" && node.sourceRange.end === latex.length));
+  });
+
+  it("retains complex right operands and repeated symbols after addition", () => {
+    const rightOperands = [
+      String.raw`\int_0^1 x\,dx`,
+      String.raw`\int_{\partial\Omega} f\,dS`,
+      String.raw`\frac{a}{b}`,
+      String.raw`\sqrt{a+b}`,
+      String.raw`\begin{pmatrix}a&b\\c&d\end{pmatrix}`,
+      String.raw`\frac{\partial f}{\partial x}`,
+      String.raw`(a+b)(c+d)`,
+      String.raw`\int_0^1 a\,dx+\int_0^1 a\,dx`,
+    ];
+    for (const rhs of rightOperands) {
+      const latex = `a+${rhs}`;
+      const tree = semanticTree(latex);
+      const leaves = tree.linearLeaves.map((id) => tree.nodeMap[id]);
+      assert.ok(leaves.some((node) => node.latex === "+" && node.sourceRange.start === 1), latex);
+      assert.ok(leaves.some((node) => node.sourceRange.start > 2 && node.sourceRange.end >= latex.length - 1) ||
+        tree.flatNodes.some((node) => node.sourceRange.start >= 2 && node.sourceRange.end === latex.length),
+      `missing rightmost semantic range in ${latex}`);
+      assert.ok(leaves.some((node) => node.sourceRange.start > 2 && node.latex !== "+"), `missing RHS semantics in ${latex}`);
+    }
+  });
   it("creates a semantic tree from a simple equation", () => {
     const tree = semanticTree("3x+45=67");
     assert.equal(tree.stepId, "s1");

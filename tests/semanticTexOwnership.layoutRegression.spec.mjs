@@ -1,9 +1,34 @@
 import { expect, test } from "@playwright/test";
+import { submitCurrentComposer } from "./helpers/submitCurrentComposer.mjs";
 import katex from "katex";
 import { buildSemanticTree } from "../src/lib/mathSemanticTree.js";
 import { serializeSemanticTreeToLatex } from "../src/lib/semanticMathRenderer.js";
 
 const CASES = [
+  {
+    key: "variational-boundary-integral",
+    label: "Variational boundary integral ownership",
+    latex: String.raw`J'[u](v)=\int_{\Omega}\left[-\nabla\cdot\left((1+\alpha|\nabla u|^2)\nabla u\right)+\beta u-\lambda|u|^{p-2}u\right]v\,dx+\int_{\partial\Omega}(1+\alpha|\nabla u|^2)\frac{\partial u}{\partial n}v\,dS`,
+    match: (node) => node.latex === "S" && node.sourceRange.start > 190,
+  },
+  {
+    key: "variational-additive-boundary",
+    label: "Variational additive boundary ownership",
+    latex: String.raw`J'[u](v)=\int_{\Omega}\left[-\nabla\cdot\left((1+\alpha|\nabla u|^2)\nabla u\right)+\beta u-\lambda|u|^{p-2}u\right]v\,dx+\int_{\partial\Omega}(1+\alpha|\nabla u|^2)\frac{\partial u}{\partial n}v\,dS`,
+    match: (node) => node.latex === "+" && node.sourceRange.start === 145,
+  },
+  {
+    key: "variational-second-integral",
+    label: "Variational second integral ownership",
+    latex: String.raw`\int_{\Omega}(1+\alpha|\nabla u|^2)\nabla u\cdot\nabla v\,dx+\int_{\Omega}(\beta u-\lambda|u|^{p-2}u)v\,dx=0`,
+    match: (node) => node.latex === String.raw`\lambda` && node.sourceRange.start > 60,
+  },
+  {
+    key: "variational-final-zero",
+    label: "Variational equation suffix ownership",
+    latex: String.raw`\int_{\Omega}(1+\alpha|\nabla u|^2)\nabla u\cdot\nabla v\,dx+\int_{\Omega}(\beta u-\lambda|u|^{p-2}u)v\,dx=0`,
+    match: (node) => node.latex === "0" && node.sourceRange.start > 100,
+  },
   { key: "indexed-root", label: "Indexed radical ownership", latex: String.raw`\sqrt[n+1]{x^2+y^2}`, match: (node) => node.latex === "n" && node.role === "variable" },
   { key: "binomial", label: "Binomial ownership", latex: String.raw`\binom{n}{k}`, match: (node) => node.latex === "n" && node.role === "argument" },
   { key: "overbrace", label: "Overbrace ownership", latex: String.raw`\overbrace{a+b+c}^{n\text{ terms}}`, match: (node) => node.latex === "b" && node.role === "variable" },
@@ -39,9 +64,10 @@ const CASES = [
 ].map((fixture) => {
   const stepId = `tex-${fixture.key}-step`;
   const chunkId = `tex-${fixture.key}-chunk`;
+  const sourceLatex = fixture.transportLatex || fixture.latex;
   const tree = buildSemanticTree({
     stepId: `${chunkId}-${stepId}`,
-    displayLatex: fixture.latex,
+    displayLatex: sourceLatex,
     enabled: true,
   });
   const serialized = serializeSemanticTreeToLatex(tree);
@@ -51,12 +77,13 @@ const CASES = [
   }
   return {
     ...fixture,
+    sourceLatex,
     stepId,
     chunkId,
     tree,
     serialized,
     target,
-    plainHtml: katex.renderToString(fixture.latex, { throwOnError: true, strict: "ignore" }),
+    plainHtml: katex.renderToString(sourceLatex, { throwOnError: true, strict: "ignore" }),
   };
 });
 
@@ -72,13 +99,12 @@ function apiResponse() {
       summary: "The visible target should keep deterministic semantic ownership.",
       chunks: [{
         id: fixture.chunkId,
-        display: fixture.transportLatex || fixture.latex,
-        latex: fixture.transportLatex || fixture.latex,
-        text: fixture.transportLatex || fixture.latex,
+        display: fixture.sourceLatex,
+        latex: fixture.sourceLatex,
+        text: fixture.sourceLatex,
         role: "equation",
-        // A supplied part defers the row-break transport spelling to the
-        // line-token normalization pass. It then equals fixture.latex; the
-        // canonical parser still wins because it has richer ranged coverage.
+        // A supplied part exercises the existing-part annotation path while
+        // the parser assigns ranged ownership to the complete source.
         parts: [{
           id: `${fixture.chunkId}-transport-sentinel`,
           display: "x",
@@ -139,8 +165,7 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
   }
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect TeX grammar ownership.");
-  await page.getByRole("button", { name: /Explain/i }).click();
+  await submitCurrentComposer(page, "Inspect TeX grammar ownership.");
   await expect(page.locator(".step-card")).toHaveCount(CASES.length);
 
   const browserPlanner = await page.evaluate(async (fixtures) => {
@@ -149,7 +174,7 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
       import("/src/lib/semanticMathRenderer.js"),
     ]);
     return fixtures.map((fixture) => {
-      const tree = build({ stepId: `${fixture.chunkId}-${fixture.stepId}`, displayLatex: fixture.latex, enabled: true });
+      const tree = build({ stepId: `${fixture.chunkId}-${fixture.stepId}`, displayLatex: fixture.sourceLatex, enabled: true });
       const rendered = serialize(tree);
       return {
         key: fixture.key,
@@ -157,7 +182,7 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
         completeAnnotationValid: rendered.annotationPlan?.completeAnnotationValid,
       };
     });
-  }, CASES.map(({ key, stepId, chunkId, latex }) => ({ key, stepId, chunkId, latex })));
+  }, CASES.map(({ key, stepId, chunkId, sourceLatex }) => ({ key, stepId, chunkId, sourceLatex })));
   expect(browserPlanner).toEqual(CASES.map((fixture) => ({
     key: fixture.key,
     annotatedNodeCount: fixture.serialized.annotatedNodeCount,
@@ -168,7 +193,7 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
     const step = page.locator(".step-card").filter({ hasText: fixture.label });
     await expect(step).toBeVisible();
     await expect(step.locator("[data-semantic-render-fallback='true']")).toHaveCount(0);
-    await expect(step.locator(`[data-token-id="${fixture.chunkId}"]`)).toHaveAttribute("data-token-latex", fixture.latex);
+    await expect(step.locator(`[data-token-id="${fixture.chunkId}"]`)).toHaveAttribute("data-token-latex", fixture.sourceLatex);
 
     const visualDifference = await step.locator(".katex-html").first().evaluate((semanticHtml, plainHtml) => {
       const reference = document.createElement("span");

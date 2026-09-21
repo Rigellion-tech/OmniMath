@@ -320,6 +320,81 @@ function hasMalformedCommandRemnant(value = "") {
   return MALFORMED_COMMAND_REMNANT_PATTERN.test(normalizeMathRendererInput(value));
 }
 
+function colorHasVisibleAlpha(value = "") {
+  const color = String(value || "").trim().toLowerCase();
+  if (!color || color === "transparent") return false;
+  const alpha = color.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)$/u)?.[1]
+    ?? color.match(/^hsla\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)$/u)?.[1];
+  return alpha === undefined || Number(alpha) > 0;
+}
+
+function elementCanPaint(element, view) {
+  if (!element) return false;
+  // Color is inherited, so the computed value catches an explicitly
+  // transparent KaTeX subtree. Do not use ancestor opacity/display here:
+  // entrance animation and offscreen measurement can be transient while the
+  // generated glyph itself is valid.
+  return colorHasVisibleAlpha(view.getComputedStyle(element).color);
+}
+
+/** Observe actual browser output after KaTeX has populated the host. */
+export function inspectMathRenderDom(host) {
+  const document = host?.ownerDocument;
+  const view = document?.defaultView;
+  const visualRoot = host?.querySelector?.(".katex-html") || host;
+  if (!document || !view || !visualRoot) return { visible: false, reason: "missing_host" };
+  // A collapsed/detached host cannot tell us whether KaTeX lost content.
+  // Never replace valid generated math merely because its container is hidden.
+  if (!host.isConnected || host.getClientRects().length === 0) {
+    return { visible: false, measurable: false, reason: "host_not_measurable" };
+  }
+  for (let ancestor = host; ancestor; ancestor = ancestor.parentElement) {
+    const style = view.getComputedStyle(ancestor);
+    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") {
+      return { visible: false, measurable: false, reason: "container_hidden" };
+    }
+  }
+
+  const walker = document.createTreeWalker(visualRoot, view.NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!String(node.textContent || "").trim() || !elementCanPaint(node.parentElement, view)) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    if ([...range.getClientRects()].some((rect) => rect.width > 0.25 && rect.height > 0.25)) {
+      return { visible: true, reason: "visible_text" };
+    }
+  }
+
+  for (const element of visualRoot.querySelectorAll("svg,canvas,img,.rule,.frac-line,.sqrt-line,.overline-line,.underline-line")) {
+    const rect = element.getBoundingClientRect();
+    const style = view.getComputedStyle(element);
+    const painted = colorHasVisibleAlpha(style.backgroundColor)
+      || colorHasVisibleAlpha(style.borderTopColor) && Number.parseFloat(style.borderTopWidth) > 0
+      || colorHasVisibleAlpha(style.borderRightColor) && Number.parseFloat(style.borderRightWidth) > 0
+      || colorHasVisibleAlpha(style.borderBottomColor) && Number.parseFloat(style.borderBottomWidth) > 0
+      || colorHasVisibleAlpha(style.borderLeftColor) && Number.parseFloat(style.borderLeftWidth) > 0
+      || ["svg", "canvas", "img"].includes(element.tagName.toLowerCase());
+    if (painted && elementCanPaint(element, view) && rect.width > 0.25 && rect.height > 0.25) {
+      return { visible: true, reason: "visible_shape" };
+    }
+  }
+
+  return { visible: false, reason: "no_visible_glyph_or_shape" };
+}
+
+function renderBoundaryContext(host, componentName) {
+  const step = host?.closest?.("[data-step-id]");
+  const request = host?.closest?.("[data-solve-request-id]");
+  return {
+    requestId: request?.getAttribute("data-solve-request-id") || null,
+    stepId: step?.getAttribute("data-step-id") || null,
+    stepIndex: step?.hasAttribute("data-step-index")
+      ? Number(step.getAttribute("data-step-index"))
+      : null,
+    field: componentName,
+  };
+}
+
 export default function MathRenderer({
   math,
   semanticLatex = "",
@@ -353,6 +428,9 @@ export default function MathRenderer({
     if (!host) return undefined;
     host.replaceChildren();
     host.removeAttribute("data-semantic-render-fallback");
+    host.removeAttribute("data-math-render-outcome");
+    host.removeAttribute("data-math-fallback");
+    host.removeAttribute("data-math-error-placeholder");
     setRenderError("");
 
     logMathRender({
@@ -396,6 +474,33 @@ export default function MathRenderer({
 
     if (!shouldRenderKatex) {
       host.textContent = fallback;
+      host.setAttribute("data-math-render-outcome", fallback.trim() ? "rendered" : "render_input_empty");
+      if (!fallback.trim() && import.meta.env.DEV && import.meta.env.VITE_DEBUG_MATH_RENDER === "true") {
+        console.warn("[omnimath:math-render-boundary]", {
+          outcome: "render_input_empty",
+          ...renderBoundaryContext(host, componentName),
+          componentName,
+          rawEquation: rawMath,
+          normalizedEquation: normalizedMath,
+          sanitizedEquation: sanitizedMath,
+        });
+      }
+      return undefined;
+    }
+
+    if (!String(renderMath || "").trim()) {
+      setRenderError("The generated equation was empty after normalization.");
+      host.textContent = "Equation could not be rendered.";
+      host.setAttribute("data-math-error-placeholder", "true");
+      host.setAttribute("data-math-render-outcome", "render_input_empty");
+      console.error("[omnimath:math-render-boundary]", {
+        outcome: "render_input_empty",
+        ...renderBoundaryContext(host, componentName),
+        componentName,
+        rawEquation: rawMath,
+        normalizedEquation: normalizedMath,
+        sanitizedEquation: sanitizedMath,
+      });
       return undefined;
     }
 
@@ -459,13 +564,46 @@ export default function MathRenderer({
           displayMode,
         });
       }
+      const renderedObservation = inspectMathRenderDom(host);
+      if (!renderedObservation.visible && renderedObservation.measurable !== false) {
+        throw Object.assign(new Error("KaTeX produced no visible glyphs or shapes."), {
+          renderOutcome: "rendered_empty",
+          renderedObservation,
+        });
+      }
       host.removeAttribute("data-math-fallback");
+      host.setAttribute("data-math-render-outcome", renderedObservation.visible ? "rendered" : "render_unobservable");
+      if (renderedObservation.measurable === false && import.meta.env.DEV && import.meta.env.VITE_DEBUG_MATH_RENDER === "true") {
+        console.warn("[omnimath:math-render-boundary]", {
+          outcome: "render_unobservable",
+          ...renderBoundaryContext(host, componentName),
+          renderedObservation,
+        });
+      }
     } catch (error) {
       const message = error?.message || "Unknown KaTeX error";
+      logMathRender({
+        stage: "katex_render_failed",
+        ...renderBoundaryContext(host, componentName),
+        rawEquation: rawMath,
+        normalizedEquation: normalizedMath,
+        sanitizedEquation: sanitizedMath,
+        katexInput: renderMath,
+        message,
+      });
       setRenderError(message);
-      host.textContent = "";
-      host.setAttribute("data-math-fallback", "true");
-      console.error("[omnimath:math-render-error]", {
+      // Keep a visible, non-math fallback. Clearing the host made a malformed
+      // intermediate step indistinguishable from a provider/normalization
+      // blank in the presentation UI.
+      host.textContent = "Equation could not be rendered.";
+      // data-math-fallback is intentionally hidden by legacy CSS to prevent
+      // raw TeX fallback. This is safe user-facing error text, not raw TeX.
+      host.setAttribute("data-math-error-placeholder", "true");
+      const renderOutcome = error?.renderOutcome || "render_failed";
+      host.setAttribute("data-math-render-outcome", renderOutcome);
+      console.error("[omnimath:math-render-boundary]", {
+        outcome: renderOutcome,
+        ...renderBoundaryContext(host, componentName),
         componentName,
         originalInput: rawMath,
         rawEquation: rawMath,
@@ -475,6 +613,7 @@ export default function MathRenderer({
         displayMode,
         interactive,
         semanticAnnotatedNodeCount: hasAuthoritativeSemanticLatex ? semanticAnnotatedNodeCount : 0,
+        renderedObservation: error?.renderedObservation || null,
         message,
         error,
       });

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { GripHorizontal, Loader2, Pin, Send, X } from "lucide-react";
@@ -31,6 +31,21 @@ import {
 } from "@/lib/lazyExplanationLifecycle";
 import { clampTooltipPosition, getTooltipPositionFromRect } from "@/lib/tooltipPosition";
 import { cn } from "@/lib/utils";
+import {
+  buildProvenanceSnapshot,
+  buildFollowupPayload,
+  getConversationId,
+  getTargetRevision,
+} from "@/lib/explanationProvenance";
+import {
+  INITIAL_FOLLOWUP_STATE,
+  createFollowupRequestDescriptor,
+  isSameFollowupRequest,
+  recordFollowupLifecycle,
+  reduceFollowupLifecycle,
+  responseOwnsFollowupRequest,
+} from "@/lib/followupLifecycle";
+import { classifyHoverRequestFailure, recordHoverRequestLifecycle } from "@/lib/hoverRequestLifecycle";
 
 const DEPTHS = [
   { key: "beginner", label: "Beginner" },
@@ -43,6 +58,7 @@ const DEPTHS = [
 
 const HOVER_DEBOUNCE_MS = 400;
 const HOVER_RATE_LIMIT_MS = 1000;
+const FOLLOWUP_TIMEOUT_MS = 35000;
 const RATE_LIMIT_MESSAGE = "Explanation paused. Try again in a few seconds.";
 const lazyExplanationCache = new Map();
 const inFlightExplanations = new Map();
@@ -53,6 +69,7 @@ const requestCooldownUntil = new Map();
 let activeHoverRequest = null;
 let nextHoverRequestAt = 0;
 let tooltipDomInstanceSequence = 0;
+let lazyExplanationOwnerSequence = 0;
 const DEBUG_SOLUTION_STATE = import.meta.env.DEV
   && import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true";
 const DEBUG_MATH_HOVER = import.meta.env.DEV
@@ -89,6 +106,12 @@ function logLazyExplanation(event, details = {}) {
   console.info("[omnimath:lazy-explanation]", {
     event,
     ...details,
+  });
+}
+
+function recordHoverLifecycle(state, details = {}) {
+  return recordHoverRequestLifecycle(state, details, {
+    debug: DEBUG_MATH_HOVER,
   });
 }
 
@@ -303,22 +326,28 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, re
       mode,
       cacheKey,
       requestId: requestDescriptor?.requestId || null,
+      transportRequestId: existing.transportRequestId,
       targetId: requestDescriptor?.targetId || null,
     });
-    return existing.promise;
+    return {
+      promise: existing.promise,
+      shared: true,
+      transportRequestId: existing.transportRequestId,
+    };
   }
 
   const request = mode === "pin" ? explainPin : explainToken;
   const startedAt = performance.now();
+  const transportRequestId = createDebugRequestId(mode, requestDescriptor?.requestId || "request", cacheKey);
   const payload = {
     ...createLazyPayload(item, problem),
-    debugRequestId: createDebugRequestId(mode, requestDescriptor?.requestId || "request", cacheKey),
+    debugRequestId: transportRequestId,
   };
   logLazyExplanation(mode === "pin" ? "pin API fired" : "API call fired", {
     mode,
     cacheKey,
     requestId: requestDescriptor?.requestId || null,
-    debugRequestId: payload.debugRequestId,
+    debugRequestId: transportRequestId,
     semanticNodeId: payload.semanticId,
     selectedText: payload.semanticSourceText || payload.targetSourceText || "",
     sourceRange: payload.targetSourceRange || payload.semanticSourceRange || null,
@@ -327,16 +356,38 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, re
     mode,
     cacheKey,
     requestId: requestDescriptor?.requestId || null,
-    debugRequestId: payload.debugRequestId,
+    debugRequestId: transportRequestId,
     targetId: requestDescriptor?.targetId || null,
+  });
+  recordHoverLifecycle("request_started", {
+    scope: "transport",
+    requestId: null,
+    transportRequestId,
+    ownerId: null,
+    cacheKeyHash: stableHash(cacheKey),
+    semanticId: requestDescriptor?.targetId || null,
+    mode,
   });
   const promise = request({ payload, getToken, signal })
     .then((data) => {
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        throw Object.assign(new Error("Hover explanation response had an invalid shape."), {
+          code: "CLIENT_RESPONSE_SHAPE_INVALID",
+        });
+      }
+      recordHoverLifecycle("api_parsed", {
+        scope: "transport",
+        requestId: null,
+        transportRequestId,
+        ownerId: null,
+        cacheKeyHash: stableHash(cacheKey),
+        semanticId: data.semanticId || data.targetId || requestDescriptor?.targetId || null,
+      });
       logLazyExplanation("response arrival", {
         mode,
         cacheKey,
         requestId: requestDescriptor?.requestId || null,
-        debugRequestId: payload.debugRequestId,
+        debugRequestId: transportRequestId,
         responseSemanticId: data.semanticId || data.targetId || null,
         responseTitle: data.title || "",
         serverResponseTextLength: Number(data.responseTextLength || data.explanationLength || 0) || String(data.explanation || "").length,
@@ -345,11 +396,21 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, re
       const resolved = resolveLazyExplanationForTarget(data, item);
       cache.set(cacheKey, resolved);
       writeSessionCache(cacheKey, resolved);
+      recordHoverLifecycle("cached", {
+        scope: "transport",
+        terminal: true,
+        requestId: null,
+        transportRequestId,
+        ownerId: null,
+        cacheKeyHash: stableHash(cacheKey),
+        semanticId: resolved.semanticId || resolved.targetId || requestDescriptor?.targetId || null,
+        explanationLength: String(resolved.explanation || "").length,
+      });
       logLazyExplanation("API completed", {
         mode,
         cacheKey,
         requestId: requestDescriptor?.requestId || null,
-        debugRequestId: payload.debugRequestId,
+        debugRequestId: transportRequestId,
         responseSemanticId: resolved.semanticId || resolved.targetId || null,
         storedHoverExplanationLength: String(resolved.explanation || "").length,
         durationMs: Math.round(performance.now() - startedAt),
@@ -359,7 +420,7 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, re
         mode,
         cacheKey,
         requestId: requestDescriptor?.requestId || null,
-        debugRequestId: payload.debugRequestId,
+        debugRequestId: transportRequestId,
         targetId: requestDescriptor?.targetId || null,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -390,22 +451,35 @@ function createLazyRequest({ cacheKey, mode, item, problem, getToken, signal, re
           durationMs: Math.round(performance.now() - startedAt),
         });
       }
+      recordHoverLifecycle(classifyHoverRequestFailure(error), {
+        scope: "transport",
+        terminal: true,
+        requestId: null,
+        transportRequestId,
+        ownerId: null,
+        cacheKeyHash: stableHash(cacheKey),
+        semanticId: requestDescriptor?.targetId || null,
+        status: error?.status || null,
+        errorCode: error?.body?.code || error?.code || null,
+      });
       throw error;
     })
     .finally(() => {
-      inFlightMap.delete(cacheKey);
+      if (inFlightMap.get(cacheKey)?.promise === promise) inFlightMap.delete(cacheKey);
       if (mode === "pin") pinRequestLocks.delete(cacheKey);
     });
 
-  inFlightMap.set(cacheKey, { promise, mode });
-  return promise;
+  inFlightMap.set(cacheKey, { promise, mode, transportRequestId });
+  return { promise, shared: false, transportRequestId };
 }
 
 function useLazyExplanation(item, problem, mode, getToken, enabled = true, explanationLevel = "default") {
   const [state, setState] = useState(INITIAL_LAZY_EXPLANATION_STATE);
+  const [committedLifecycle, setCommittedLifecycle] = useState(null);
   const cacheKey = item && enabled ? getLazyCacheKey(item, problem, mode, explanationLevel) : "";
   const requestIdRef = useRef(0);
   const activeRequestRef = useRef(null);
+  const pendingCommitRef = useRef(null);
   const requestInputsRef = useRef({ item, problem, getToken });
   requestInputsRef.current = { item, problem, getToken };
 
@@ -417,6 +491,8 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
 
     if (!requestItem || !enabled || !cacheKey) {
       activeRequestRef.current = null;
+      pendingCommitRef.current = null;
+      setCommittedLifecycle(null);
       setState((current) => reduceLazyExplanationLifecycle(current, { type: "idle" }));
       return undefined;
     }
@@ -426,6 +502,13 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
     if (cached && shouldApplyLazyExplanation(requestItem, cached)) {
       cache.set(cacheKey, cached);
       logLazyExplanation(mode === "pin" ? "pin cache hit" : "cache hit", { mode, cacheKey });
+      recordHoverLifecycle("cached", {
+        requestId: null,
+        ownerId: `${mode}:cache`,
+        cacheKeyHash: stableHash(cacheKey),
+        semanticId: getLazyTargetId(requestItem) || null,
+        reason: "memory-or-session-cache",
+      });
       activeRequestRef.current = null;
       setState((current) => reduceLazyExplanationLifecycle(current, { type: "cache_hit", data: cached }));
       return undefined;
@@ -447,12 +530,18 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
 
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    const request = createLazyRequestDescriptor({
+    lazyExplanationOwnerSequence += 1;
+    const ownerId = `${mode}-owner-${lazyExplanationOwnerSequence}`;
+    const request = {
+      ...createLazyRequestDescriptor({
       requestId,
       cacheKey,
       mode,
       targetId: getLazyTargetId(requestItem),
-    });
+      }),
+      ownerId,
+      transportRequestId: null,
+    };
     activeRequestRef.current = request;
     let cancelled = false;
     const controller = new AbortController();
@@ -462,6 +551,24 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
     let loadingTimerId = null;
     let stillGeneratingTimerId = null;
     let timeoutId = null;
+    let requestSettled = false;
+    let ownerCommitted = false;
+    let ownerTerminalState = "";
+
+    const recordOwnerTerminal = (terminalState, details = {}) => {
+      if (ownerTerminalState) return;
+      ownerTerminalState = terminalState;
+      recordHoverLifecycle(terminalState, {
+        scope: "owner",
+        terminal: true,
+        requestId,
+        transportRequestId: request.transportRequestId,
+        ownerId,
+        cacheKeyHash: stableHash(cacheKey),
+        semanticId: request.targetId || null,
+        ...details,
+      });
+    };
 
     const identity = getHoverTargetIdentity(requestItem);
     logLazyExplanation(`${mode} requested`, {
@@ -478,6 +585,8 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
       request,
       fallback: hoverFallback,
     }));
+    pendingCommitRef.current = null;
+    setCommittedLifecycle(null);
     logLazyExplanation("state update", {
       mode,
       cacheKey,
@@ -485,6 +594,16 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
       transition: "request_started",
       phase: "pending",
       targetId: request.targetId,
+    });
+    recordHoverLifecycle("request_started", {
+      scope: "owner",
+      requestId,
+      ownerId,
+      ownerRevision: requestItem?.context?.revision ?? requestItem?.targetRevision ?? null,
+      sessionId: requestItem?.context?.sessionId || requestItem?.sessionId || null,
+      cacheKeyHash: stableHash(cacheKey),
+      semanticId: request.targetId || null,
+      mode,
     });
 
     const isCurrent = () => !cancelled && isCurrentLazyRequest(activeRequestRef.current, request);
@@ -531,6 +650,13 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         if (cachedBeforePin) {
           pinExplanationCache.set(cacheKey, cachedBeforePin);
           logLazyExplanation("pin cache hit", { mode, cacheKey });
+          recordHoverLifecycle("cached", {
+            requestId,
+            ownerId,
+            cacheKeyHash: stableHash(cacheKey),
+            semanticId: request.targetId || null,
+            reason: "memory-or-session-cache",
+          });
           if (shouldApplyLazyExplanation(requestItem, cachedBeforePin)) {
             activeRequestRef.current = null;
             setState((current) => reduceLazyExplanationLifecycle(current, {
@@ -542,7 +668,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         }
 
         if (inFlightPinRequests.has(cacheKey)) {
-          createLazyRequest({
+          const requestHandle = createLazyRequest({
             cacheKey,
             mode,
             item: requestItem,
@@ -550,10 +676,31 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
             getToken: requestInputsRef.current.getToken,
             signal: controller.signal,
             requestDescriptor: request,
-            })
+          });
+          request.transportRequestId = requestHandle.transportRequestId;
+          requestHandle.promise
             .then((resolved) => {
-              if (!isCurrent()) return;
+              requestSettled = true;
+              if (!isCurrent()) {
+                recordOwnerTerminal("stale_discarded", {
+                  reason: "request-no-longer-current",
+                });
+                return;
+              }
               const applies = shouldApplyLazyExplanation(requestItem, resolved);
+              if (!applies) {
+                recordOwnerTerminal("stale_discarded", {
+                  responseSemanticId: resolved.targetId || resolved.semanticId || null,
+                  reason: "target-mismatch",
+                });
+              } else {
+                pendingCommitRef.current = {
+                  request,
+                  data: resolved,
+                  ownerId,
+                  markCommitted: () => { ownerCommitted = true; },
+                };
+              }
               logLazyExplanation("state update", {
                 mode,
                 cacheKey,
@@ -573,6 +720,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
               }));
             })
             .catch((error) => {
+              requestSettled = true;
               if (!isCurrent() || error?.name === "AbortError") {
                 logLazyExplanation("request abort ignored", {
                   mode,
@@ -581,9 +729,18 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
                   reason: error?.name === "AbortError" ? "AbortError" : "not-current",
                   targetId: request.targetId,
                 });
+                if (!isCurrent()) {
+                  recordOwnerTerminal("stale_discarded", {
+                    reason: "request-no-longer-current",
+                  });
+                }
                 return;
               }
               if (isRateLimitError(error)) requestCooldownUntil.set(cacheKey, Date.now() + 5000);
+              recordOwnerTerminal(classifyHoverRequestFailure(error), {
+                status: error?.status || null,
+                errorCode: error?.body?.code || error?.code || null,
+              });
               logLazyExplanation("state update", {
                 mode,
                 cacheKey,
@@ -636,9 +793,12 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
           reason: "timeout",
           targetId: request.targetId,
         });
+        recordOwnerTerminal("aborted", {
+          reason: "ui-timeout",
+        });
       }, mode === "hover" ? HOVER_TIMEOUT_MS : PIN_TIMEOUT_MS);
 
-      createLazyRequest({
+      const requestHandle = createLazyRequest({
         cacheKey,
         mode,
         item: requestItem,
@@ -646,8 +806,11 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
         getToken: requestInputsRef.current.getToken,
         signal: controller.signal,
         requestDescriptor: request,
-      })
+      });
+      request.transportRequestId = requestHandle.transportRequestId;
+      requestHandle.promise
         .then((resolved) => {
+          requestSettled = true;
           if (!isCurrent()) {
             logLazyExplanation("response-discarded", {
               mode,
@@ -656,9 +819,25 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
               reason: "request-no-longer-current",
               targetId: request.targetId,
             });
+            recordOwnerTerminal("stale_discarded", {
+              reason: "request-no-longer-current",
+            });
             return;
           }
           const applies = shouldApplyLazyExplanation(requestItem, resolved);
+          if (!applies) {
+            recordOwnerTerminal("stale_discarded", {
+              responseSemanticId: resolved.targetId || resolved.semanticId || null,
+              reason: "target-mismatch",
+            });
+          } else {
+            pendingCommitRef.current = {
+              request,
+              data: resolved,
+              ownerId,
+              markCommitted: () => { ownerCommitted = true; },
+            };
+          }
           logLazyExplanation(applies ? "response-applied" : "response-discarded", {
             mode,
             cacheKey,
@@ -686,6 +865,7 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
           }));
         })
         .catch((error) => {
+          requestSettled = true;
           if (!isCurrent() || error?.name === "AbortError") {
             logLazyExplanation("request abort ignored", {
               mode,
@@ -694,11 +874,20 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
               reason: error?.name === "AbortError" ? "AbortError" : "not-current",
               targetId: request.targetId,
             });
+            if (!isCurrent()) {
+              recordOwnerTerminal("stale_discarded", {
+                reason: "request-no-longer-current",
+              });
+            }
             return;
           }
           if (isRateLimitError(error)) {
             requestCooldownUntil.set(cacheKey, Date.now() + 5000);
           }
+          recordOwnerTerminal(classifyHoverRequestFailure(error), {
+            status: error?.status || null,
+            errorCode: error?.body?.code || error?.code || null,
+          });
           logLazyExplanation("state update", {
             mode,
             cacheKey,
@@ -733,6 +922,10 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
           if (isCurrentLazyRequest(activeHoverRequest, request)) {
             activeHoverRequest = null;
           }
+        })
+        .catch(() => {
+          // The preceding catch classifies and handles the UI transition. The
+          // final cleanup branch must not create an unhandled rejection.
         });
     };
 
@@ -740,6 +933,13 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
 
     return () => {
       cancelled = true;
+      if (!requestSettled && request.transportRequestId) {
+        recordOwnerTerminal("hidden_before_completion", { reason: "effect-cleanup" });
+      } else if (!requestSettled && !request.transportRequestId) {
+        recordOwnerTerminal("owner_gone", { reason: "before-transport-start" });
+      } else if (!ownerCommitted && !ownerTerminalState) {
+        recordOwnerTerminal("owner_gone", { reason: "before-ui-commit" });
+      }
       if (timerId) window.clearTimeout(timerId);
       if (loadingTimerId) window.clearTimeout(loadingTimerId);
       if (stillGeneratingTimerId) window.clearTimeout(stillGeneratingTimerId);
@@ -763,61 +963,238 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
     };
   }, [cacheKey, enabled, explanationLevel, mode]);
 
-  return state;
+  useEffect(() => {
+    const pending = pendingCommitRef.current;
+    if (!pending || state.phase !== "ready" || state.data !== pending.data) return;
+    pendingCommitRef.current = null;
+    pending.markCommitted();
+    const lifecycle = {
+      requestId: pending.request.requestId,
+      transportRequestId: pending.request.transportRequestId,
+      ownerId: pending.ownerId,
+      cacheKeyHash: stableHash(pending.request.cacheKey),
+      semanticId: pending.request.targetId || null,
+    };
+    recordHoverLifecycle("committed_to_ui", {
+      scope: "owner",
+      terminal: false,
+      ...lifecycle,
+    });
+    setCommittedLifecycle(lifecycle);
+  }, [state.data, state.phase]);
+
+  return { ...state, lifecycle: committedLifecycle };
 }
 
-function FollowupChat({ item, problem, getToken }) {
-  const [messages, setMessages] = useState(Array.isArray(item.chatHistory) ? item.chatHistory : []);
-  const [question, setQuestion] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const currentExplanation = item.content?.[item.depth] || item.content?.intermediate || item.title || "";
+let followupRequestSequence = 0;
+
+function nextFollowupRequestId() {
+  followupRequestSequence += 1;
+  return `followup-${Date.now().toString(36)}-${followupRequestSequence.toString(36)}`;
+}
+
+function FollowupChat({ item, problem, getToken, displayedExplanation }) {
+  const { updateExplanationWindow } = useHoverActions();
+  const provenanceSnapshot = useMemo(() => buildProvenanceSnapshot({ item, problem }), [item, problem]);
+  const targetRevision = item.targetRevision || getTargetRevision(provenanceSnapshot);
+  const conversationId = item.conversationId || getConversationId(provenanceSnapshot);
+  const followupReducer = /** @type {React.Reducer<any, any>} */ (reduceFollowupLifecycle);
+  const [state, dispatch] = useReducer(followupReducer, {
+    ...INITIAL_FOLLOWUP_STATE,
+    messages: Array.isArray(item.chatHistory) ? item.chatHistory : [],
+  });
+  const activeRequestRef = useRef(null);
+  const acceptedAnswerRef = useRef(null);
+  const chatMessagesRef = useRef(null);
+  const mountedRef = useRef(true);
+  const followupDebug = DEBUG_SOLUTION_STATE || DEBUG_MATH_HOVER;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const active = activeRequestRef.current;
+      if (active) {
+        recordFollowupLifecycle("owner_gone", {
+          requestId: active.requestId,
+          conversationId: active.conversationId,
+          targetRevision: active.targetRevision,
+          reason: "component-unmounted",
+        }, { debug: followupDebug });
+      }
+      activeRequestRef.current?.controller?.abort();
+    };
+  }, [followupDebug]);
+
+  useEffect(() => {
+    const previous = activeRequestRef.current;
+    if (previous) {
+      recordFollowupLifecycle("owner_gone", {
+        requestId: previous.requestId,
+        conversationId: previous.conversationId,
+        targetRevision: previous.targetRevision,
+        reason: "conversation-or-revision-changed",
+      }, { debug: followupDebug });
+    }
+    activeRequestRef.current?.controller?.abort();
+    activeRequestRef.current = null;
+    acceptedAnswerRef.current = null;
+    dispatch({ type: "reset", messages: Array.isArray(item.chatHistory) ? item.chatHistory : [] });
+  }, [conversationId, followupDebug, targetRevision]);
+
+  useLayoutEffect(() => {
+    const accepted = acceptedAnswerRef.current;
+    if (!accepted) return undefined;
+    const lastMessage = state.messages.at(-1);
+    if (lastMessage?.role !== "assistant" || lastMessage.requestId !== accepted.requestId) return undefined;
+    const messageElement = [...(chatMessagesRef.current?.querySelectorAll("[data-followup-request-id]") || [])]
+      .find((element) => element.dataset.followupRequestId === accepted.requestId);
+    if (!messageElement?.isConnected) return undefined;
+
+    recordFollowupLifecycle("committed_to_ui", {
+      ...accepted,
+      messageCount: state.messages.length,
+      domConnected: true,
+    }, { debug: followupDebug });
+
+    const frameId = window.requestAnimationFrame(() => {
+      const renderedText = String(messageElement.textContent || "").trim();
+      if (!mountedRef.current || !messageElement.isConnected || !renderedText) return;
+      recordFollowupLifecycle("rendered", {
+        ...accepted,
+        messageCount: state.messages.length,
+        renderedTextLength: renderedText.length,
+      }, { debug: followupDebug });
+      if (acceptedAnswerRef.current?.requestId === accepted.requestId) {
+        acceptedAnswerRef.current = null;
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [followupDebug, state.messages]);
+
+  useEffect(() => {
+    const correlatedRequestId = state.messages.at(-1)?.requestId || activeRequestRef.current?.requestId || null;
+    recordFollowupLifecycle("local_window_update_requested", {
+      requestId: correlatedRequestId,
+      conversationId,
+      targetRevision,
+      messageCount: state.messages.length,
+    }, { debug: followupDebug });
+    updateExplanationWindow(item.id, {
+      chatHistory: state.messages,
+      conversationId,
+      targetRevision,
+    });
+  }, [conversationId, followupDebug, item.id, state.messages, targetRevision, updateExplanationWindow]);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    const trimmed = question.trim();
-    if (!trimmed || loading) return;
+    const trimmed = state.draft.trim();
+    if (!trimmed || activeRequestRef.current) return;
 
-    const nextMessages = [...messages, { role: "user", text: trimmed }];
-    setMessages(nextMessages);
-    setQuestion("");
-    setError("");
-    setLoading(true);
+    const request = createFollowupRequestDescriptor({
+      requestId: nextFollowupRequestId(),
+      conversationId,
+      targetRevision,
+    });
+    const controller = new AbortController();
+    const requestState = { ...request, controller };
+    activeRequestRef.current = requestState;
+    recordFollowupLifecycle("request_started", {
+      ...request,
+      questionLength: trimmed.length,
+    }, { debug: followupDebug });
+    dispatch({ type: "request_started", request, question: trimmed });
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, FOLLOWUP_TIMEOUT_MS);
 
     try {
-      const context = item.context || {};
       const data = await explainFollowup({
         getToken,
-        payload: {
-          problem: context.problem?.originalProblem || context.problem?.problem || problem?.originalProblem || problem?.problem || problem?.expression || "",
-          solution: context.solution || problem,
-          stepId: item.stepId || context.stepId,
-          stepTitle: item.stepTitle || context.stepTitle,
-          currentStep: context.currentStep || null,
-          selectedText: item.selectedText || item.display || "",
-          selectedTokens: item.selectedTokens || [],
-          semanticSelection: item.semanticSelection || context.semanticSelection || null,
-          pinnedExplanation: currentExplanation,
+        signal: controller.signal,
+        payload: buildFollowupPayload({
+          request,
+          provenanceSnapshot,
+          item,
+          problem,
+          displayedExplanation,
           question: trimmed,
-          history: messages,
-        },
+          history: state.messages,
+        }),
       });
-      setMessages((current) => [...current, { role: "assistant", text: data.answer || "I could not produce a follow-up answer." }]);
+      recordFollowupLifecycle("api_parsed", {
+        ...request,
+        answerLength: String(data.answer || "").length,
+      }, { debug: followupDebug });
+      if (!mountedRef.current) {
+        recordFollowupLifecycle("owner_gone", { ...request, reason: "component-unmounted-before-response" }, { debug: followupDebug });
+        return;
+      }
+      if (!isSameFollowupRequest(activeRequestRef.current, request)) {
+        recordFollowupLifecycle("stale_discarded", { ...request, reason: "request-owner-changed" }, { debug: followupDebug });
+        return;
+      }
+      if (!responseOwnsFollowupRequest(data, request)) {
+        recordFollowupLifecycle("stale_discarded", { ...request, reason: "ownership-echo-mismatch" }, { debug: followupDebug });
+        dispatch({
+          type: "request_failed",
+          request,
+          error: "The answer no longer matched this selected object. Please retry.",
+        });
+        return;
+      }
+      const answer = String(data.answer || "").trim();
+      if (!answer) {
+        recordFollowupLifecycle("response_invalid", { ...request, reason: "empty-answer" }, { debug: followupDebug });
+        dispatch({ type: "request_failed", request, error: "The follow-up returned an empty answer. Please retry." });
+        return;
+      }
+      acceptedAnswerRef.current = { ...request, answerLength: answer.length };
+      dispatch({ type: "request_succeeded", request, answer, ownsRequest: true });
     } catch (submitError) {
-      setError(submitError.message || "Could not answer that follow-up.");
-      setMessages(messages);
+      if (!mountedRef.current) {
+        recordFollowupLifecycle("owner_gone", { ...request, reason: "component-unmounted-during-request" }, { debug: followupDebug });
+        return;
+      }
+      if (!isSameFollowupRequest(activeRequestRef.current, request)) {
+        recordFollowupLifecycle("stale_discarded", { ...request, reason: "request-owner-changed-during-error" }, { debug: followupDebug });
+        return;
+      }
+      if (submitError?.name === "AbortError" && !timedOut) {
+        recordFollowupLifecycle("aborted", { ...request, reason: "owner-aborted" }, { debug: followupDebug });
+        dispatch({ type: "request_aborted", request });
+      } else {
+        // At this boundary the browser only knows that its API request failed.
+        // It cannot attribute the failure to the upstream provider.
+        recordFollowupLifecycle(submitError?.name === "AbortError" ? "aborted" : "api_failed", {
+          ...request,
+          reason: timedOut ? "timeout" : submitError?.message || "request-failed",
+          status: submitError?.status || null,
+        }, { debug: followupDebug });
+        dispatch({
+          type: "request_failed",
+          request,
+          error: timedOut ? "The follow-up took too long. Please retry." : submitError.message || "Could not answer that follow-up.",
+        });
+      }
     } finally {
-      setLoading(false);
+      window.clearTimeout(timeoutId);
+      if (isSameFollowupRequest(activeRequestRef.current, request)) activeRequestRef.current = null;
     }
   };
 
   return (
     <div className="border-t border-white/[0.055] px-3.5 py-3">
-      {messages.length > 0 && (
-        <div className="omni-scrollbar mb-2 max-h-36 space-y-2 overflow-y-auto pr-1">
-          {messages.map((message, messageIndex) => (
+      {state.messages.length > 0 && (
+        <div ref={chatMessagesRef} className="omni-scrollbar mb-2 max-h-36 space-y-2 overflow-y-auto pr-1">
+          {state.messages.map((message, messageIndex) => (
             <div
               key={`${message.role}-${messageIndex}`}
+              data-followup-request-id={message.requestId || undefined}
               className={cn(
                 "rounded-lg px-2.5 py-2 text-xs leading-5",
                 message.role === "user"
@@ -830,29 +1207,29 @@ function FollowupChat({ item, problem, getToken }) {
           ))}
         </div>
       )}
-      {error && (
+      {state.error && (
         <p className="mb-2 rounded-md border border-rose-300/20 bg-rose-400/10 px-2.5 py-2 text-xs leading-5 text-rose-100/82">
-          {error}
+          {state.error}
         </p>
       )}
       <form className="flex items-center gap-2" onSubmit={handleSubmit}>
         <input
-          value={question}
-          onChange={(event) => setQuestion(event.target.value)}
+          value={state.draft}
+          onChange={(event) => dispatch({ type: "draft_changed", draft: event.target.value })}
           onPointerDown={(event) => event.stopPropagation()}
           onMouseDown={(event) => event.stopPropagation()}
           className="min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-black/20 px-2.5 py-2 text-xs text-slate-100/88 outline-none transition-colors placeholder:text-slate-500/70 focus:border-teal-300/38"
           placeholder="Ask about this"
-          disabled={loading}
+          disabled={state.loading}
         />
         <button
           type="submit"
-          disabled={loading || !question.trim()}
+          disabled={state.loading || !state.draft.trim()}
           onPointerDown={(event) => event.stopPropagation()}
           className="rounded-lg border border-teal-300/20 bg-teal-300/10 p-2 text-teal-50 transition-colors hover:bg-teal-300/16 disabled:cursor-not-allowed disabled:opacity-45"
           aria-label="Send follow-up"
         >
-          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+          {state.loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
         </button>
       </form>
     </div>
@@ -860,7 +1237,7 @@ function FollowupChat({ item, problem, getToken }) {
 }
 
 function FloatingWindow({ item, index, problem, getToken }) {
-  const { clearHoverLens, closeExplanationWindow, toggleWindowPin, setWindowDepth, moveExplanationWindow } = useHoverActions();
+  const { clearHoverLens, closeExplanationWindow, toggleWindowPin, setWindowDepth, moveExplanationWindow, updateExplanationWindow } = useHoverActions();
   const { settings } = useSettings();
   const windowRef = useRef(null);
   const dragRef = useRef(null);
@@ -877,6 +1254,11 @@ function FloatingWindow({ item, index, problem, getToken }) {
     || item.content?.[item.depth]
     || item.content?.intermediate
     || item.title;
+
+  useEffect(() => {
+    if (!explanationText || item.lastDisplayedExplanation === explanationText) return;
+    updateExplanationWindow(item.id, { lastDisplayedExplanation: explanationText });
+  }, [explanationText, item.id, item.lastDisplayedExplanation, updateExplanationWindow]);
   const identity = getHoverTargetIdentity(item);
   const displayTitle = userFacingTooltipTitle({
     title: identity.tooltipTitle || identity.label || item.title,
@@ -1070,7 +1452,12 @@ function FloatingWindow({ item, index, problem, getToken }) {
           </>
         )}
       </div>
-      <FollowupChat item={item} problem={problem} getToken={getToken} />
+      <FollowupChat
+        item={item}
+        problem={problem}
+        getToken={getToken}
+        displayedExplanation={lazyState.data?.explanation || item.lastDisplayedExplanation || explanationText}
+      />
     </motion.article>
   );
 }
@@ -1120,6 +1507,14 @@ export function ExplanationPopover() {
   }) : "";
   const lazyContent = lazyState.data?.explanation || content || displayTitle;
   const loadingMessage = getLazyLoadingMessage("hover", lazyState.phase);
+  const renderedLifecycleKeyRef = useRef("");
+  const hoverUiObservationRef = useRef(null);
+
+  useEffect(() => {
+    if (!hoverLens) {
+      renderedLifecycleKeyRef.current = "";
+    }
+  }, [hoverLens?.id]);
 
   useEffect(() => {
     if (!hoverLens) return undefined;
@@ -1149,6 +1544,94 @@ export function ExplanationPopover() {
       });
     };
   }, [hoverLens?.id, reconcileHoverOwnership, reportHoverLifecycle]);
+
+  useEffect(() => {
+    const tooltip = tooltipRef.current;
+    const lifecycle = lazyState.lifecycle;
+    const providerExplanation = String(lazyState.data?.explanation || "").trim();
+    if (!hoverLens || !lifecycle || lazyState.phase !== "ready") {
+      return undefined;
+    }
+    const cacheKey = getLazyCacheKey(hoverLens, hoverLens?.context?.problem, "hover", hoverDepth);
+    const identity = getHoverTargetIdentity(hoverLens);
+    const observationKey = `${lifecycle.ownerId}:${lifecycle.transportRequestId}`;
+    const previousObservation = hoverUiObservationRef.current;
+    if (previousObservation?.key === observationKey && previousObservation.terminal) return undefined;
+    if (previousObservation && previousObservation.key !== observationKey && !previousObservation.terminal) {
+      previousObservation.finish("owner_gone", { reason: "lifecycle-replaced-before-ui-observation" });
+    }
+    const observation = {
+      key: observationKey,
+      terminal: false,
+      finish: null,
+    };
+    const finishObservation = (state, details = {}) => {
+      if (observation.terminal) return;
+      observation.terminal = true;
+      recordHoverLifecycle(state, {
+        scope: "owner",
+        terminal: true,
+        requestId: lifecycle.requestId,
+        transportRequestId: lifecycle.transportRequestId,
+        ownerId: lifecycle.ownerId,
+        cacheKeyHash: stableHash(cacheKey),
+        semanticId: identity.semanticId || identity.targetId || null,
+        tooltipDomIdentity: tooltipDomInstanceRef.current.identity,
+        ...details,
+      });
+    };
+    observation.finish = finishObservation;
+    hoverUiObservationRef.current = observation;
+
+    if (!providerExplanation) {
+      finishObservation("render_input_empty", {
+        explanationLength: String(lazyState.data?.explanation || "").length,
+      });
+      return undefined;
+    }
+    if (!tooltip || !tooltip.isConnected) {
+      finishObservation("owner_gone", { reason: "tooltip-not-connected" });
+      return undefined;
+    }
+    const emitRendered = () => {
+      const providerBody = tooltip.querySelector("[data-hover-provider-explanation='true']");
+      const renderedText = String(providerBody?.textContent || "").trim();
+      if (!renderedText) return false;
+      const key = `${tooltipDomInstanceRef.current.identity}:${lifecycle.ownerId}:${cacheKey}:${renderedText}`;
+      if (renderedLifecycleKeyRef.current === key) return true;
+      renderedLifecycleKeyRef.current = key;
+      finishObservation("rendered", {
+        renderedTextLength: renderedText.length,
+      });
+      return true;
+    };
+    emitRendered();
+    const frameId = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame(() => {
+          if (emitRendered() || observation.terminal) return;
+          const providerBody = tooltip.querySelector("[data-hover-provider-explanation='true']");
+          finishObservation(tooltip.isConnected ? "rendered_empty" : "owner_gone", {
+            reason: tooltip.isConnected
+              ? (providerBody ? "provider-body-empty" : "provider-body-missing")
+              : "tooltip-disconnected-before-ui-observation",
+            renderedTextLength: 0,
+          });
+        })
+      : null;
+    const observer = typeof MutationObserver === "function"
+      ? new MutationObserver(emitRendered)
+      : null;
+    observer?.observe(tooltip, { childList: true, subtree: true, characterData: true });
+    return () => {
+      if (frameId !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frameId);
+      observer?.disconnect();
+      queueMicrotask(() => {
+        if (hoverUiObservationRef.current === observation && !observation.terminal) {
+          finishObservation("owner_gone", { reason: "tooltip-unmounted-before-ui-observation" });
+        }
+      });
+    };
+  }, [hoverDepth, hoverLens, lazyState.data?.explanation, lazyState.lifecycle, lazyState.phase]);
 
   useLayoutEffect(() => {
     setAdjustedPosition(null);
@@ -1284,7 +1767,10 @@ export function ExplanationPopover() {
           {loadingMessage}
         </div>
       ) : (
-        <div className="omni-math-text max-w-full overflow-x-hidden break-words text-xs leading-5 text-slate-100/80 omni-scrollbar">
+        <div
+          data-hover-provider-explanation={lazyState.data?.explanation ? "true" : undefined}
+          className="omni-math-text max-w-full overflow-x-hidden break-words text-xs leading-5 text-slate-100/80 omni-scrollbar"
+        >
           <MathText>{lazyContent}</MathText>
         </div>
       )}

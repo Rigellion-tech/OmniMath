@@ -10,6 +10,18 @@ import {
   getCanonicalSolverInput,
 } from "../src/lib/canonicalProblem.js";
 
+test("canonical content identity is source-neutral while provenance identity is not", () => {
+  const typed = createCanonicalProblemPayload({ canonicalText: "Solve x+2=3", source: "typed" });
+  const ocr = createCanonicalProblemPayload({
+    canonicalText: "Solve x+2=3",
+    source: "ocr-reviewed",
+    extractionConfidence: 88,
+  });
+
+  assert.equal(typed.contentHash, ocr.contentHash);
+  assert.notEqual(typed.hash, ocr.hash);
+});
+
 const DISALLOWED_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u;
 
 test("canonical problem normalization removes terminal formatting without changing LaTeX", () => {

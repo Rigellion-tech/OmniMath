@@ -56,6 +56,7 @@ function normalizeMathToken(value) {
   });
 
   return latex
+    .replace(/\\nabla(?=[A-Za-z])/g, "\\nabla ")
     .replace(/<=/g, "\\le ")
     .replace(/>=/g, "\\ge ")
     .replace(/\bsqrt\(([^)]+)\)/g, "\\sqrt{$1}")

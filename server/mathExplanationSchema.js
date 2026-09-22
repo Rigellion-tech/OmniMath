@@ -4,6 +4,7 @@ import {
   isFinalAnswerFieldStructureIssue,
 } from "./generatedLatexValidation.js";
 import { splitEquationChainLatex } from "../src/lib/equationChains.js";
+import { isRenderableExplicitLatex, katexParsesLatex } from "../src/lib/latexRenderability.js";
 import { normalizeLatexForKatex, shouldPreserveLatex, traceMathStage } from "../src/lib/mathNode.js";
 import { sanitizeStringValues, stripTerminalControlSequences } from "../src/lib/textSanitization.js";
 import {
@@ -11,6 +12,11 @@ import {
   recoverDeclaredLatexControlCharacters,
 } from "./latexControlCharacterRecovery.js";
 import { logBackendReasoningLatexStage } from "./reasoningLatexDiagnostics.js";
+import { getSolveDiagnosticContext } from "./solveDiagnosticContext.js";
+import {
+  inspectSolveCandidateStructure,
+  summarizeSolveCandidateStructure,
+} from "./solveCandidateStructure.js";
 
 export const difficultyExplanationSchema = {
   type: "object",
@@ -643,8 +649,29 @@ function needsGeneratedLatexRepair(value = "") {
     || /\\(?:iint|int)\s+(?:lim\s*its|limits)\s*_/i.test(value);
 }
 
-export function sanitizeGeneratedLatex(value = "") {
-  const stripped = normalizeEscapedGeneratedLatex(stripGeneratedLatexWrappers(value));
+export function sanitizeGeneratedLatex(value = "", { stackPhysicalLines = false } = {}) {
+  const unwrapped = stripGeneratedLatexWrappers(value);
+  const physicalLines = unwrapped.split(/\r?\n/u).map((line) => line.trimStart()).filter((line) => Boolean(line.trim()));
+  if (
+    stackPhysicalLines
+    && physicalLines.length > 1
+    && !/\\begin\s*\{/u.test(unwrapped)
+    && physicalLines.every((line) => katexParsesLatex(line))
+  ) {
+    // Separate complete display expressions become one renderable math field.
+    // Their order and TeX tokens are preserved; no mathematical relationship
+    // between the lines is inferred.
+    const gathered = `\\begin{gathered}${physicalLines.join("\\\\")}\\end{gathered}`;
+    traceMathStage("LLM response parsing", value, gathered, "stacked physical LaTeX lines");
+    return gathered;
+  }
+  // A renderable TeX field already has authoritative row separators, escapes,
+  // and spacing. The transport repair below is only for damaged model text.
+  if (isRenderableExplicitLatex(unwrapped)) {
+    traceMathStage("LLM response parsing", value, unwrapped, "preserved renderable explicit LaTeX");
+    return unwrapped;
+  }
+  const stripped = normalizeEscapedGeneratedLatex(unwrapped);
   if (/\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(stripped)) {
     traceMathStage("LLM response parsing", value, stripped, "preserved complete LaTeX environment");
     return stripped;
@@ -733,6 +760,17 @@ function normalizeAnchor(anchor, stepId, index) {
   };
 }
 
+function uniqueStepAnchors(anchors = []) {
+  const used = new Set();
+  return anchors.map((anchor, index) => {
+    let id = anchor.id;
+    let suffix = index + 1;
+    while (used.has(id)) id = `${anchor.id}-${suffix++}`;
+    used.add(id);
+    return id === anchor.id ? anchor : { ...anchor, id };
+  });
+}
+
 function compactLatex(value = "") {
   return String(value || "")
     .replace(/\s+/g, "")
@@ -809,15 +847,69 @@ function repairPerfectSquareSteps(steps = [], perfectSquare = null, finalAnswerL
   });
 }
 
+function hasUnclosedLatexDelimiter(value = "") {
+  const source = String(value || "");
+  const stack = [];
+  const matchingOpen = { ")": "(", "]": "[", "}": "{" };
+  let pipeOpen = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\\") {
+      if (/[{}|()[\]]/u.test(source[index + 1] || "")) index += 1;
+      continue;
+    }
+    if (char === "|") {
+      pipeOpen = !pipeOpen;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      stack.push(char);
+      continue;
+    }
+    if (matchingOpen[char] && stack.at(-1) === matchingOpen[char]) stack.pop();
+  }
+
+  return stack.length > 0 || pipeOpen;
+}
+
+function latexLineContinues(value = "") {
+  const source = String(value || "").trimEnd();
+  if (!source) return false;
+  if (hasUnclosedLatexDelimiter(source)) return true;
+  // These tokens cannot finish the current mathematical unit. In particular,
+  // keep an operator such as `\nabla` attached to its operand across a
+  // transport newline; complete equations without a continuation cue remain
+  // intentional adjacent render lines.
+  return /(?:[=<>+\-*/,:^_]|\\(?:approx|cdot|div|geq?|leq?|mp|nabla|otimes|partial|pm|times))\s*$/u.test(source);
+}
+
+function logicalLatexLines(value = "") {
+  const physicalLines = String(value || "")
+    .split(/\r?\n+/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (physicalLines.length < 2) return physicalLines;
+
+  const logicalLines = [];
+  let current = "";
+  for (const physicalLine of physicalLines) {
+    current = current ? `${current}\n${physicalLine}` : physicalLine;
+    if (!latexLineContinues(current)) {
+      logicalLines.push(current);
+      current = "";
+    }
+  }
+  if (current) logicalLines.push(current);
+  return logicalLines;
+}
+
 function renderStepLatexLines(value = "") {
   const source = String(value || "").trim();
   const completeEnvironment = /\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(source);
   if (completeEnvironment) return [sanitizeGeneratedLatex(source)].filter(Boolean);
 
-  const sourceLines = source
-    .split(/\r?\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const sourceLines = logicalLatexLines(source);
   const lines = sourceLines.length > 0 ? sourceLines : [value];
   return lines.flatMap((line) => {
     const rendered = /\\[A-Za-z]+[ \t]+[A-Za-z]/u.test(line)
@@ -919,6 +1011,93 @@ function generatedLatexLineFields(value = "", basePath = "latex") {
     fieldPath: `${basePath}.lines[${lineIndex}]`,
     value: line,
   }));
+}
+
+function assertSolveStructureBoundary(value, sourceSteps = null, message = "Model response contains an unusable solution step.", { strictParse = true } = {}) {
+  const inspection = inspectSolveCandidateStructure(value, { stage: "normalization", sourceSteps, strictParse });
+  const request = getSolveDiagnosticContext();
+  if (solveDiagnosticsEnabled()) {
+    console.info("[omnimath:solve-structure-boundary]", {
+      stage: inspection.stage,
+      usable: inspection.usable,
+      issues: inspection.issues,
+      diagnostics: inspection.diagnostics,
+      requestId: request.requestId || null,
+      endpoint: request.endpoint || null,
+      candidate: summarizeSolveCandidateStructure(value, { stage: inspection.stage }),
+      provider: sourceSteps
+        ? summarizeSolveCandidateStructure({
+            steps: sourceSteps,
+            finalAnswerLatex: value?.finalAnswerLatex ?? value?.finalAnswer,
+          }, { stage: "provider" })
+        : null,
+    });
+  }
+  if (inspection.usable) return;
+  console.error("[omnimath:solve-candidate-boundary]", {
+    outcome: inspection.diagnostics[0]?.type || "structure_rejected",
+    stage: inspection.stage,
+    requestId: request.requestId || null,
+    endpoint: request.endpoint || null,
+    diagnostics: inspection.diagnostics,
+    issues: inspection.issues,
+  });
+  const error = createInvalidResponseError(message);
+  error.solutionIssues = inspection.issues;
+  error.solutionDiagnostics = inspection.diagnostics;
+  error.solutionStage = inspection.stage;
+  error.requestId = request.requestId || null;
+  error.responseFailureType = RESPONSE_FAILURE_TYPES.SCHEMA_CONTRACT;
+  throw error;
+}
+
+function providerStructureError(message, { steps = [], finalAnswerLatex = "", sourceSteps = null } = {}) {
+  const inspection = inspectSolveCandidateStructure(
+    { steps, finalAnswerLatex },
+    { stage: "provider", sourceSteps },
+  );
+  const error = createInvalidResponseError(message);
+  const request = getSolveDiagnosticContext();
+  error.solutionIssues = inspection.issues.length > 0
+    ? inspection.issues
+    : ["missing_required_fields"];
+  error.solutionStage = inspection.stage;
+  error.solutionDiagnostics = inspection.diagnostics;
+  error.requestId = request.requestId || null;
+  console.error("[omnimath:solve-candidate-boundary]", {
+    outcome: inspection.diagnostics[0]?.type || "structure_rejected",
+    stage: inspection.stage,
+    requestId: request.requestId || null,
+    endpoint: request.endpoint || null,
+    diagnostics: inspection.diagnostics,
+    issues: error.solutionIssues,
+  });
+  if (solveDiagnosticsEnabled()) {
+    console.info("[omnimath:solve-structure-boundary]", {
+      stage: inspection.stage,
+      usable: false,
+      issues: error.solutionIssues,
+      diagnostics: inspection.diagnostics,
+      requestId: request.requestId || null,
+      endpoint: request.endpoint || null,
+      candidate: summarizeSolveCandidateStructure(
+        { steps, finalAnswerLatex },
+        { stage: inspection.stage },
+      ),
+    });
+  }
+  return error;
+}
+
+function recordProviderStepInput(value) {
+  if (solveDiagnosticsEnabled()) {
+    console.info("[omnimath:solve-structure-boundary]", {
+      ...getSolveDiagnosticContext(),
+      stage: "provider_parsed_before_sanitization",
+      candidate: summarizeSolveCandidateStructure(value),
+    });
+  }
+  return Array.isArray(value?.steps) ? value.steps : [];
 }
 
 function solveLatexFields({ problemLatex = "", finalAnswerLatex = "", steps = [] } = {}) {
@@ -1057,16 +1236,13 @@ function assertSingleFinalAnswerStep(steps = [], finalAnswerLatex = "", stage = 
   if (finalAnswerSteps.length <= 1) return;
   const diagnostic = {
     stage,
-    finalAnswerLatex,
     duplicateFinalAnswerNodes: finalAnswerSteps.length,
     stepIds: steps.map((step) => step.id),
     finalAnswerStepIds: finalAnswerSteps.map((step) => step.id),
-    finalAnswerStepLatex: finalAnswerSteps.map(stepLatexValue),
   };
-  console.error("[omnimath:solve-pipeline-invariant]", diagnostic);
-  if (process.env.NODE_ENV !== "production") {
-    throw createInvalidResponseError(`Duplicate Final Answer steps after ${stage}.`);
-  }
+  // A repeated final equation is a presentation diagnostic. The step IDs and
+  // source equations still describe distinct, usable derivation steps.
+  console.warn("[omnimath:solve-pipeline-invariant]", diagnostic);
 }
 
 function normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex } = {}) {
@@ -1126,17 +1302,28 @@ function normalizeSolveSteps(rawSteps, { problemLatex, finalAnswerLatex } = {}) 
 }
 
 export function assertFastSolveResponse(value, originalProblem = "", { includeProblemStep = false } = {}) {
+  const providerSteps = recordProviderStepInput(value);
   value = sanitizeStringValues(recoverDeclaredLatexControlCharacters(value));
   originalProblem = stripTerminalControlSequences(originalProblem);
   if (!value || typeof value !== "object") {
     throw createInvalidResponseError("Model returned an invalid solve response.");
   }
 
+  assertRawGeneratedLatexFields(rawSolveLatexFields({
+    finalAnswerLatex: value.finalAnswerLatex,
+    steps: Array.isArray(value.steps) ? value.steps.map((step) => ({ latex: step?.latex, anchors: [] })) : [],
+    includeProblemLatex: false,
+  }));
+
   const problemLatex = sanitizeGeneratedLatex(value.problemLatex || originalProblem);
-  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex);
+  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex, { stackPhysicalLines: true });
   const rawSteps = Array.isArray(value.steps) ? value.steps : [];
   if (!isString(value.title) || !problemLatex || rawSteps.length === 0 || !finalAnswerLatex) {
-    throw createInvalidResponseError("Model response is missing required solve fields.");
+    throw providerStructureError("Model response is missing required solve fields.", {
+      steps: rawSteps,
+      sourceSteps: providerSteps,
+      finalAnswerLatex,
+    });
   }
   const structurallyInvalidStep = rawSteps.some((step) => (
     !step
@@ -1148,7 +1335,11 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
     || !Array.isArray(step.anchors)
   ));
   if (structurallyInvalidStep) {
-    throw createInvalidResponseError("Model response contains an invalid solve step.");
+    throw providerStructureError("Model response contains an invalid solve step.", {
+      steps: rawSteps,
+      sourceSteps: providerSteps,
+      finalAnswerLatex,
+    });
   }
 
   const steps = rawSteps.map((step, index) => ({
@@ -1156,11 +1347,18 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
     heading: safeString(step.heading),
     latex: sanitizeGeneratedLatex(step.latex),
     reasoning: safeString(step.reasoning),
-    anchors: step.anchors
+    anchors: uniqueStepAnchors(step.anchors
       .filter((anchor) => anchor && typeof anchor === "object" && isString(anchor.latex))
       .map((anchor, anchorIndex) => normalizeAnchor(anchor, normalizeStepId(step.id, index), anchorIndex))
-      .slice(0, 3),
+      .slice(0, 3)),
   }));
+
+  assertSolveStructureBoundary(
+    { steps, finalAnswerLatex },
+    providerSteps,
+    "Model response contains an unusable solve step.",
+    { strictParse: false },
+  );
 
   if (steps.length === 0) {
     throw createInvalidResponseError("Model response does not contain meaningful solution steps.");
@@ -1168,8 +1366,13 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
 
   const firstStep = steps[0];
   if (includeProblemStep && firstStep?.latex !== problemLatex) {
+    const stepIds = new Set(steps.map((step) => step.id));
+    let problemStepId = "problem-step";
+    for (let suffix = 2; stepIds.has(problemStepId); suffix += 1) {
+      problemStepId = `problem-step-${suffix}`;
+    }
     steps.unshift({
-      id: "step-1",
+      id: problemStepId,
       heading: "Start with the problem",
       latex: problemLatex,
       reasoning: "This is the original problem written in clean LaTeX.",
@@ -1193,16 +1396,29 @@ export function assertFastSolveResponse(value, originalProblem = "", { includePr
 }
 
 export function assertCompactSolveResponse(value, originalProblem = "") {
+  const providerSteps = recordProviderStepInput(value);
   value = sanitizeStringValues(recoverDeclaredLatexControlCharacters(value));
   originalProblem = stripTerminalControlSequences(originalProblem);
   if (!value || typeof value !== "object") {
     throw createInvalidResponseError("Model returned an invalid compact solve response.");
   }
 
+  assertRawGeneratedLatexFields(rawSolveLatexFields({
+    finalAnswerLatex: Array.isArray(value.steps) ? value.steps.at(-1)?.latex : "",
+    steps: Array.isArray(value.steps) ? value.steps.map((step) => ({ latex: step?.latex, anchors: [] })) : [],
+    includeProblemLatex: false,
+  }));
+
   const problemLatex = sanitizeGeneratedLatex(value.problemLatex || originalProblem);
-  const rawSteps = Array.isArray(value.steps) ? value.steps.slice(0, 8) : [];
+  // Do not silently drop a later final step. The schema and request size limit
+  // bound provider output; acceptance must inspect every returned step.
+  const rawSteps = Array.isArray(value.steps) ? value.steps : [];
   if (!isString(value.title) || !problemLatex || rawSteps.length === 0) {
-    throw createInvalidResponseError("Compact model response is missing required solve fields.");
+    throw providerStructureError("Compact model response is missing required solve fields.", {
+      steps: rawSteps,
+      sourceSteps: providerSteps,
+      finalAnswerLatex: rawSteps.at(-1)?.latex || problemLatex,
+    });
   }
   const structurallyInvalidStep = rawSteps.some((step) => (
     !step
@@ -1214,7 +1430,11 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
     || !Array.isArray(step.anchors)
   ));
   if (structurallyInvalidStep) {
-    throw createInvalidResponseError("Compact model response contains an invalid solve step.");
+    throw providerStructureError("Compact model response contains an invalid solve step.", {
+      steps: rawSteps,
+      sourceSteps: providerSteps,
+      finalAnswerLatex: rawSteps.at(-1)?.latex || problemLatex,
+    });
   }
 
   const steps = rawSteps
@@ -1226,11 +1446,18 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
       anchors: [],
     }));
 
+  assertSolveStructureBoundary(
+    { steps, finalAnswerLatex: steps.at(-1)?.latex || problemLatex },
+    providerSteps,
+    "Compact model response contains an unusable solve step.",
+    { strictParse: false },
+  );
+
   if (steps.length === 0) {
     throw createInvalidResponseError("Compact model response does not contain meaningful solution steps.");
   }
 
-  const finalAnswerLatex = sanitizeGeneratedLatex(steps.at(-1)?.latex || problemLatex);
+  const finalAnswerLatex = sanitizeGeneratedLatex(steps.at(-1)?.latex || problemLatex, { stackPhysicalLines: true });
   return {
     title: safeString(value.title),
     problemLatex,
@@ -1247,17 +1474,28 @@ export function assertCompactSolveResponse(value, originalProblem = "") {
 }
 
 export function assertImageSolveResponse(value) {
+  const providerSteps = recordProviderStepInput(value);
   value = sanitizeStringValues(recoverDeclaredLatexControlCharacters(value));
   if (!value || typeof value !== "object") {
     throw createInvalidResponseError("Model returned an invalid image solve response.");
   }
 
+  assertRawGeneratedLatexFields(rawSolveLatexFields({
+    finalAnswerLatex: value.finalAnswerLatex,
+    steps: Array.isArray(value.steps) ? value.steps.map((step) => ({ latex: step?.equationLatex, anchors: [] })) : [],
+    includeProblemLatex: false,
+  }));
+
   const extractedProblemLatex = sanitizeGeneratedLatex(value.extractedProblemLatex);
   const extractedProblemText = safeString(value.extractedProblemText);
-  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex);
+  const finalAnswerLatex = sanitizeGeneratedLatex(value.finalAnswerLatex, { stackPhysicalLines: true });
   const rawSteps = Array.isArray(value.steps) ? value.steps : [];
   if (!isString(value.title) || !extractedProblemLatex || !extractedProblemText || rawSteps.length === 0 || !finalAnswerLatex) {
-    throw createInvalidResponseError("Image model response is missing required extracted solve fields.");
+    throw providerStructureError("Image model response is missing required extracted solve fields.", {
+      steps: rawSteps,
+      sourceSteps: providerSteps,
+      finalAnswerLatex,
+    });
   }
   const structurallyInvalidStep = rawSteps.some((step) => (
     !step
@@ -1268,7 +1506,11 @@ export function assertImageSolveResponse(value) {
     || !Array.isArray(step.tokens)
   ));
   if (structurallyInvalidStep) {
-    throw createInvalidResponseError("Image model response contains an invalid solve step.");
+    throw providerStructureError("Image model response contains an invalid solve step.", {
+      steps: rawSteps,
+      sourceSteps: providerSteps,
+      finalAnswerLatex,
+    });
   }
 
   const steps = rawSteps
@@ -1278,17 +1520,22 @@ export function assertImageSolveResponse(value) {
       latex: sanitizeGeneratedLatex(step?.equationLatex),
       reasoning: safeString(step?.explanation),
       anchors: Array.isArray(step?.tokens)
-        ? step.tokens
+        ? uniqueStepAnchors(step.tokens
             .filter((token) => safeString(token?.latex))
             .map((token, tokenIndex) => ({
               id: safeString(token.id) || `token-${index + 1}-${tokenIndex + 1}`,
               latex: sanitizeGeneratedLatex(token.latex),
               type: safeString(token.role) || safeString(token.text) || "expression",
               priority: tokenIndex < 2 ? "high" : "medium",
-            }))
+            })))
         : [],
-    }))
-    .filter((step) => step.latex);
+    }));
+  assertSolveStructureBoundary(
+    { steps, finalAnswerLatex },
+    providerSteps,
+    "Image model response contains an unusable solve step.",
+    { strictParse: false },
+  );
   if (steps.length === 0) {
     throw createInvalidResponseError("Image model response does not contain meaningful solution steps.");
   }
@@ -1510,6 +1757,12 @@ export function convertFastSolveToMathExplanation(value, {
     })),
     solve.finalAnswerLatex,
     "conversion"
+  );
+  assertSolveStructureBoundary(
+    annotated,
+    solve.steps,
+    "Normalized solve response contains an unusable solve step.",
+    { strictParse: false },
   );
   return annotated;
 }

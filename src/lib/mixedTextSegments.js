@@ -24,6 +24,10 @@ function splitTokenAffixes(token = "") {
 function implicitMathTokenKind(value = "") {
   if (!value) return "none";
   if (value.includes("\\")) return "strong";
+  const lexicalCompound = value.match(/^[\p{L}]+(?:[-/][\p{L}]+)+$/u);
+  if (lexicalCompound && value.split(/[-/]/u).every((part) => part.length > 1)) {
+    return "none";
+  }
   if (/[=<>^_+\-*/\u00b2\u00b3\u2070-\u2079\u207f\u207b\u2264\u2265\u00b7\u2212\u222b\u221a]/u.test(value)) {
     return "strong";
   }

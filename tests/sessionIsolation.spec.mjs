@@ -183,6 +183,10 @@ function renderedMath(page, latex) {
   return page.locator(`[data-token-latex="${latex}"]`).first();
 }
 
+function renderedProblemText(page, text) {
+  return page.getByRole("main").getByText(text);
+}
+
 function captureSessionDiagnostics(page) {
   const events = [];
   page.on("console", (message) => {
@@ -246,7 +250,7 @@ test("image OCR and solve stay bound to the originating session across switches"
   await expect(page.getByText(/Reading image|Solving reviewed problem|Explanation ready|Race solution/i)).toHaveCount(0);
 
   await sessionButtons(page).nth(1).click();
-  await expect(page.getByText(OCR_TEXT)).toBeVisible();
+  await expect(renderedProblemText(page, OCR_TEXT)).toBeVisible();
   await expect(page.getByText(/Solving reviewed problem/i)).toBeVisible();
 
   await solveRoute.fulfill({
@@ -268,7 +272,7 @@ test("image OCR and solve stay bound to the originating session across switches"
   expect(savedSessions).toHaveLength(0);
 
   await sessionButtons(page).nth(1).click();
-  await expect(page.getByText(OCR_TEXT)).toBeVisible();
+  await expect(renderedProblemText(page, OCR_TEXT)).toBeVisible();
   await expect(renderedMath(page, "x=1")).toBeVisible();
   const diagnosticEvents = await diagnostics.values();
   expect(diagnosticEvents.some((event) => event.event === "operation-created")).toBe(true);
@@ -355,7 +359,7 @@ test("older image operation completion cannot overwrite a newer operation in the
   });
 
   await expect(page.getByText(/Explanation ready/i)).toBeVisible();
-  await expect(page.getByText(OCR_TEXT_A2)).toBeVisible();
+  await expect(renderedProblemText(page, OCR_TEXT_A2)).toBeVisible();
   await expect(renderedMath(page, "z=3")).toBeVisible();
 
   await extractionRoutes[0].fulfill({
@@ -364,7 +368,7 @@ test("older image operation completion cannot overwrite a newer operation in the
     body: JSON.stringify(createExtractionResponse({ text: OCR_TEXT_A1, latex: "y+1=3" })),
   });
 
-  await expect(page.getByText(OCR_TEXT_A2)).toBeVisible();
+  await expect(renderedProblemText(page, OCR_TEXT_A2)).toBeVisible();
   await expect(renderedMath(page, "z=3")).toBeVisible();
   await expect(page.getByText(OCR_TEXT_A1)).toHaveCount(0);
   expect(extractionRoutes).toHaveLength(2);

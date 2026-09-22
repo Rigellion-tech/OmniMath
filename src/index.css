@@ -204,6 +204,121 @@
     box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   }
 
+  .omni-primary-composer {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto;
+    overflow: visible;
+    border: 1px solid rgba(45, 212, 191, 0.14);
+    border-radius: 1rem;
+    background: linear-gradient(180deg, rgba(10, 26, 33, .96), rgba(7, 19, 25, .94));
+    box-shadow: 0 14px 38px rgba(0, 0, 0, .22);
+    transition: height 240ms cubic-bezier(.2,.8,.2,1), border-color 180ms ease;
+  }
+  .omni-primary-composer.is-collapsed {
+    height: 4rem;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: 1fr;
+  }
+  .omni-primary-composer.is-expanded {
+    height: clamp(22rem, 40dvh, 34rem);
+    max-height: calc(100dvh - 7rem);
+    border-color: rgba(45, 212, 191, .28);
+  }
+  .omni-composer-workspace {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 1rem 1rem 0 0;
+  }
+  .omni-composer-actions { grid-column: 2; grid-row: 2; border-radius: 0 0 1rem 0; }
+  .omni-primary-upload { grid-column: 1; grid-row: 2; padding: .5rem .75rem; min-width: 0; border-top: 1px solid rgba(255,255,255,.06); }
+  .omni-primary-composer.is-collapsed > :first-child { grid-column: 1; grid-row: 1; min-width: 0; }
+  .omni-primary-composer.is-collapsed .omni-composer-actions { grid-column: 3; grid-row: 1; border-top: 0; padding-left: 0; }
+  .omni-primary-composer.is-collapsed .omni-primary-upload { grid-column: 2; grid-row: 1; border-top: 0; }
+  .omni-primary-upload > div > button { min-height: 2.5rem; border-radius: .75rem; font-size: .75rem; }
+  .omni-visual-mathfield {
+    display: block;
+    width: 100%;
+    min-height: clamp(6rem, 13dvh, 9rem);
+    max-height: 15rem;
+    overflow: auto;
+    border: 1px solid rgba(45, 212, 191, 0.18);
+    border-radius: 0.8rem;
+    background: rgba(1, 8, 12, 0.42);
+    padding: 0.9rem 1rem;
+    color: rgba(236, 254, 255, 0.96);
+    font-size: clamp(1.1rem, 1.4vw, 1.4rem);
+    line-height: 1.7;
+    caret-color: rgb(94, 234, 212);
+    outline: none;
+    --caret-color: rgb(94, 234, 212);
+    --selection-background-color: rgba(45, 212, 191, 0.22);
+    --contains-highlight-background-color: rgba(45, 212, 191, 0.12);
+    --placeholder-color: rgba(100, 116, 139, 0.72);
+  }
+
+  .omni-visual-mathfield:focus-within {
+    border-color: rgba(94, 234, 212, 0.48);
+    box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.075);
+  }
+
+  .omni-visual-mathfield::part(menu-toggle) {
+    display: none;
+  }
+
+  @media not (pointer: coarse) {
+    .omni-visual-mathfield::part(virtual-keyboard-toggle) {
+      display: none;
+    }
+  }
+
+  .omni-structure-button {
+    flex: 0 0 auto;
+    height: 3.25rem;
+    min-height: 3.25rem;
+  }
+  .omni-structure-symbol { display: flex; height: 1.9rem; align-items: center; justify-content: center; }
+  .omni-structure-symbol .katex { font-size: .8em !important; }
+
+  .omni-structure-symbol .katex,
+  .omni-palette-symbol .katex {
+    font-size: 1em !important;
+  }
+
+  .omni-symbol-browser {
+    overscroll-behavior: contain;
+  }
+
+  @media (max-width: 640px) {
+    .omni-primary-composer.is-expanded {
+      height: min(30rem, 66dvh);
+      min-height: 0;
+      max-height: calc(100dvh - 5rem);
+    }
+
+    .omni-primary-composer.is-collapsed {
+      height: 7rem;
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-rows: 1fr auto;
+    }
+    .omni-primary-composer.is-collapsed > :first-child { grid-column: 1 / -1; grid-row: 1; }
+    .omni-primary-composer.is-collapsed .omni-composer-actions { grid-column: 2; grid-row: 2; }
+    .omni-primary-composer.is-collapsed .omni-primary-upload { grid-column: 1; grid-row: 2; }
+    .omni-primary-composer.is-expanded .omni-primary-upload { grid-column: 1 / -1; grid-row: 2; padding-bottom: 0; }
+    .omni-primary-composer.is-expanded .omni-composer-actions { grid-column: 1 / -1; grid-row: 3; border-top: 0; }
+    .omni-primary-composer.is-expanded { grid-template-rows: minmax(0, 1fr) auto auto; }
+    .omni-visual-mathfield {
+      min-height: 7rem;
+      font-size: 1.05rem;
+    }
+  }
+
   .omni-button {
     background: rgb(var(--omni-accent-rgb) / 0.1);
     border: 1px solid rgb(var(--omni-accent-rgb) / 0.22);
@@ -1140,3 +1255,5 @@
 [data-math-fallback="true"] {
   display: none !important;
 }
+
+@media (prefers-reduced-motion: reduce) { .omni-primary-composer { transition: none; } }

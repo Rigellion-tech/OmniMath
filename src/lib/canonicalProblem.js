@@ -56,6 +56,16 @@ export function hashCanonicalProblemPayload(payload = {}) {
   return hash.toString(16).padStart(8, "0");
 }
 
+export function hashCanonicalProblemContent(payload = {}) {
+  const input = normalizeText(payload.canonicalText || payload.problem || payload.text || "");
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 export function createCanonicalProblemPayload(options = {}) {
   const canonicalText = normalizeText(options.canonicalText ?? options.problem ?? options.text ?? "");
   const canonicalLatex = normalizeText(options.canonicalLatex ?? options.problemLatex ?? "");
@@ -70,6 +80,7 @@ export function createCanonicalProblemPayload(options = {}) {
   return {
     ...payload,
     hash: hashCanonicalProblemPayload(payload),
+    contentHash: hashCanonicalProblemContent(payload),
   };
 }
 
@@ -130,11 +141,18 @@ export function diffCanonicalProblemPayloads(left = {}, right = {}) {
 }
 
 export function logCanonicalProblem(event, payload = {}, details = {}) {
+  const serverEnv = globalThis.process?.env || {};
+  const clientEnv = /** @type {Record<string, any>} */ (import.meta.env || {});
+  const debugEnabled = serverEnv.OMNIMATH_DEBUG_SOLVE === "true"
+    || serverEnv.OMNIMATH_DEBUG_SOLVE === "1"
+    || clientEnv.VITE_DEBUG_SOLUTION_STATE === "true";
+  if (!debugEnabled) return;
   const logger = globalThis.console?.info;
   if (typeof logger !== "function") return;
   logger.call(globalThis.console, "[omnimath:canonical-problem]", {
     event,
     hash: payload?.hash || hashCanonicalProblemPayload(payload),
+    contentHash: payload?.contentHash || hashCanonicalProblemContent(payload),
     source: payload?.source,
     textChars: String(payload?.canonicalText || "").length,
     hasLatex: Boolean(payload?.canonicalLatex),

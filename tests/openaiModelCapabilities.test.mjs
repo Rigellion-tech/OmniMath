@@ -5,6 +5,7 @@ import {
   estimateModelCostUsd,
   getModelCapability,
   getOpenAiModelResolutions,
+  getOpenAiModelForPath,
   getOpenAiModels,
   getOpenAiTimeoutPolicy,
   resolveOpenAiRequestTimeout,
@@ -61,6 +62,26 @@ function clearEnv() {
 afterEach(() => restoreEnv());
 
 describe("OpenAI model capabilities", () => {
+  it("pins canonical solves ahead of role and explicit model overrides while preserving other routes", () => {
+    clearEnv();
+    process.env.OMNIMATH_SOLVER_MODEL = "gpt-5.6-luna";
+    process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-terra";
+
+    const initial = selectOpenAiModel({ modelPath: "canonicalSolve", model: "gpt-4.1-mini" });
+    const compact = selectOpenAiModel({ modelPath: "canonicalSolve", model: "gpt-5.6-luna", debugContext: { retryPurpose: "compact" } });
+    const repair = selectOpenAiModel({ modelPath: "canonicalSolve", debugContext: { retryPurpose: "quality-repair" } });
+    const generic = selectOpenAiModel({ modelPath: "solver" });
+
+    assert.equal(getOpenAiModelForPath("canonicalSolve"), "gpt-5.6-sol");
+    assert.equal(initial.role, "solver");
+    assert.equal(initial.modelId, "gpt-5.6-sol");
+    assert.equal(initial.modelSource, "canonical_solve_policy");
+    assert.equal(compact.modelId, "gpt-5.6-sol");
+    assert.equal(repair.role, "repair");
+    assert.equal(repair.modelId, "gpt-5.6-terra");
+    assert.equal(getOpenAiModelForPath("canonicalSolve", { retryPurpose: "quality-repair" }), repair.modelId);
+    assert.equal(generic.modelId, "gpt-5.6-luna");
+  });
   it("uses current role defaults without resolving solver from OPENAI_MODEL", () => {
     clearEnv();
     process.env.OPENAI_MODEL = "gpt-4.1-mini";
@@ -68,8 +89,8 @@ describe("OpenAI model capabilities", () => {
     const models = getOpenAiModels();
     const selection = selectOpenAiModel({ modelPath: "solver", debugContext: { attemptType: "initial" } });
 
-    assert.equal(models.solver, "gpt-5.6-luna");
-    assert.equal(selection.modelId, "gpt-5.6-luna");
+    assert.equal(models.solver, "gpt-5.6-sol");
+    assert.equal(selection.modelId, "gpt-5.6-sol");
     assert.equal(selection.modelSource, "role_default");
   });
 
@@ -117,8 +138,8 @@ describe("OpenAI model capabilities", () => {
     const models = getOpenAiModels();
     const selection = selectOpenAiModel({ modelPath: "solver", debugContext: { attemptType: "repair" } });
 
-    assert.equal(models.repair, "gpt-5.6-terra");
-    assert.equal(selection.modelId, "gpt-5.6-terra");
+    assert.equal(models.repair, "gpt-5.6-sol");
+    assert.equal(selection.modelId, "gpt-5.6-sol");
     assert.equal(selection.modelSource, "role_default");
   });
 
@@ -282,15 +303,15 @@ describe("OpenAI model capabilities", () => {
     assert.equal(buildResponsesModelParameters(selection).reasoning.effort, "medium");
   });
 
-  it("keeps Luna compact retries on the existing no-reasoning policy", () => {
+  it("keeps authoritative solver reasoning on compact retries", () => {
     const selection = selectOpenAiModel({
       modelPath: "solver",
       debugContext: { retryPurpose: "compact", attemptType: "initial-compact" },
     });
 
     assert.equal(selection.role, "solver");
-    assert.equal(selection.reasoningEffort, "none");
-    assert.equal(buildResponsesModelParameters(selection).reasoning.effort, "none");
+    assert.equal(selection.reasoningEffort, "medium");
+    assert.equal(buildResponsesModelParameters(selection).reasoning.effort, "medium");
   });
 
   it("falls back predictably for unknown models", () => {

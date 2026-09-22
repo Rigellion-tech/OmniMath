@@ -50,6 +50,7 @@ describe("math API auth headers", () => {
       { skipCache: true },
       { skipCache: true },
       { skipCache: true },
+      { skipCache: true },
     ]);
     assert.deepEqual(events, [
       "getToken",
@@ -59,7 +60,9 @@ describe("math API auth headers", () => {
       "getToken",
       "fetch:/api/extract-image-problem",
       "getToken",
-      "fetch:/api/explain-image",
+      "fetch:/api/extract-image-problem",
+      "getToken",
+      "fetch:/api/solve-extracted-problem",
     ]);
   });
 });

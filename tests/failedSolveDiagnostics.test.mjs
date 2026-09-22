@@ -833,6 +833,65 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
   }
 }
 
+describe("common mathematical evidence through HTTP solve routes", () => {
+  it("typed and reviewed OCR accept the same contradicted candidate without new provider retries", async () => {
+    await withRuntime({ capture: false }, async ({ handleExplainRequest, handleSolveExtractedProblemRequest }) => {
+      let calls = 0;
+      const input = String.raw`\int_0^1 (2*x+1)\,dx`;
+      globalThis.fetch = async () => {
+        calls++;
+        return jsonResponse(openAiBody(JSON.stringify({
+          title: "Candidate evidence route test", problemLatex: input,
+          steps: [{ id: "s1", heading: "Final answer", latex: "3", reasoning: "Claimed result.", anchors: [] }],
+          finalAnswerLatex: "3", numericCheck: "Provider says this is correct.",
+        })));
+      };
+      const typed = await invokeTypedSolve(handleExplainRequest, { problemValue: input, requestId: "trust-typed" });
+      const ocr = await invokeSolve(handleSolveExtractedProblemRequest, { problemValue: input, canonicalLatexValue: input, reviewedTextValue: input, requestId: "trust-ocr" });
+      for (const response of [typed, ocr]) {
+        assert.equal(response.statusCode, 200);
+        const body = response.json();
+        assert.equal(body.candidateAcceptance.mode, "evidence_only");
+        assert.equal(body.candidateAcceptance.accepted, true);
+        assert.equal(body.verification.checks.at(-1).state, "contradicted");
+        assert.equal(body.verification.checks.at(-1).exactIntegral, "2");
+        assert.equal(body.verification.summary.solutionCorrectness, "not_established");
+      }
+      assert.equal(calls, 2);
+      const cached = await invokeTypedSolve(handleExplainRequest, { problemValue: input, requestId: "trust-typed-cache" });
+      assert.equal(cached.statusCode, 200);
+      assert.equal(cached.json().verification.checks.at(-1).state, "contradicted");
+      assert.equal(calls, 2);
+    });
+  });
+
+  it("typed and reviewed OCR reject the same invalid provider response with the same compact retry policy", async () => {
+    await withRuntime({ capture: false }, async ({ handleExplainRequest, handleSolveExtractedProblemRequest }) => {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return jsonResponse(openAiBody("not valid explanation JSON"));
+      };
+      const input = "Solve x + 2 = 3.";
+      const typed = await invokeTypedSolve(handleExplainRequest, {
+        problemValue: input,
+        requestId: "invalid-parity-typed",
+      });
+      const ocr = await invokeSolve(handleSolveExtractedProblemRequest, {
+        problemValue: input,
+        canonicalTextValue: input,
+        reviewedTextValue: input,
+        requestId: "invalid-parity-ocr",
+      });
+
+      assert.equal(typed.statusCode, ocr.statusCode);
+      assert.equal(typed.json().code, ocr.json().code);
+      assert.equal(typed.json().code, "AI_RESPONSE_INVALID");
+      assert.equal(calls, 4);
+    });
+  });
+});
+
 async function invokeTypedSolve(handler, {
   requestId = "typed-routing-test",
   problemValue = "2x+1=5",
@@ -3382,7 +3441,7 @@ describe.skip("legacy validator-driven solve diagnostics", () => {
 });
 
 describe("structural solve acceptance diagnostics", () => {
-  it("routes every initial solve to Luna without calling a provider", async () => {
+  it("routes every initial canonical solve to Sol without calling a provider", async () => {
     await withRuntime({ capture: false }, async () => {
       process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
       process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
@@ -3400,13 +3459,13 @@ describe("structural solve acceptance diagnostics", () => {
         "\\sum_{n=1}^{\\infty}n^{-2}",
       ]) {
         assert.equal(resolveInitialSolveRouting({ canonicalLatex }).selectedInitialModelRole, "solver");
-        assert.equal(resolveInitialSolveRouting({ canonicalLatex }).selectedInitialModel, "test-luna-model");
+        assert.equal(resolveInitialSolveRouting({ canonicalLatex }).selectedInitialModel, "gpt-5.6-sol");
       }
       assert.equal(providerCalls, 0);
     });
   });
 
-  it("returns a structurally valid Luna candidate without Terra repair", async () => {
+  it("returns a structurally valid Sol candidate without Terra repair", async () => {
     await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
       process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
@@ -3422,12 +3481,12 @@ describe("structural solve acceptance diagnostics", () => {
 
       assert.equal(response.statusCode, 200);
       assert.equal(response.json().finalAnswerLatex, "x=-35");
-      assert.deepEqual(requests.map((request) => request.model), ["test-luna-model"]);
+      assert.deepEqual(requests.map((request) => request.model), ["gpt-5.6-sol"]);
       assert.equal((await readArtifacts(cwd)).length, 0);
     });
   });
 
-  it("replays the improper integral as a single Luna generation", async () => {
+  it("replays the improper integral as a single Sol generation", async () => {
     await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
       process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
@@ -3447,7 +3506,7 @@ describe("structural solve acceptance diagnostics", () => {
 
       assert.equal(response.statusCode, 200);
       assert.equal(requests.length, 1);
-      assert.equal(requests[0].model, "test-luna-model");
+      assert.equal(requests[0].model, "gpt-5.6-sol");
       assert.equal(response.json().usage.settlement.providerCalls, 1);
       assert.equal((await readArtifacts(cwd)).length, 0);
     });

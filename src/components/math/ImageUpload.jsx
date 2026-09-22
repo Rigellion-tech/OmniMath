@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, CheckCircle2, FileText, ImagePlus, Loader2, Pencil, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
 import { buildExtractionSubmissionPayload, extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
@@ -91,7 +92,7 @@ function ExtractionReviewPanel({
   onCancel,
   solveError,
 }) {
-  const [editing, setEditing] = useState(false);
+  const [, setEditing] = useState(false);
   if (!extraction) return null;
 
   const issues = Array.isArray(extraction.issues) ? extraction.issues : [];
@@ -100,7 +101,6 @@ function ExtractionReviewPanel({
   const ocrConfidence = Number(extraction.ocrConfidence ?? extraction.extractionValidation?.ocrConfidence ?? extraction.extractionValidation?.metrics?.ocrConfidence ?? 0);
   const isLow = tier === "low";
   const isMedium = tier === "medium";
-  const showEditor = editing;
   const canContinue = !solving && Boolean(editedText.trim());
   const primaryLabel = solveError ? "Retry solve" : "Continue with reviewed text";
   const statusText = isLow
@@ -204,7 +204,7 @@ function ExtractionReviewPanel({
         <button
           type="button"
           disabled={!canContinue}
-          onClick={() => onSolve(showEditor ? "edited" : "direct")}
+          onClick={() => onSolve()}
           className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
         >
           {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -241,8 +241,8 @@ function QualityPanel({
 
   const canSubmit = quality?.passes && !analyzing && !submitting && !extraction;
 
-  return (
-    <div className="omni-panel absolute right-0 top-14 z-50 flex max-h-[80vh] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl p-2.5 shadow-[0_22px_60px_rgba(0,0,0,0.35)]">
+  return createPortal(
+    <div data-testid="image-review-panel" className="omni-panel fixed right-3 top-20 z-[95] flex max-h-[calc(100dvh-6rem)] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl p-2.5 shadow-[0_22px_60px_rgba(0,0,0,0.35)]">
       <div className="min-h-0 flex-1 overflow-y-auto pr-1 omni-scrollbar">
         <div className="flex items-start gap-2.5">
           <img src={preview} alt="Uploaded problem preview" className="h-20 w-20 rounded-lg object-cover" />
@@ -358,11 +358,12 @@ function QualityPanel({
       </div>
       )}
     </div>
-  );
+  , document.body);
 }
 
 export default function ImageUpload({
   activeSessionId = "",
+  history = [],
   onCreateOperation,
   canApplyOperation,
   onProblemGenerated,
@@ -382,6 +383,8 @@ export default function ImageUpload({
     editedText: "",
     solveError: "",
     operationContext: null,
+    abortController: null,
+    solveHistory: [],
   };
   const [workflowBySession, setWorkflowBySession] = useState({});
   const workflowBySessionRef = useRef(workflowBySession);
@@ -390,7 +393,6 @@ export default function ImageUpload({
   const workflow = workflowBySession[activeSessionId] || emptyWorkflow;
   const {
     preview,
-    selectedFile,
     quality,
     analyzing,
     submitting,
@@ -405,6 +407,7 @@ export default function ImageUpload({
 
   useEffect(() => () => {
     Object.values(workflowBySessionRef.current).forEach((item) => {
+      item?.abortController?.abort();
       if (item?.preview) URL.revokeObjectURL(item.preview);
     });
   }, []);
@@ -428,6 +431,7 @@ export default function ImageUpload({
 
   const resetSelection = (sessionId = activeSessionId) => {
     const current = workflowBySessionRef.current[sessionId];
+    current?.abortController?.abort();
     if (current?.preview) URL.revokeObjectURL(current.preview);
     updateWorkflow(sessionId, {
       ...emptyWorkflow,
@@ -505,10 +509,11 @@ export default function ImageUpload({
     const workflowSnapshot = workflowBySessionRef.current[originSessionId] || emptyWorkflow;
     const originFile = workflowSnapshot.selectedFile;
     const originQuality = workflowSnapshot.quality;
-    if (!originFile || !originQuality) return;
+    if (!originFile || !originQuality || workflowSnapshot.submitting) return;
 
     // Cost-control guard: failed client-side quality checks return here, before
-    // explainImageProblem can send a request to /api/explain-image.
+    // Image extraction is the first network stage; solving begins only after it
+    // has produced reviewed canonical problem text.
     if (!canSubmitImageForAi(originQuality)) return;
 
     const imageHash = getImageHash(originFile, originQuality);
@@ -518,10 +523,14 @@ export default function ImageUpload({
       imageHash,
       source: "image",
     }) || onGenerationStart?.({ source: "image", requestSessionId: originSessionId, imageHash });
+    const abortController = new AbortController();
+    const solveHistory = Array.isArray(history) ? history : [];
     updateWorkflow(originSessionId, {
       submitting: true,
       solveError: "",
       operationContext,
+      abortController,
+      solveHistory,
     });
     onGenerationStart?.({ source: "image", requestSessionId: originSessionId, imageHash, operationContext });
     logSessionOperation("extraction-started", {
@@ -539,6 +548,7 @@ export default function ImageUpload({
         prompt: "Please extract the math problem shown in this image.",
         getToken,
         quality: originQuality,
+        signal: abortController.signal,
       });
 
       if (!isCurrentOperation(originSessionId, operationContext)) {
@@ -555,10 +565,11 @@ export default function ImageUpload({
 
       onUsageUpdate?.(result.usage);
       extractionSucceeded = true;
+      const directSolveAllowed = result.ocrSolveDecision?.allowed === true;
       const canonicalProblem = canonicalProblemFromExtraction({
         extraction: result,
         canonicalText: result.extractedProblemText || result.rawExtractedText || "",
-        source: result.confidenceTier === "high" && !result.extractionValidation?.critical ? "ocr-direct" : "ocr-reviewed",
+        source: directSolveAllowed ? "ocr-direct" : "ocr-reviewed",
       });
       logCanonicalProblem("OCR extraction", canonicalProblem, { path: "ImageUpload.handleSubmit" });
       updateWorkflow(originSessionId, {
@@ -566,7 +577,7 @@ export default function ImageUpload({
         editedText: result.extractedProblemText || result.rawExtractedText || "",
       });
 
-      if (result.confidenceTier === "high" && !result.extractionValidation?.critical) {
+      if (directSolveAllowed) {
         const payload = buildExtractionSubmissionPayload({
           extraction: { ...result, canonicalProblem },
           displayText: result.extractedProblemText || result.rawExtractedText || "",
@@ -596,7 +607,9 @@ export default function ImageUpload({
         });
         const solved = await solveExtractedProblem({
           ...payload,
+          history: solveHistory,
           getToken,
+          signal: abortController.signal,
         });
         if (!isCurrentOperation(originSessionId, operationContext)) {
           logSessionOperation("operation-result-discarded", {
@@ -628,6 +641,7 @@ export default function ImageUpload({
         submitting: false,
       });
     } catch (error) {
+      if (error?.name === "AbortError") return;
       console.error("Image problem generation failed:", error);
       if (!isCurrentOperation(originSessionId, operationContext)) {
         logSessionOperation("operation-error-discarded", {
@@ -661,7 +675,7 @@ export default function ImageUpload({
     }
   };
 
-  const solveReviewedExtraction = async (decision) => {
+  const solveReviewedExtraction = async () => {
     const originSessionId = activeSessionId;
     const workflowSnapshot = workflowBySessionRef.current[originSessionId] || emptyWorkflow;
     const originExtraction = workflowSnapshot.extraction;
@@ -674,15 +688,17 @@ export default function ImageUpload({
       solveError: "",
     });
     onGenerationStart?.({ source: "image", requestSessionId: originSessionId, operationContext });
+    const abortController = workflowSnapshot.abortController || new AbortController();
+    updateWorkflow(originSessionId, { abortController });
 
     try {
       const rawText = originExtraction.extractedProblemText || "";
       const edited = originEditedText.trim() !== rawText.trim();
       const payload = buildExtractionSubmissionPayload({
         extraction: originExtraction,
-        displayText: decision === "anyway" ? rawText : originEditedText,
+        displayText: originEditedText,
         rawText: originExtraction.rawExtractedText || originExtraction.rawOcrText || rawText,
-        solveDecision: decision === "anyway" ? "anyway" : edited ? "edited" : "direct",
+        solveDecision: edited ? "edited" : "confirmed",
         source: "ocr-reviewed",
       });
       const requestSessionId = onReviewedProblemSubmitted?.(payload, operationContext);
@@ -696,7 +712,9 @@ export default function ImageUpload({
       });
       const solved = await solveExtractedProblem({
         ...payload,
+        history: workflowSnapshot.solveHistory || [],
         getToken,
+        signal: abortController.signal,
       });
       if (!isCurrentOperation(originSessionId, operationContext)) {
         logSessionOperation("operation-result-discarded", {
@@ -719,6 +737,7 @@ export default function ImageUpload({
       onProblemGenerated({ ...solved, _requestSessionId: requestSessionId, _operationContext: operationContext }, operationContext);
       resetSelection(originSessionId);
     } catch (error) {
+      if (error?.name === "AbortError") return;
       console.error("Confirmed image problem solve failed:", error);
       if (!isCurrentOperation(originSessionId, operationContext)) {
         logSessionOperation("operation-error-discarded", {

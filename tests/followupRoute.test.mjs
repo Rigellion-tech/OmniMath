@@ -84,6 +84,9 @@ describe("explain follow-up route", () => {
           pinnedExplanation: "3 is the coefficient multiplying cosine.",
           question: "where did you get the 3 from?",
           history: [],
+          requestId: "followup-route-request",
+          conversationId: "pinned-conversation",
+          targetRevision: 4,
         },
       };
       const res = createJsonResponseRecorder();
@@ -95,6 +98,9 @@ describe("explain follow-up route", () => {
       assert.equal(body.fallback, true);
       assert.match(body.answer, /3/);
       assert.match(body.answer, /pinned expression|current step|coefficient/i);
+      assert.equal(body.requestId, "followup-route-request");
+      assert.equal(body.conversationId, "pinned-conversation");
+      assert.equal(body.targetRevision, 4);
     } finally {
       process.chdir(originalCwd);
       Object.entries(originalEnv).forEach(([key, value]) => {

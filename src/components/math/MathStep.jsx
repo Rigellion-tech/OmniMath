@@ -32,15 +32,18 @@ function shouldRenderLineText(line, tokens) {
 }
 
 function fallbackLineFromStep(step) {
-  if (Array.isArray(step?.chunks) && step.chunks.length > 0) {
+  const renderableChunks = Array.isArray(step?.chunks)
+    ? step.chunks.filter((chunk) => renderableTokenLatex(chunk))
+    : [];
+  if (renderableChunks.length > 0) {
     return {
       id: `${step.id || "step"}-line-1`,
       kind: "math",
-      tokens: step.chunks,
+      tokens: renderableChunks,
     };
   }
 
-  if (step?.math) {
+  if (typeof step?.math === "string" && step.math.trim()) {
     return {
       id: `${step.id || "step"}-line-1`,
       kind: "math",
@@ -49,7 +52,7 @@ function fallbackLineFromStep(step) {
     };
   }
 
-  if (step?.summary) {
+  if (typeof step?.summary === "string" && step.summary.trim()) {
     return {
       id: `${step.id || "step"}-line-1`,
       kind: "text",
@@ -63,7 +66,11 @@ function fallbackLineFromStep(step) {
 
 function solutionLinesForStep(step) {
   const structuredLines = Array.isArray(step?.lines)
-    ? step.lines.filter((line) => line?.text || line?.latex || lineHasRenderableToken(line))
+    ? step.lines.filter((line) => (
+      (typeof line?.text === "string" && line.text.trim())
+      || (typeof line?.latex === "string" && line.latex.trim())
+      || lineHasRenderableToken(line)
+    ))
     : [];
 
   if (structuredLines.length > 0) return structuredLines;
@@ -357,6 +364,7 @@ function SolutionStepView({ step, index, requestId, selected, expanded, onSelect
       data-solve-request-id={requestId || undefined}
       data-step-id={step.id || undefined}
       data-step-index={index}
+      data-step-boundary-error={step.renderBoundaryError?.type || undefined}
       data-final-answer={isFinalAnswer ? "true" : undefined}
       onMouseLeave={handleStepLeave}
       className={cn(
@@ -395,7 +403,9 @@ function SolutionStepView({ step, index, requestId, selected, expanded, onSelect
           </button>
 
           <div className="mt-3 grid min-w-0 max-w-full gap-4">
-            {lines.map((line, lineIndex) => (
+            {step.renderBoundaryError ? (
+              <MathProseLine>This solution step was empty or malformed and could not be rendered.</MathProseLine>
+            ) : lines.map((line, lineIndex) => (
               <InteractiveMathLine
                 key={line.id || `${step.id}-line-${lineIndex}`}
                 line={line}

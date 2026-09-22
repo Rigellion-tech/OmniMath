@@ -33,7 +33,7 @@ describe("math prompt construction", () => {
 
     assert.match(prompt, /each displayed steps\[\]\.latex must be a direct algebraic transformation/i);
     assert.match(prompt, /Explanatory facts and identity checks belong in steps\[\]\.reasoning/i);
-    assert.match(prompt, /Solve the mathematics carefully before writing the response/);
+    assert.match(prompt, /Solve carefully before writing the response/);
     assert.match(prompt, /Introduce every new symbol before or at first use/);
     assert.match(prompt, /Use special functions only when genuinely useful/);
     assert.match(prompt, /every displayed equation must follow from the preceding step/);
@@ -50,18 +50,14 @@ describe("math prompt construction", () => {
     assert.doesNotMatch(prompt, /x\^n|power rule says|d\/dx x\^n/i);
   });
 
-  it("defines a strict standalone contract for finalAnswerLatex", () => {
+  it("asks for a complete renderable final result including related conditions", () => {
     const prompt = buildMathExplanationPrompt({ problem: "\\int_0^\\infty f(x)\\,dx" });
 
-    assert.match(prompt, /Standalone-final-expression contract for finalAnswerLatex/);
-    assert.match(prompt, /exactly one standalone mathematical expression/);
-    assert.match(prompt, /one equation assigning the original expression to that value/);
-    assert.match(prompt, /no prose, explanation, intermediate derivation, \\Rightarrow, multiline content/);
-    assert.match(prompt, /Valid shape: A/);
-    assert.match(prompt, /Valid shape: E=A/);
-    assert.match(prompt, /Invalid shape: E_1=\\cdots \\\\ \\Rightarrow E=A/);
-    assert.match(prompt, /Invalid shape: Therefore the answer is A/);
-    assert.match(prompt, /Invalid: A=B,\\quad C=D/);
+    assert.match(prompt, /finalAnswerLatex must give the complete final mathematical result/);
+    assert.match(prompt, /Keep related equations together/);
+    assert.match(prompt, /boundary\/initial-value problem/);
+    assert.match(prompt, /Aligned, cases, array/);
+    assert.match(prompt, /Put explanatory prose and intermediate derivation in steps\[\]\.reasoning/);
     assert.match(prompt, /compact responses, the last step's latex is treated as finalAnswerLatex/i);
   });
 });

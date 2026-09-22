@@ -1,4 +1,4 @@
-import { getSolutionSteps } from "../lib/solutionSteps.js";
+import { getRenderableSolutionSteps } from "../lib/solutionSteps.js";
 import { inspectReasoningCandidate } from "../lib/reasoningLatexDiagnostics.js";
 import {
   canonicalProblemFromExtraction,
@@ -84,6 +84,37 @@ function logSolutionDebug(event, details = {}) {
   });
 }
 
+function summarizeClientText(value) {
+  const present = value !== undefined && value !== null;
+  const text = typeof value === "string" ? value : "";
+  return {
+    present,
+    type: typeof value,
+    charCount: text.length,
+    trimmedCharCount: text.trim().length,
+  };
+}
+
+function summarizeClientSteps(steps = [], stage = "client") {
+  return {
+    stage,
+    stepCount: Array.isArray(steps) ? steps.length : 0,
+    steps: Array.isArray(steps)
+      ? steps.map((step, index) => ({
+          index,
+          id: typeof step?.id === "string" ? step.id : null,
+          math: summarizeClientText(step?.math),
+          latex: summarizeClientText(step?.latex),
+          equationLatex: summarizeClientText(step?.equationLatex),
+          display: summarizeClientText(step?.display),
+          lineCount: Array.isArray(step?.lines) ? step.lines.length : 0,
+          chunkCount: Array.isArray(step?.chunks) ? step.chunks.length : 0,
+          boundaryError: step?.renderBoundaryError || null,
+        }))
+      : [],
+  };
+}
+
 function createClientRequestId(prefix = "client") {
   const random = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${Date.now().toString(36)}-${random}`;
@@ -120,8 +151,36 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "", reques
   const source = [raw, explanation, result, solution, problem].find((item) => Array.isArray(item.steps)) || raw;
   const requestId = raw.requestId || raw.metadata?.requestId || requestedRequestId || "";
   logFrontendReasoningLatexStage("4a.frontend_received_field", source);
-  const steps = getSolutionSteps(raw);
+  // A live API solve must contain renderable math/text, not just a label or
+  // an empty object. Legacy persisted status calculations still use the more
+  // permissive getSolutionSteps() path elsewhere.
+  logSolutionDebug("solve payload boundary", {
+    stage: "api-parsed",
+    endpoint,
+    requestId: requestId || null,
+    // Observe the received arrays before selection or placeholder repair.
+    receivedCandidates: [raw, explanation, result, solution, problem].map((candidate, index) => ({
+      path: ["response", "explanation", "result", "solution", "problem"][index],
+      ...summarizeClientSteps(candidate.steps, "api-parsed"),
+    })),
+  });
+  const sourceSteps = getRenderableSolutionSteps(raw);
+  const boundaryErrors = sourceSteps.flatMap((step) => step.renderBoundaryError ? [step.renderBoundaryError] : []);
+  if (boundaryErrors.length > 0) {
+    console.error("[omnimath:solution-step-boundary]", {
+      outcome: "accepted_empty",
+      stage: "client-selection",
+      requestId: requestId || null,
+      endpoint,
+      boundaryErrors,
+    });
+  }
+  const steps = sourceSteps;
   const saveWarning = raw.runtime?.saveWarning || explanation.runtime?.saveWarning || result.runtime?.saveWarning || raw.saveWarning || "";
+  const saveStatus = raw.runtime?.saveStatus
+    || explanation.runtime?.saveStatus
+    || result.runtime?.saveStatus
+    || "";
   const warnings = [
     ...firstArray(raw.warnings, explanation.warnings, result.warnings, solution.warnings),
     ...(saveWarning ? [saveWarning] : []),
@@ -133,7 +192,13 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "", reques
     runtime: raw.runtime || explanation.runtime || result.runtime || null,
     usage: raw.usage || explanation.usage || result.usage || null,
     savedExplanationId: raw.savedExplanationId || explanation.savedExplanationId || result.savedExplanationId || null,
-    saveStatus: saveWarning ? "not_saved" : raw.savedExplanationId ? "saved" : raw.saved === false ? "not_saved" : "unknown",
+    saveStatus: saveWarning
+      ? "not_saved"
+      : saveStatus || raw.savedExplanationId
+        ? (saveStatus || "saved")
+        : raw.saved === false
+          ? "not_saved"
+          : "unknown",
     rawKeys: Object.keys(raw),
   };
   const normalized = {
@@ -163,6 +228,12 @@ export function normalizeSolveResponse(rawResponse = {}, { endpoint = "", reques
       selectedFinalLineLatex: selectedFinalLine,
     });
   }
+  logSolutionDebug("solve payload boundary", {
+    stage: "client-normalized",
+    endpoint,
+    requestId: requestId || null,
+    normalizedStepSummary: summarizeClientSteps(steps, "client-normalized"),
+  });
   logFrontendReasoningLatexStage("4b.frontend_response_normalization", normalized);
   return normalized;
 }
@@ -192,74 +263,100 @@ async function getAuthHeaders(getToken, endpoint, { fresh = false } = {}) {
   }
 }
 
-export async function explainProblem({ problem, history, getToken }) {
-  const debugRequestId = createClientRequestId("typed-solve");
-  const canonicalProblem = createCanonicalProblemPayload({
-    canonicalText: problem,
+/** @param {{ canonicalProblem?: any, history?: any[], sourceMetadata?: any, getToken?: any, signal?: AbortSignal, endpoint?: string }} options */
+export async function solveCanonicalProblem({
+  canonicalProblem,
+  history = [],
+  sourceMetadata = {},
+  getToken,
+  signal,
+  endpoint = "/api/solve-extracted-problem",
+}) {
+  const safeCanonicalProblem = canonicalProblem || createCanonicalProblemPayload({
+    canonicalText: sourceMetadata.problem || "",
     source: "typed",
   });
-  logCanonicalProblem("solve request", canonicalProblem, { endpoint: "/api/explain" });
-  logSolutionDebug("api explain payload", {
+  const canonicalInput = getCanonicalSolverInput(safeCanonicalProblem);
+  const debugRequestId = createClientRequestId("canonical-solve");
+  const source = safeCanonicalProblem.source === "typed" ? "typed" : "ocr";
+  logCanonicalProblem("solve request", safeCanonicalProblem, { endpoint, source });
+  logSolutionDebug("api canonical-solve payload", {
     requestId: debugRequestId,
-    rawProblem: problem,
-    payloadProblem: canonicalProblem.canonicalText,
+    canonicalInputHash: safeCanonicalProblem.hash,
+    source,
     historyCount: Array.isArray(history) ? history.length : 0,
   });
-  const authHeaders = await getAuthHeaders(getToken, "/api/explain", { fresh: true });
-  const response = await fetch("/api/explain", {
+  const authHeaders = await getAuthHeaders(getToken, endpoint, { fresh: true });
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...authHeaders,
     },
     body: JSON.stringify({
-      problem: canonicalProblem.canonicalText,
-      canonicalProblem,
+      problemInput: {
+        problemText: canonicalInput,
+        source,
+        sourceMetadata,
+      },
+      problem: canonicalInput,
+      problemText: canonicalInput,
+      canonicalProblem: safeCanonicalProblem,
       history,
+      extraction: sourceMetadata.extraction || {},
+      solveDecision: sourceMetadata.solveDecision || "direct",
+      reviewAction: sourceMetadata.reviewAction || null,
       debugRequestId,
     }),
+    signal,
   });
 
   const parsed = await parseResponse(response);
-  logSolutionDebug("api explain response", {
+  logSolutionDebug("api canonical-solve response", {
     requestId: parsed?.requestId || debugRequestId,
     status: response.status,
     ok: response.ok,
     code: parsed?.code,
     message: parsed?.message,
+    source,
   });
-  return normalizeSolveResponse(parsed, { endpoint: "/api/explain" });
+  return normalizeSolveResponse(parsed, { endpoint, requestId: debugRequestId });
 }
 
-export async function explainImageProblem({ file, prompt, getToken, quality }) {
-  const debugRequestId = createClientRequestId("image-solve");
-  const formData = new FormData();
-  formData.append("file", file);
-  formData.append("prompt", prompt);
-  formData.append("debugRequestId", debugRequestId);
-  if (Number.isFinite(quality?.metrics?.ocrConfidence)) {
-    formData.append("ocrConfidence", String(quality.metrics.ocrConfidence));
-  }
-
-  const authHeaders = await getAuthHeaders(getToken, "/api/explain-image", { fresh: true });
-  const response = await fetch("/api/explain-image", {
-    method: "POST",
-    headers: authHeaders,
-    body: formData,
+export async function explainProblem({ problem, canonicalLatex = "", history, getToken, signal }) {
+  const canonicalProblem = createCanonicalProblemPayload({
+    canonicalText: problem,
+    canonicalLatex,
+    source: "typed",
   });
-
-  const parsed = await parseResponse(response);
-  logSolutionDebug("api explain-image response", {
-    requestId: parsed?.requestId || debugRequestId,
-    status: response.status,
-    ok: response.ok,
-    code: parsed?.code,
-    message: parsed?.message,
+  return solveCanonicalProblem({
+    canonicalProblem,
+    history,
+    sourceMetadata: { problem, canonicalLatex },
+    getToken,
+    signal,
+    endpoint: "/api/explain",
   });
-  return normalizeSolveResponse(parsed, { endpoint: "/api/explain-image" });
 }
 
-export async function extractImageProblem({ file, prompt, getToken, quality }) {
+export async function explainImageProblem({ file, prompt, history = [], getToken, quality, signal }) {
+  const extraction = await extractImageProblem({ file, prompt, getToken, quality, signal });
+  const canonicalProblem = canonicalProblemFromExtraction({
+    extraction,
+    canonicalText: extraction.extractedProblemText || extraction.rawExtractedText || "",
+    source: "ocr-direct",
+  });
+  const payload = buildExtractionSubmissionPayload({
+    extraction: { ...extraction, canonicalProblem },
+    displayText: canonicalProblem.canonicalText,
+    rawText: extraction.rawExtractedText || extraction.rawOcrText || canonicalProblem.canonicalText,
+    solveDecision: "direct",
+    source: "ocr-direct",
+  });
+  return solveExtractedProblem({ ...payload, history, getToken, signal });
+}
+
+export async function extractImageProblem({ file, prompt, getToken, quality, signal }) {
   const debugRequestId = createClientRequestId("image-extract");
   const formData = new FormData();
   formData.append("file", file);
@@ -274,6 +371,7 @@ export async function extractImageProblem({ file, prompt, getToken, quality }) {
     method: "POST",
     headers: authHeaders,
     body: formData,
+    signal,
   });
 
   const parsed = await parseResponse(response);
@@ -366,6 +464,11 @@ export function buildExtractionSubmissionPayload(options = {}) {
     canonicalText: normalizedText,
     source,
   });
+  const reviewAction = solveDecision === "confirmed"
+    ? { kind: "confirmed_unchanged", canonicalInputHash: canonicalProblem.hash }
+    : solveDecision === "edited"
+      ? { kind: "edited", canonicalInputHash: canonicalProblem.hash }
+      : null;
   if (extraction?.canonicalProblem?.hash && extraction.canonicalProblem.hash !== canonicalProblem.hash) {
     logCanonicalProblem("hash divergence", canonicalProblem, {
       previousHash: extraction.canonicalProblem.hash,
@@ -399,6 +502,7 @@ export function buildExtractionSubmissionPayload(options = {}) {
     canonicalProblem,
     extraction: payloadExtraction,
     solveDecision,
+    reviewAction,
   };
 }
 
@@ -409,9 +513,11 @@ export async function solveExtractedProblem({
   extraction = {},
   canonicalProblem = null,
   solveDecision = "direct",
+  reviewAction = null,
+  history = [],
   getToken,
+  signal,
 }) {
-  const debugRequestId = createClientRequestId("solve-extracted");
   const safeExtraction = objectOrEmpty(extraction);
   const frozenCanonicalProblem = canonicalProblem || safeExtraction.canonicalProblem || createCanonicalProblemPayload({
     canonicalText: problem,
@@ -420,47 +526,25 @@ export async function solveExtractedProblem({
     extractionWarnings: safeExtraction.issues || safeExtraction.extractionValidation?.issues || [],
     extractionConfidence: safeExtraction.confidence ?? safeExtraction.extractionValidation?.confidence,
   });
-  const canonicalInput = getCanonicalSolverInput(frozenCanonicalProblem, problem);
-  logCanonicalProblem("solve request", frozenCanonicalProblem, { endpoint: "/api/solve-extracted-problem" });
-  logSolutionDebug("api solve-extracted payload", {
-    requestId: debugRequestId,
-    normalizedExtractedProblem: canonicalInput,
-    canonicalInputHash: frozenCanonicalProblem.hash,
-    solveDecision,
-  });
-  const authHeaders = await getAuthHeaders(getToken, "/api/solve-extracted-problem", { fresh: true });
-  const response = await fetch("/api/solve-extracted-problem", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders,
-    },
-    body: JSON.stringify({
-      problem: canonicalInput,
-      problemLatex,
-      problemText,
-      canonicalProblem: frozenCanonicalProblem,
+  return solveCanonicalProblem({
+    canonicalProblem: frozenCanonicalProblem,
+    sourceMetadata: {
       extraction: {
         ...safeExtraction,
         canonicalProblem: frozenCanonicalProblem,
       },
       solveDecision,
-      debugRequestId,
-    }),
+      reviewAction,
+      problemLatex,
+      problemText,
+    },
+    history,
+    getToken,
+    signal,
   });
-
-  const parsed = await parseResponse(response);
-  logSolutionDebug("api solve-extracted response", {
-    requestId: parsed?.requestId || debugRequestId,
-    status: response.status,
-    ok: response.ok,
-    code: parsed?.code,
-    message: parsed?.message,
-  });
-  return normalizeSolveResponse(parsed, { endpoint: "/api/solve-extracted-problem" });
 }
 
-export async function explainFollowup({ payload, getToken }) {
+export async function explainFollowup({ payload, getToken, signal }) {
   const authHeaders = await getAuthHeaders(getToken, "/api/explain-followup");
   const response = await fetch("/api/explain-followup", {
     method: "POST",
@@ -469,6 +553,7 @@ export async function explainFollowup({ payload, getToken }) {
       ...authHeaders,
     },
     body: JSON.stringify(payload || {}),
+    signal,
   });
 
   return parseResponse(response);

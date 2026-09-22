@@ -139,17 +139,42 @@ describe("OCR submission pipeline", () => {
       },
       displayText: canonicalText,
       rawText: canonicalText,
-      solveDecision: "direct",
+      solveDecision: "confirmed",
       source: "ocr-reviewed",
     });
 
-    assert.equal(payload.solveDecision, "direct");
+    assert.equal(payload.solveDecision, "confirmed");
+    assert.equal(payload.reviewAction.kind, "confirmed_unchanged");
+    assert.equal(payload.reviewAction.canonicalInputHash, payload.canonicalProblem.hash);
     assert.equal(payload.problem, canonicalText);
     assert.equal(payload.problemLatex, undefined);
     assert.equal(payload.canonicalProblem.source, "ocr-reviewed");
     assert.equal(payload.extraction.normalizedText, canonicalText);
     assert.equal(payload.extraction.validationText, canonicalText);
     assert.equal(payload.problem.includes("\\frac{e^{x^2}}{"), false);
+  });
+
+  it("binds edited review semantics to the edited canonical revision", () => {
+    const extraction = {
+      extractedProblemText: "Solve x + 7 = 8.",
+      extractionValidation: {
+        status: "warning",
+        tier: "medium",
+        issues: [{ type: "ocr_text_cleanup_review", severity: "medium" }],
+      },
+    };
+    const payload = buildExtractionSubmissionPayload({
+      extraction,
+      displayText: "Solve x + 7 = 9.",
+      rawText: extraction.extractedProblemText,
+      solveDecision: "edited",
+      source: "ocr-reviewed",
+    });
+
+    assert.equal(payload.solveDecision, "edited");
+    assert.equal(payload.reviewAction.kind, "edited");
+    assert.equal(payload.reviewAction.canonicalInputHash, payload.canonicalProblem.hash);
+    assert.equal(payload.problem, "Solve x + 7 = 9.");
   });
 
   it("uses the same frozen canonical hash for normal and compare-methods solves", () => {

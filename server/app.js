@@ -25,6 +25,8 @@ import {
   normalizeOpenAiUsage,
   getSolveMaxOutputTokens,
   getSolveOutputTokenBudget,
+  getSolveTotalTimeoutMs,
+  logSolveCandidateOutcome,
 } from "./openai.js";
 import {
   checkAndReserveUsage,
@@ -39,13 +41,22 @@ import { runDeduplicatedRequest } from "./duplicateRequests.js";
 import { applyLocalRulesToExplanation, createLocalRuleExplanation } from "./localRules.js";
 import { annotateMathExplanation } from "./mathAnnotator.js";
 import { validateExtraction } from "./extractionValidation.js";
-import { getOpenAiModelForPath, getOpenAiSamplingForPath } from "./openaiModels.js";
+import { getOpenAiModelForPath, getOpenAiSamplingForPath, resolveOpenAiRequestTimeout } from "./openaiModels.js";
+import {
+  buildProvenanceFollowupPrompt,
+  createGeneralFollowupFallback,
+  followupCorrelation,
+} from "./followupProvenance.js";
 import { chooseSolverRoleForProblem } from "./solverRouting.js";
 import { buildExtractedProblemDisplay, normalizeExtractedProblemText } from "./ocrTextNormalization.js";
 import { createMethodFingerprint } from "./mathValidationAnalysis.js";
 import { analyzeSymbolOrigins } from "./symbolInventory.js";
 import { captureFailedSolveDiagnostic } from "./failedSolveDiagnostics.js";
-import { createSolveOrchestrationTelemetry } from "./solveOrchestrationTelemetry.js";
+import { assertSolveCandidateStructure as acceptStructurallyParsedSolve, inspectSolveCandidateStructure } from "./solveCandidateStructure.js";
+import { finalizeSolveCandidate } from "./solveCandidateLifecycle.js";
+import { decideCandidateAcceptance } from "./solveAcceptancePolicy.js";
+import { assessOcrSolveDecision, assertOcrSolveAllowed } from "./ocrSolvePolicy.js";
+import { getSolveDiagnosticContext, withSolveDiagnosticContext } from "./solveDiagnosticContext.js";
 import {
   createExplanationCacheKey,
   createImageHash,
@@ -54,10 +65,6 @@ import {
 } from "./explanationCache.js";
 import { traceMathStage } from "../src/lib/mathNode.js";
 import {
-  getCanonicalDisplayText,
-  getCanonicalDisplayTextSource,
-  getCanonicalMathInput,
-  getCanonicalMathInputSource,
   getCanonicalSolverInput,
   logCanonicalProblem,
   normalizeCanonicalProblem,
@@ -80,7 +87,6 @@ const MAX_PROBLEM_CHARS = 4000;
 const MAX_HISTORY_ITEMS = 10;
 const MAX_HISTORY_ITEM_CHARS = 1000;
 const MAX_FOLLOWUP_QUESTION_CHARS = 1000;
-const MAX_FOLLOWUP_CONTEXT_CHARS = 16000;
 const MAX_PROBLEM_CONTEXT_CHARS = 600;
 const MAX_SELECTED_LATEX_CHARS = 1200;
 const MAX_STEP_LATEX_CHARS = 2400;
@@ -90,6 +96,10 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/webp",
   "image/gif",
 ]);
+
+// Private, server-owned context used by source adapters. Public request fields
+// cannot select quota or persistence policy.
+const canonicalSolveRequestContexts = new WeakMap();
 
 function isSolveDebugEnabled() {
   return process.env.NODE_ENV !== "production" && (
@@ -111,6 +121,26 @@ function createDebugRequestId(prefix = "req") {
   return `${prefix}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+/**
+ * Adapt an incoming request for an internal route without dropping headers.
+ * Node's IncomingMessage exposes some request properties through accessors;
+ * spreading it is therefore not a faithful copy and, in particular, loses
+ * `authorization`/cookies.  Internal image/OCR adapters must preserve auth
+ * ownership just like a same-origin browser request.
+ */
+export function copyInternalRequest(req, overrides = {}) {
+  const headers = {
+    ...(req?.headers || {}),
+    ...(overrides.headers || {}),
+  };
+  return {
+    ...req,
+    ...overrides,
+    method: overrides.method || req?.method,
+    headers,
+  };
+}
+
 function hashDebugText(value = "") {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16);
 }
@@ -130,7 +160,7 @@ export function resolveInitialSolveRouting(input = {}) {
     routingDecision: decision.tier,
     routingReason: decision.reason,
     selectedInitialModelRole: decision.role,
-    selectedInitialModel: getOpenAiModelForPath(decision.role),
+    selectedInitialModel: getOpenAiModelForPath("canonicalSolve"),
     routeSource,
   };
 }
@@ -166,26 +196,6 @@ function problemForSymbolDiagnostics(problem = "", result = {}) {
   return problem || result?.extractedProblemLatex || result?.originalProblem || result?.expression || result?.problem || "";
 }
 
-function acceptStructurallyParsedSolve(result) {
-  const finalAnswer = result?.finalAnswerLatex || result?.finalAnswer;
-  const steps = result?.steps;
-  const hasInvalidStep = !Array.isArray(steps) || steps.length === 0 || steps.some((step) => (
-    !step
-    || typeof step !== "object"
-    || typeof (step.latex || step.math || step.equationLatex) !== "string"
-    || !(step.latex || step.math || step.equationLatex).trim()
-  ));
-  if (!result || typeof result !== "object" || hasInvalidStep || typeof finalAnswer !== "string" || !finalAnswer.trim()) {
-    throw Object.assign(new Error("Parsed solve response is missing required structural fields."), {
-      statusCode: 502,
-      code: "AI_RESPONSE_INVALID",
-      responseFailureType: "schema_contract",
-      publicMessage: "The AI service returned an incomplete explanation.",
-    });
-  }
-  return result;
-}
-
 function logAcceptedSolvePayload({ requestId = "", endpoint = "", problem = "", result = {}, source = "" } = {}) {
   if (!isSolveDebugEnabled()) return;
   const symbolProblem = problemForSymbolDiagnostics(problem, result);
@@ -206,9 +216,10 @@ function logAcceptedSolvePayload({ requestId = "", endpoint = "", problem = "", 
   });
 }
 
-function logExtractionReviewDebug(validation) {
+function logExtractionReviewDebug(validation, correlation = {}) {
   if (process.env.NODE_ENV === "production") return;
   console.info("[omnimath:ocr-review]", {
+    ...correlation,
     path: "extractionReview",
     model: getOpenAiModelForPath("extractionReview"),
     llmReviewCalled: false,
@@ -845,15 +856,6 @@ const FALLBACK_SAFE_SYMBOL_SOURCE_TYPES = new Set([
   "plainExplanation",
 ]);
 
-// Only provider content-generation failures permit a retained candidate fallback.
-// Transport, availability, rate-limit, authentication, and server-configuration errors
-// continue through the existing failure and accounting paths unchanged.
-const FALLBACK_PERMITTED_LATER_ERROR_CODES = new Set([
-  "AI_RESPONSE_INVALID",
-  "AI_RESPONSE_TRUNCATED",
-  "AI_REQUEST_REFUSED",
-]);
-
 const SOLVE_CANDIDATE_STAGE_ORDER = {
   initial: 0,
   repair: 1,
@@ -945,27 +947,6 @@ function candidateCompleteness(result = {}) {
   };
 }
 
-function candidateSource(baseSource = "initial", result = {}) {
-  const compact = Boolean(result?._omniOpenAiDiagnostics?.compactFallback);
-  if (!compact || baseSource === "initial") return baseSource;
-  return `${baseSource}-compact`;
-}
-
-function failedCandidateStage(baseSource = "initial", error = {}) {
-  const attemptType = String(error?._omniOpenAiDiagnostics?.attemptType || "").toLowerCase();
-  return attemptType.includes("compact") && baseSource !== "initial"
-    ? `${baseSource}-compact`
-    : baseSource;
-}
-
-function orchestrationGenerationStage(baseSource = "initial", value = {}) {
-  const compact = Boolean(value?._omniOpenAiDiagnostics?.compactFallback)
-    || String(value?._omniOpenAiDiagnostics?.attemptType || "").toLowerCase().includes("compact");
-  if (baseSource === "repair") return compact ? "quality_repair_compact" : "quality_repair";
-  if (baseSource === "escalation") return compact ? "fresh_escalation_compact" : "fresh_escalation";
-  return compact ? "initial_compact" : "initial";
-}
-
 export function classifySolveCandidate({
   source = "initial",
   result = null,
@@ -1007,7 +988,10 @@ export function classifySolveCandidate({
   ));
   const structuralRecovery = issueCodes.length > 0 && issueCodes.every(isStructuralRecoveryIssue);
   const completeness = candidateCompleteness(result || {});
-  const structurallyUsable = Boolean(parseSchemaSuccess && result && completeness.hasFinalAnswer);
+  const structural = inspectSolveCandidateStructure(result);
+  structural.usable = Boolean(parseSchemaSuccess && structural.usable);
+  const acceptance = decideCandidateAcceptance({ structural, verification: result?.verification });
+  const structurallyUsable = acceptance.accepted;
   const fallbackEligible = false;
   return {
     source,
@@ -1016,11 +1000,13 @@ export function classifySolveCandidate({
     qualityIssueCodes: issueCodes,
     issueClassifications,
     affirmativeMathematicalFailure,
+    knownIncorrectFinalAnswer,
     numericalMismatch,
     numericalAgreement,
     numericalStatus: numericalMismatch ? "mismatch" : numericalAgreement ? "agreement" : "no_contradiction",
     structuralRecovery,
     completeness,
+    acceptance,
     accepted: structurallyUsable,
     rejectionReason: structurallyUsable ? null : "parse_or_schema_failed",
     fallbackEligible,
@@ -1029,7 +1015,7 @@ export function classifySolveCandidate({
 
 export function decideSolveFailureAction({ candidate = null, ...candidateInput } = {}) {
   const classifiedCandidate = candidate || classifySolveCandidate(candidateInput);
-  if (classifiedCandidate.parseSchemaSuccess && classifiedCandidate.result) {
+  if (classifiedCandidate.accepted && inspectSolveCandidateStructure(classifiedCandidate.result).usable) {
     return {
       action: "accept",
       candidate: classifiedCandidate,
@@ -1099,126 +1085,6 @@ export function selectBestSafeSolveCandidate(candidates = []) {
   return candidates
     .filter((candidate) => candidate?.fallbackEligible)
     .sort(compareSafeSolveCandidates)[0] || null;
-}
-
-function canUseSafeFallbackForError(error = {}) {
-  return FALLBACK_PERMITTED_LATER_ERROR_CODES.has(error?.code);
-}
-
-function candidateDiagnostic(candidate = {}) {
-  return {
-    source: candidate.source || null,
-    parseSchemaSuccess: Boolean(candidate.parseSchemaSuccess),
-    qualityIssueCodes: candidate.qualityIssueCodes || [],
-    issueClassifications: (candidate.issueClassifications || []).map((issue) => ({
-      code: issue.code,
-      severity: issue.severity,
-      fallbackEligible: issue.fallbackEligible,
-    })),
-    affirmativeMathematicalFailure: Boolean(candidate.affirmativeMathematicalFailure),
-    knownIncorrectFinalAnswer: Boolean(candidate.knownIncorrectFinalAnswer),
-    numericalStatus: candidate.numericalStatus || null,
-    structuralRecovery: Boolean(candidate.structuralRecovery),
-    completenessScore: Number(candidate.completeness?.score || 0),
-    accepted: Boolean(candidate.accepted),
-    rejectionReason: candidate.rejectionReason || null,
-    fallbackEligible: Boolean(candidate.fallbackEligible),
-  };
-}
-
-function recordSolveCandidate(ledger, candidate, { requestId = "", endpoint = "" } = {}) {
-  if (!candidate?.result || !candidate.parseSchemaSuccess) return null;
-  const provenance = candidate.provenance || {};
-  candidate.provenance = {
-    operationId: provenance.operationId || `${endpoint}:${requestId}`,
-    requestId: provenance.requestId || requestId,
-    solveId: provenance.solveId || requestId,
-    candidateId: provenance.candidateId || `${requestId}:${ledger.length + 1}`,
-    model: provenance.model || candidate.result?._omniOpenAiDiagnostics?.model || null,
-    solveStage: provenance.solveStage || candidate.source || null,
-    originatingProblemHash: provenance.originatingProblemHash || hashDebugText(candidate.result.originalProblem || candidate.result.problemLatex || ""),
-  };
-  Object.defineProperty(candidate.result, "_omniCandidateProvenance", {
-    enumerable: false,
-    configurable: true,
-    value: { ...candidate.provenance },
-  });
-  ledger.push(candidate);
-  const diagnostic = candidateDiagnostic(candidate);
-  logSolveDebug("solve_candidate_recorded", { requestId, endpoint, provenance: candidate.provenance, ...diagnostic });
-  logSolveDebug(candidate.accepted ? "solve_candidate_accepted" : "solve_candidate_rejected", {
-    requestId,
-    endpoint,
-    ...diagnostic,
-  });
-  logSolveDebug("solve_candidate_fallback_eligibility", {
-    requestId,
-    endpoint,
-    source: candidate.source,
-    fallbackEligible: candidate.fallbackEligible,
-    reason: candidate.fallbackEligible ? "safe_fallback_floor_passed" : candidate.rejectionReason,
-    qualityIssueCodes: candidate.qualityIssueCodes,
-  });
-  return candidate;
-}
-
-function selectSafeFallbackAfterFailure(ledger, error, {
-  requestId = "",
-  endpoint = "",
-  failedStage = "",
-} = {}) {
-  const permittedError = canUseSafeFallbackForError(error);
-  const selected = permittedError ? selectBestSafeSolveCandidate(ledger) : null;
-  if (selected) {
-    logSolveDebug("solve_fallback_selected", {
-      requestId,
-      endpoint,
-      laterFailedStage: failedStage,
-      laterErrorCode: error?.code || null,
-      selectedCandidateSource: selected.source,
-      qualityIssueCodes: selected.qualityIssueCodes,
-    });
-    return selected;
-  }
-  logSolveDebug("solve_fallback_rejected", {
-    requestId,
-    endpoint,
-    laterFailedStage: failedStage,
-    laterErrorCode: error?.code || null,
-    reason: permittedError ? "no_safe_candidate" : "later_error_category_not_permitted",
-    candidateSources: ledger.map((candidate) => candidate.source),
-  });
-  return null;
-}
-
-function attachDegradedFallbackMetadata(result, metadata = {}) {
-  if (!result || typeof result !== "object") return result;
-  Object.defineProperty(result, "_omniDegradedFallback", {
-    enumerable: false,
-    configurable: true,
-    value: {
-      selected: true,
-      source: metadata.source || null,
-      failedLaterStage: metadata.failedLaterStage || null,
-      laterErrorCode: metadata.laterErrorCode || null,
-    },
-  });
-  return result;
-}
-
-function attachPresentationDegradedMetadata(result, metadata = {}) {
-  if (!result || typeof result !== "object") return result;
-  Object.defineProperty(result, "_omniPresentationDegraded", {
-    enumerable: false,
-    configurable: true,
-    value: {
-      accepted: true,
-      source: metadata.source || null,
-      candidateId: metadata.candidateId || null,
-      issueCodes: normalizeRepairIssueList(metadata.issueCodes || []),
-    },
-  });
-  return result;
 }
 
 function claimQualityRepairAttempt(attemptedCandidateIds, result) {
@@ -1706,15 +1572,6 @@ function publicValidationSummary(solutionIssues = []) {
   return "The generated solution failed mathematical validation.";
 }
 
-function buildCanonicalSolvePromptProblem({ displayText = "", mathInput = "" } = {}) {
-  const display = typeof displayText === "string" ? displayText.trim() : "";
-  const math = typeof mathInput === "string" ? mathInput.trim() : "";
-  if (display && math && display !== math) {
-    return `Human-readable problem:\n${display}\n\nCanonical mathematical form:\n${math}`;
-  }
-  return math || display;
-}
-
 function requireTextProblem(value) {
   if (typeof value !== "string" || !value.trim()) {
     throw createBadInputError("Problem input is required.");
@@ -1766,17 +1623,6 @@ function parseFollowupHistory(value) {
   }).filter((item) => item.text.trim());
 }
 
-function safeCompactJson(value, maxChars = MAX_FOLLOWUP_CONTEXT_CHARS) {
-  try {
-    return JSON.stringify(value, (key, item) => {
-      if (key === "_aiUsage" || key === "runtime" || key === "usage") return undefined;
-      return item;
-    }).slice(0, maxChars);
-  } catch {
-    return String(value || "").slice(0, maxChars);
-  }
-}
-
 function requireFollowupQuestion(value) {
   if (typeof value !== "string" || !value.trim()) {
     throw createBadInputError("Follow-up question is required.");
@@ -1790,89 +1636,10 @@ function requireFollowupQuestion(value) {
   return value.trim();
 }
 
-function buildFollowupPrompt(body, history) {
-  const problem = String(body.problem || body.solution?.originalProblem || body.solution?.problem || body.solution?.expression || "").slice(0, MAX_PROBLEM_CHARS);
-  const question = requireFollowupQuestion(body.question);
-  const pinnedExplanation = String(body.pinnedExplanation || "").slice(0, 2400);
-  const selectedText = String(body.selectedText || "").slice(0, 1600);
-  const stepTitle = String(body.stepTitle || "").slice(0, 300);
-  const selectedTokens = Array.isArray(body.selectedTokens) ? body.selectedTokens.slice(0, 40) : [];
-
-  return `You are OmniMath, a careful AI math tutor. Answer a follow-up question about one pinned solution selection.
-
-Rules:
-- Use the provided problem and solution context.
-- Answer only the user's follow-up question.
-- Be concise, mathematically correct, and helpful.
-- Use LaTeX for formulas when useful.
-- Do not invent missing solution steps. Say what context is missing if necessary.
-
-Original problem:
-${problem}
-
-Current step:
-${stepTitle || body.stepId || "Unknown step"}
-
-Selected text:
-${selectedText || "No selected text provided."}
-
-Pinned explanation:
-${pinnedExplanation || "No pinned explanation provided."}
-
-Selected tokens:
-${safeCompactJson(selectedTokens, 5000)}
-
-Full solution context:
-${safeCompactJson(body.solution || {}, MAX_FOLLOWUP_CONTEXT_CHARS)}
-
-Conversation history:
-${history.map((item) => `${item.role}: ${item.text}`).join("\n") || "None"}
-
-User question:
-${question}`;
-}
-
 function isLocalPersistenceError(error) {
   return error?.code === "USAGE_STORE_UNAVAILABLE"
     || error?.code === "DATABASE_UNAVAILABLE"
     || error?.code === "SERVER_CONFIG_ERROR";
-}
-
-function createFollowupFallbackAnswer(body, history = [], reason = "local context") {
-  const question = requireFollowupQuestion(body.question);
-  const selectedText = String(body.selectedText || "").trim();
-  const pinnedExplanation = String(body.pinnedExplanation || "").trim();
-  const stepTitle = String(body.stepTitle || body.stepId || "").trim();
-  const currentStep = body.currentStep?.math || body.currentStep?.latex || body.stepLatex || "";
-  const selectedTokens = Array.isArray(body.selectedTokens) ? body.selectedTokens : [];
-  const tokenContext = selectedTokens
-    .slice(0, 6)
-    .map((token) => token?.display || token?.latex || token?.text)
-    .filter(Boolean)
-    .join(", ");
-  const lowerQuestion = question.toLowerCase();
-
-  const contextLines = [
-    selectedText ? `the pinned selection \`${selectedText}\`` : "the pinned selection",
-    stepTitle ? `in "${stepTitle}"` : "",
-    currentStep ? `from the step \`${currentStep}\`` : "",
-  ].filter(Boolean).join(" ");
-
-  if (/where did .*3|where.*3.*from|3 from/.test(lowerQuestion)) {
-    const source = selectedText && /3/.test(selectedText)
-      ? `The 3 is part of the pinned expression \`${selectedText}\`.`
-      : currentStep && /3/.test(currentStep)
-      ? `The 3 appears in the current step \`${currentStep}\`.`
-      : "The available pinned context does not show a separate source for 3.";
-    return `${source} ${pinnedExplanation ? `From the pinned explanation: ${pinnedExplanation}` : "Use the surrounding step and selected expression to trace it back to the prior simplification."}`;
-  }
-
-  return [
-    `Using the saved pinned context (${reason}), I can answer from ${contextLines || "the current pinned math context"}.`,
-    pinnedExplanation ? `Pinned explanation: ${pinnedExplanation}` : "",
-    tokenContext ? `Related selected tokens: ${tokenContext}.` : "",
-    history.length > 0 ? "I kept the previous chat turns in context for this answer." : "",
-  ].filter(Boolean).join(" ");
 }
 
 function createLocalFollowupIdentity() {
@@ -2174,7 +1941,7 @@ function createOpenAiRequiredError() {
   });
 }
 
-function logExplanationSource({ source, kind, endpoint, identity, prompt = "", aiUsage = null }) {
+function logExplanationSource({ source, kind, endpoint, identity, prompt = "", aiUsage = null, model = "" }) {
   const normalizedUsage = normalizeOpenAiUsage(aiUsage, estimateTokens(prompt));
   const tokenUsage = aiUsage
     ? normalizedUsage
@@ -2190,7 +1957,7 @@ function logExplanationSource({ source, kind, endpoint, identity, prompt = "", a
     endpoint,
     source,
     kind,
-    model: getOpenAiModel(),
+    model: model || getOpenAiModel(),
     tokens: tokenUsage,
     estimatedCostUsd: Number(estimateOpenAiCost(aiUsage).toFixed(6)),
   });
@@ -2230,11 +1997,20 @@ async function getUsageForKind(req, kind, identity) {
   return snapshot.usage?.[kind];
 }
 
-function buildResponse(result, { usage, saved, source, demoMode, canonicalProblem = null }) {
+function buildResponse(result, {
+  usage,
+  saved,
+  saveStatus = null,
+  source,
+  demoMode,
+  canonicalProblem = null,
+  requestId = null,
+}) {
   const degradedFallback = result?._omniDegradedFallback || null;
   const presentationDegraded = result?._omniPresentationDegraded || null;
   return {
     ...result,
+    ...(requestId ? { requestId } : {}),
     canonicalProblem: canonicalProblem || result.canonicalProblem || null,
     canonicalInputHash: canonicalProblem?.hash || result.canonicalProblem?.hash || null,
     usage,
@@ -2242,6 +2018,7 @@ function buildResponse(result, { usage, saved, source, demoMode, canonicalProble
     runtime: {
       source,
       demoMode,
+      ...(saveStatus ? { saveStatus } : {}),
       saveWarning: saved?.warning || null,
       ...(degradedFallback?.selected ? {
         degradedFallback: true,
@@ -2396,6 +2173,7 @@ async function saveExplanationBestEffort(req, details) {
     const saved = await saveExplanationForRequest(req, details);
     if (!saved && requestHasExpiredBearerToken(req)) {
       console.warn("[omnimath:save-auth-warning]", {
+        ...getSolveDiagnosticContext(),
         operation: "saveExplanationBestEffort",
         reason: "token-expired",
       });
@@ -2405,6 +2183,7 @@ async function saveExplanationBestEffort(req, details) {
   } catch (error) {
     if (isClerkTokenExpiredError(error) || requestHasExpiredBearerToken(req)) {
       console.warn("[omnimath:save-auth-warning]", {
+        ...getSolveDiagnosticContext(),
         operation: "saveExplanationBestEffort",
         reason: "token-expired",
         code: error.code,
@@ -2413,6 +2192,7 @@ async function saveExplanationBestEffort(req, details) {
       return createExpiredSaveWarning();
     }
     console.warn("[omnimath:save-warning]", {
+      ...getSolveDiagnosticContext(),
       operation: "saveExplanationBestEffort",
       code: error.code,
       message: error.message,
@@ -2481,16 +2261,41 @@ export async function handleExplainRequest(req, res) {
 
   await runHandler(res, async () => {
     const startedAt = Date.now();
-    const identity = await requireRequestIdentity(req, "explain");
+    const solveContext = canonicalSolveRequestContexts.get(req) || {};
+    const endpoint = solveContext.endpoint || "/api/explain";
+    const inputSource = solveContext.inputSource || "typed";
+    const usageKind = solveContext.usageKind || "explanation";
+    const persistenceSource = solveContext.persistenceSource || "text";
+    const sourceMetadata = solveContext.sourceMetadata || null;
+    const identity = await requireRequestIdentity(req, solveContext.identityOperation || "explain");
     throttleRequest(req, identity, "ai");
     assertAiEnabled();
     const body = await readJson(req);
     requireObject(body);
     const requestId = optionalShortText(body.debugRequestId || body.clientRequestId || "", "Debug request id", 120)
       || createDebugRequestId("solve-text");
-    const canonicalProblem = normalizeCanonicalProblem(body, { source: "typed" });
-    const problem = requireTextProblem(getCanonicalSolverInput(canonicalProblem));
-    logCanonicalProblem("solve request", canonicalProblem, { endpoint: "/api/explain" });
+    const requestedProblemInput = body.problemInput && typeof body.problemInput === "object"
+      ? body.problemInput
+      : {};
+    const canonicalProblem = normalizeCanonicalProblem(body, {
+      canonicalText: requestedProblemInput.problemText || "",
+      source: inputSource,
+      forceSource: inputSource,
+    });
+    const problemInput = {
+      problemText: requireTextProblem(getCanonicalSolverInput(canonicalProblem, requestedProblemInput.problemText)),
+      source: inputSource,
+      sourceMetadata,
+    };
+    const problem = problemInput.problemText;
+    logCanonicalProblem("solve request", canonicalProblem, { endpoint, inputSource });
+    logSolveDebug("shared_solver_entry", {
+      requestId,
+      endpoint,
+      inputSource,
+      canonicalInputHash: canonicalProblem.hash,
+      normalizedProblemHash: hashDebugText(problem),
+    });
     logSolutionStateDebug("server explain received", {
       receivedProblemText: problem,
       bodyKeys: Object.keys(body),
@@ -2504,21 +2309,35 @@ export async function handleExplainRequest(req, res) {
       problem,
       reference,
       depth,
-      type: "text",
+      type: "canonical-solve",
     });
-    const cached = getCachedExplanation(cacheKey);
-    if (cached) {
-      const usage = await getUsageForKind(req, "explanation", identity);
+    const cachedBase = getCachedExplanation(cacheKey);
+    if (cachedBase) {
+      const cached = structuredClone(cachedBase);
+      // Cached local-rule teaching cards use a prose `finalAnswer` and do not
+      // claim a provider-style `finalAnswerLatex`. Preserve the same
+      // structural contract used on the initial local-rule path.
+      withSolveDiagnosticContext({ requestId, endpoint }, () => finalizeSolveCandidate(cached, {
+        problem,
+        inputSource,
+        requireFinalAnswer: Boolean(String(cached.finalAnswerLatex || "").trim()),
+      }));
+      const usage = await getUsageForKind(req, usageKind, identity);
+      cached.canonicalProblem = canonicalProblem;
+      cached.canonicalInputHash = canonicalProblem.hash;
+      cached.canonicalContentHash = canonicalProblem.contentHash;
+      if (sourceMetadata) Object.assign(cached, sourceMetadata);
       logExplanationSource({
         source: "cached",
-        kind: "text",
-        endpoint: "/api/explain",
+        kind: persistenceSource,
+        endpoint,
         identity,
+        model: cached._aiUsage?._omni_model_usage?.at(-1)?.model || getOpenAiModelForPath("canonicalSolve"),
       });
       sendJson(
         res,
         200,
-        buildResponse(cached, { usage, source: "cached", demoMode: !isOpenAiConfigured(), canonicalProblem }),
+        buildResponse(cached, { usage, source: "cached", demoMode: !isOpenAiConfigured(), canonicalProblem, requestId }),
         createUsageHeaders(usage)
       );
       return;
@@ -2526,15 +2345,19 @@ export async function handleExplainRequest(req, res) {
 
     const prompt = buildMathExplanationPrompt({ problem, history });
     const promptHash = hashDebugText(prompt);
+    const solveTimeoutMs = getSolveTotalTimeoutMs();
+    const solveDeadlineAt = Date.now() + solveTimeoutMs;
     const initialRouting = resolveInitialSolveRouting({
       problem,
-      canonicalLatex: canonicalProblem.canonicalLatex || "",
+      // Routing consumes the same canonical solver text as the prompt. OCR-only
+      // display LaTeX remains provenance and must not create a second policy.
+      canonicalLatex: problem,
     });
     const solverSampling = getOpenAiSamplingForPath(initialRouting.selectedInitialModelRole);
-    logInitialSolveRouting({ requestId, endpoint: "/api/explain", routing: initialRouting });
+    logInitialSolveRouting({ requestId, endpoint, routing: initialRouting });
     logSolveDebug("request_received", {
       requestId,
-      endpoint: "/api/explain",
+      endpoint,
       normalizedProblem: problem,
       normalizedProblemHash: hashDebugText(problem),
       promptHash,
@@ -2546,18 +2369,19 @@ export async function handleExplainRequest(req, res) {
       topPSource: solverSampling.top_p === undefined ? "provider_default" : "payload",
       cacheKey,
       historyCount: history.length,
+      solveTimeoutMs,
     });
     logSolutionStateDebug("server prompt problem", {
       promptProblemText: problem,
       promptChars: prompt.length,
     });
     const initialMaxOutputTokens = getSolveOutputTokenBudget({
-      modelPath: initialRouting.selectedInitialModelRole,
+      modelPath: "canonicalSolve",
       debugContext: { initialRouting },
     });
     const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: initialMaxOutputTokens });
     const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: initialMaxOutputTokens }));
-    const { duplicate, value } = await runDeduplicatedRequest(cacheKey, async () => {
+    const { duplicate, value } = await runDeduplicatedRequest(cacheKey, () => withSolveDiagnosticContext({ requestId, endpoint }, async () => {
       let result = createLocalRuleExplanation(problem, { source: "text" });
       let source = "local rule";
       const willCallOpenAi = !result && isOpenAiConfigured();
@@ -2565,7 +2389,7 @@ export async function handleExplainRequest(req, res) {
         ? await checkAndReserveUsage({
             req,
             identity,
-            kind: "explanation",
+            kind: usageKind,
             estimatedTokens,
             estimatedCostMicros,
           })
@@ -2573,7 +2397,7 @@ export async function handleExplainRequest(req, res) {
       if (!willCallOpenAi && !isProductionRuntime()) {
         console.info("[omnimath:usage]", {
           event: "allowed",
-          route: "/api/explain",
+          route: endpoint,
           reason: result ? "local-rule-no-ai-reservation" : "no-openai-configured-no-reservation",
           subject: identity.subject,
           tier: identity.tier,
@@ -2587,7 +2411,14 @@ export async function handleExplainRequest(req, res) {
       try {
         if (result) {
           try {
-            acceptStructurallyParsedSolve(result);
+            // Local rule explanations intentionally end in a prose teaching
+            // statement (`finalAnswer`) rather than a solver-style
+            // `finalAnswerLatex`. Keep the structural step guard, while not
+            // requiring the provider-only final-answer contract for this
+            // deterministic, non-AI path.
+            acceptStructurallyParsedSolve(result, {
+              requireFinalAnswer: source !== "local rule",
+            });
           } catch (error) {
             if (!isOpenAiConfigured()) throw error;
             result = null;
@@ -2602,17 +2433,19 @@ export async function handleExplainRequest(req, res) {
               result = await createMathExplanation({
                 prompt,
                 originalProblem: problem,
-                modelPath: initialRouting.selectedInitialModelRole,
+                modelPath: "canonicalSolve",
                 debugContext: {
                   requestId,
-                  endpoint: "/api/explain",
+                  endpoint,
+                  inputSource,
                   normalizedProblem: problem,
                   promptHash,
+                  solveDeadlineAt,
                   initialRouting,
                 },
                 onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
                   requestId,
-                  endpoint: "/api/explain",
+                  endpoint,
                   prompt,
                   promptHash,
                   problem,
@@ -2654,7 +2487,7 @@ export async function handleExplainRequest(req, res) {
                 result,
                 stage: "initial",
                 requestId,
-                endpoint: "/api/explain",
+                endpoint,
                 prompt,
                 promptHash,
                 problem,
@@ -2669,7 +2502,7 @@ export async function handleExplainRequest(req, res) {
               });
               logSolveDebug("solve_failure_classification", {
                 requestId,
-                endpoint: "/api/explain",
+                endpoint,
                 ...failureClassification,
                 qualityRepairAttempted: failureClassification.category === "parsed_candidate_failure",
                 compactRetryAttempted: Boolean(firstError?._omniOpenAiDiagnostics?.attemptType?.includes("compact")),
@@ -2686,7 +2519,7 @@ export async function handleExplainRequest(req, res) {
               });
               logSolveDebug("repair_retry", {
                 requestId,
-                endpoint: "/api/explain",
+                endpoint,
                 retryCount: 1,
                 failedRules: firstError.solutionIssues || [firstError.code || firstError.message].filter(Boolean),
                 repairPromptHash: hashDebugText(repairPrompt),
@@ -2698,15 +2531,17 @@ export async function handleExplainRequest(req, res) {
                   originalProblem: problem,
                   debugContext: {
                     requestId,
-                    endpoint: "/api/explain",
+                    endpoint,
+                    inputSource,
                     normalizedProblem: problem,
                     promptHash: repairPromptHash,
+                    solveDeadlineAt,
                     retryPurpose: "quality-repair",
                     initialRouting,
                   },
                   onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
                     requestId,
-                    endpoint: "/api/explain",
+                    endpoint,
                     prompt: repairPrompt,
                     promptHash: repairPromptHash,
                     problem,
@@ -2730,7 +2565,7 @@ export async function handleExplainRequest(req, res) {
                   result,
                   stage: "repair",
                   requestId,
-                  endpoint: "/api/explain",
+                  endpoint,
                   prompt: repairPrompt,
                   promptHash: repairPromptHash,
                   problem,
@@ -2749,8 +2584,54 @@ export async function handleExplainRequest(req, res) {
             }
           }
         }
-        acceptStructurallyParsedSolve(result);
-        result = annotateMathExplanation(result);
+        finalizeSolveCandidate(result, {
+          problem,
+          inputSource,
+          requireFinalAnswer: source !== "local rule",
+        });
+        const acceptedCandidate = result;
+        const acceptedDiagnostics = acceptedCandidate?._omniOpenAiDiagnostics || {};
+        const acceptedNormalizationActions = acceptedCandidate?._omniNormalizationActions || [];
+        const acceptedRecoverableFindings = acceptedCandidate?._omniRecoverableFindings || [];
+        const acceptedWarnings = acceptedCandidate?._omniWarnings || [];
+        try {
+          const annotated = annotateMathExplanation(acceptedCandidate);
+          acceptStructurallyParsedSolve(annotated, {
+            stage: "post_annotation",
+            requireFinalAnswer: source !== "local rule",
+          });
+          result = annotated;
+        } catch (annotationError) {
+          // The provider candidate was already rendered and structurally
+          // accepted. If a later semantic decoration fails, keep that usable
+          // candidate with its original step, anchor, and follow-up identity.
+          if (source === "local rule") throw annotationError;
+          acceptStructurallyParsedSolve(acceptedCandidate, {
+            stage: "pre_annotation_fallback",
+          });
+          console.warn("[omnimath:solve-annotation-fallback]", {
+            requestId,
+            issues: annotationError?.solutionIssues || [annotationError?.code || "annotation_error"],
+          });
+          result = acceptedCandidate;
+        }
+        const acceptedInspection = inspectSolveCandidateStructure(result, { stage: "selected" });
+        logSolveCandidateOutcome({
+          requestId,
+          attemptId: `${requestId}:${source === "live AI repair call" ? "repair" : "initial"}:accepted`,
+          candidateId: acceptedDiagnostics.candidateId || `${requestId}:selected`,
+          solveMode: acceptedDiagnostics.solveMode || (source === "local rule" ? "local" : "solver"),
+          model: acceptedDiagnostics.model || result?._aiUsage?._omni_model_usage?.at(-1)?.model || null,
+          providerCompletionStatus: source === "local rule" ? "not_applicable" : "completed",
+          truncationState: acceptedDiagnostics.responseTruncated ? "truncated" : "complete",
+          normalizationActions: acceptedNormalizationActions,
+          fatalFindings: [],
+          recoverableFindings: acceptedRecoverableFindings,
+          warnings: [...acceptedWarnings, ...acceptedInspection.warnings],
+          previousUsableCandidate: false,
+          selectedForUi: true,
+          outcome: "selected_for_ui",
+        });
         attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
         logSolutionStateDebug("server model response", {
           problemText: problem,
@@ -2765,8 +2646,17 @@ export async function handleExplainRequest(req, res) {
               providerCalls: result._aiCallCount || 0,
               settlementReason: "success",
             })
-          : await getUsageForKind(req, "explanation", identity);
+          : await getUsageForKind(req, usageKind, identity);
       } catch (error) {
+        logSolveDebug("candidate_boundary_failure", {
+          requestId,
+          endpoint,
+          stage: error?.solutionStage || error?.responseFailureType || null,
+          solutionIssues: Array.isArray(error?.solutionIssues) ? error.solutionIssues : [],
+          solutionDiagnostics: Array.isArray(error?.solutionDiagnostics) ? error.solutionDiagnostics : [],
+          responseFailureType: error?.responseFailureType || null,
+          code: error?.code || null,
+        });
         try {
           usage = await settleFailureUsageOrRelease(reservation, error, result);
           if (usage) error.usage = usage;
@@ -2776,16 +2666,18 @@ export async function handleExplainRequest(req, res) {
         throw error;
       }
 
-      setCachedExplanation(cacheKey, result);
+      // Cache only the source-neutral solver result. OCR/image provenance is
+      // applied to the response copy below and must never leak into a typed hit.
+      setCachedExplanation(cacheKey, structuredClone(result));
       logAcceptedSolvePayload({
         requestId,
-        endpoint: "/api/explain",
+        endpoint,
         problem,
         result,
         source,
       });
       logSolveTiming({
-        endpoint: "/api/explain",
+        endpoint,
         startedAt,
         source,
         identity,
@@ -2795,33 +2687,73 @@ export async function handleExplainRequest(req, res) {
       });
       logExplanationSource({
         source,
-        kind: "text",
-        endpoint: "/api/explain",
+        kind: persistenceSource,
+        endpoint,
         identity,
         prompt,
         aiUsage: result._aiUsage,
+        model: result._aiUsage?._omni_model_usage?.at(-1)?.model || initialRouting.selectedInitialModel,
       });
       result.canonicalProblem = canonicalProblem;
-      const saved = await saveExplanationBestEffort(req, { source: "text", problem, result, identity });
-      return { result, usage, saved, source };
-    });
+      result.canonicalInputHash = canonicalProblem.hash;
+      result.canonicalContentHash = canonicalProblem.contentHash;
+      if (sourceMetadata) Object.assign(result, structuredClone(sourceMetadata));
+      // Persistence is deliberately outside the live-answer critical path.
+      // A database outage or a slow connection must not turn a successful
+      // provider result into a failed/late solve in the browser. Keep the
+      // promise observed so a rejected background save cannot become an
+      // unhandled rejection; the helper itself emits save diagnostics.
+      const savePromise = saveExplanationBestEffort(req, { source: persistenceSource, problem, result, identity });
+      savePromise.then((backgroundSaved) => {
+        if (isSolveDebugEnabled()) {
+          console.info("[omnimath:save-background-settled]", {
+            requestId,
+            endpoint,
+            status: backgroundSaved?.id ? "saved" : backgroundSaved?.warning ? "warning" : "not_saved",
+            savedExplanationId: backgroundSaved?.id || null,
+          });
+        }
+      }).catch((backgroundError) => {
+        // saveExplanationBestEffort currently catches its own errors. Keep a
+        // final guard here for future persistence implementations.
+        console.warn("[omnimath:save-warning]", {
+          operation: "saveExplanationBestEffort.background",
+          code: backgroundError?.code || null,
+          message: backgroundError?.message || "Background save failed",
+        });
+      });
+      const immediateSaveWarning = requestHasExpiredBearerToken(req)
+        ? createExpiredSaveWarning()
+        : null;
+      return {
+        result,
+        usage,
+        saved: immediateSaveWarning,
+        saveStatus: immediateSaveWarning ? "not_saved" : "pending",
+        source,
+      };
+    }));
 
-    const { result, usage, saved, source } = value;
+    const { result, usage, saved, saveStatus, source } = value;
     sendJson(
       res,
       200,
       buildResponse(result, {
         usage,
         saved,
+        saveStatus,
         source: duplicate ? `${source} (deduplicated)` : source,
         demoMode: !isOpenAiConfigured(),
         canonicalProblem,
+        requestId,
       }),
       createUsageHeaders(usage)
     );
     logSolveDebug("http_response", {
       requestId,
-      endpoint: "/api/explain",
+      endpoint,
+      inputSource,
+      canonicalInputHash: canonicalProblem.hash,
       statusCode: 200,
       source,
       finalUiState: "success-response-sent",
@@ -2926,12 +2858,19 @@ export async function handleExtractImageProblemRequest(req, res) {
         });
         extraction.extractionValidation.status = extraction.extractionValidation.status === "danger" ? "danger" : "warning";
       }
-      logExtractionReviewDebug(extraction.extractionValidation);
+      logExtractionReviewDebug(extraction.extractionValidation, {
+        requestId: fields.debugRequestId || fields.clientRequestId || null,
+        imageHash,
+      });
       extraction.confidence = extraction.extractionValidation.confidence;
       extraction.ocrConfidence = extraction.extractionValidation.ocrConfidence;
       extraction.mathIntegrityScore = extraction.extractionValidation.mathIntegrityScore;
       extraction.confidenceTier = extraction.extractionValidation.tier;
       extraction.issues = extraction.extractionValidation.issues;
+      extraction.ocrSolveDecision = assessOcrSolveDecision({
+        solveDecision: "direct",
+        extractionValidation: extraction.extractionValidation,
+      });
       extraction.imageSource = {
         imageHash,
         filename: image.filename || null,
@@ -2993,916 +2932,130 @@ export async function handleSolveExtractedProblemRequest(req, res) {
   }
 
   await runHandler(res, async () => {
-    const startedAt = Date.now();
-    const identity = await requireRequestIdentity(req, "solve-extracted-problem");
-    throttleRequest(req, identity, "ai");
-    assertAiEnabled();
     const body = requireObject(await readJson(req));
+    const extraction = requireObject(body.extraction || {}, "Extraction");
+    const solveDecision = ["direct", "confirmed", "edited"].includes(body.solveDecision)
+      ? body.solveDecision
+      : "direct";
+    const reviewAction = body.reviewAction && typeof body.reviewAction === "object"
+      ? body.reviewAction
+      : null;
     const requestId = optionalShortText(body.debugRequestId || body.clientRequestId || "", "Debug request id", 120)
       || createDebugRequestId("solve-extracted");
-    const requestBodyChars = JSON.stringify(body).length;
-    const extraction = requireObject(body.extraction || {}, "Extraction");
+    const extractionValidation = extraction.extractionValidation || {
+      confidence: Number(extraction.confidence ?? extraction.imageSource?.confidence ?? 0),
+      ocrConfidence: Number(extraction.ocrConfidence ?? extraction.imageSource?.ocrConfidence ?? 0),
+      mathIntegrityScore: Number(extraction.mathIntegrityScore ?? extraction.imageSource?.mathIntegrityScore ?? extraction.confidence ?? 0),
+      tier: extraction.confidenceTier || extraction.imageSource?.confidenceTier || "",
+      issues: Array.isArray(extraction.issues) ? extraction.issues : extraction.imageSource?.issues || [],
+    };
+    const trustedOcrSource = solveDecision === "direct" ? "ocr-direct" : "ocr-reviewed";
     const canonicalProblem = normalizeCanonicalProblem(body, {
       canonicalText: body.problem || body.problemText || body.extractedProblemText || extraction.normalizedText || extraction.validationText || "",
       canonicalLatex: body.problemLatex || body.extractedProblemLatex || extraction.extractedProblemLatex || "",
-      source: extraction?.canonicalProblem?.source || (body.solveDecision === "direct" ? "ocr-direct" : "ocr-reviewed"),
+      source: trustedOcrSource,
+      forceSource: trustedOcrSource,
       extractionWarnings: extraction.issues || extraction.extractionValidation?.issues || [],
       extractionConfidence: extraction.confidence ?? extraction.extractionValidation?.confidence,
     });
-    const canonicalMathInput = requireTextProblem(getCanonicalMathInput(canonicalProblem));
-    const reviewedProblemText = optionalShortText(body.problemText || body.extractedProblemText || "", "Problem text", MAX_PROBLEM_CHARS);
-    const canonicalDisplayText = getCanonicalDisplayText(canonicalProblem, reviewedProblemText);
-    const canonicalMathInputSource = getCanonicalMathInputSource(canonicalProblem);
-    const canonicalDisplaySource = getCanonicalDisplayTextSource(canonicalProblem, reviewedProblemText);
-    const problemLatex = canonicalMathInput;
-    const problemText = reviewedProblemText;
-    const solveDecision = ["direct", "anyway", "edited"].includes(body.solveDecision)
-      ? body.solveDecision
-      : "direct";
-    logCanonicalProblem("solve request", canonicalProblem, {
-      endpoint: "/api/solve-extracted-problem",
-      solveDecision,
-      canonicalDisplaySource,
-      canonicalMathInputSource,
-    });
-    const promptProblem = buildCanonicalSolvePromptProblem({
-      displayText: canonicalDisplayText,
-      mathInput: canonicalMathInput,
-    });
-    const prompt = buildMathExplanationPrompt({ problem: promptProblem });
-    const promptHash = hashDebugText(prompt);
-    logImageUploadDebug("solve-extracted-input", {
-      problemChars: problemLatex.length,
-      problemPreview: problemLatex.slice(0, 240),
-      problemTextChars: problemText.length,
-      problemTextPreview: problemText.slice(0, 240),
-      canonicalTextChars: (canonicalProblem.canonicalText || "").length,
-      canonicalLatexChars: (canonicalProblem.canonicalLatex || "").length,
-      canonicalDisplaySource,
-      canonicalMathInputSource,
-      promptChars: prompt.length,
-      requestBodyChars,
-      submittedProblemSource: extraction.submittedProblemSource || "",
-      hasPreviewMath: Array.isArray(extraction.previewMath) && extraction.previewMath.length > 0,
-    });
-    traceMathStage("Prompt construction", problemLatex, prompt, "insert confirmed image LaTeX into solve prompt");
-    const cacheKey = createExplanationCacheKey({
-      userId: identity.clerkUserId,
-      problem: problemLatex,
-      reference: [
-        "solve-extracted",
-        extraction.imageSource?.imageHash || extraction.imageHash || "",
+    let ocrDecision;
+    try {
+      ocrDecision = assertOcrSolveAllowed({
         solveDecision,
-      ].join(":"),
-      depth: "intermediate",
-      type: "image-confirmed",
-    });
-    const initialRouting = resolveInitialSolveRouting({
-      problem: canonicalDisplayText || problemText,
-      canonicalLatex: canonicalProblem.canonicalLatex || problemLatex,
-      ocrConfidence: extraction.ocrConfidence
-        ?? extraction.extractionValidation?.ocrConfidence
-        ?? canonicalProblem.extractionConfidence,
-    });
-    const initialMaxOutputTokens = getSolveOutputTokenBudget({
-      modelPath: initialRouting.selectedInitialModelRole,
-      debugContext: { initialRouting },
-    });
-    const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: initialMaxOutputTokens });
-    const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: initialMaxOutputTokens }));
-    const solverSampling = getOpenAiSamplingForPath(initialRouting.selectedInitialModelRole);
-    logInitialSolveRouting({ requestId, endpoint: "/api/solve-extracted-problem", routing: initialRouting });
-    logSolveDebug("request_received", {
-      requestId,
-      endpoint: "/api/solve-extracted-problem",
-      normalizedExtractedProblem: problemLatex,
-      normalizedProblemHash: hashDebugText(problemLatex),
-      extractedProblemText: problemText,
-      canonicalText: canonicalProblem.canonicalText || "",
-      canonicalLatex: canonicalProblem.canonicalLatex || "",
-      canonicalDisplaySource,
-      canonicalMathInputSource,
-      promptHash,
-      model: initialRouting.selectedInitialModel,
-      ...initialRouting,
-      temperature: solverSampling.temperature ?? null,
-      topP: solverSampling.top_p ?? null,
-      temperatureSource: solverSampling.temperature === undefined ? "provider_default" : "payload",
-      topPSource: solverSampling.top_p === undefined ? "provider_default" : "payload",
-      cacheKey,
+        extractionValidation,
+        reviewAction,
+        canonicalInputHash: canonicalProblem.hash,
+      });
+    } catch (error) {
+      error.omniDebugContext = { requestId, endpoint: "/api/solve-extracted-problem" };
+      logImageUploadDebug("solve-review-required", {
+        requestId,
+        imageHash: extraction.imageSource?.imageHash || extraction.imageHash || null,
+        decision: error.ocrSolveDecision,
+      });
+      throw error;
+    }
+    const acceptedReviewAction = ocrDecision.reviewActionValid ? reviewAction : null;
+    const problem = requireTextProblem(getCanonicalSolverInput(canonicalProblem));
+    const imageSource = {
+      ...(extraction.imageSource || {}),
+      imageHash: extraction.imageSource?.imageHash || extraction.imageHash || null,
+      filename: extraction.imageSource?.filename || null,
+      contentType: extraction.imageSource?.contentType || null,
+      bytes: extraction.imageSource?.bytes || null,
+      rawExtractedText: extraction.rawExtractedText || extraction.extractedProblemText || extraction.imageSource?.rawExtractedText || "",
+      cleanedExtractedText: extraction.extractedProblemText || extraction.imageSource?.cleanedExtractedText || "",
+      rawExtractedLatex: extraction.rawExtractedLatex || extraction.extractedProblemLatex || extraction.imageSource?.rawExtractedLatex || "",
+      rawText: extraction.rawText || extraction.imageSource?.rawText || extraction.rawExtractedText || "",
+      displayText: extraction.displayText || extraction.imageSource?.displayText || problem,
+      normalizedText: extraction.normalizedText || extraction.imageSource?.normalizedText || problem,
+      validationText: extraction.validationText || extraction.imageSource?.validationText || extraction.normalizedText || problem,
+      finalProblemText: problem,
+      finalProblemLatex: canonicalProblem.canonicalLatex || problem,
+      confidence: Number(extractionValidation.confidence ?? 0),
+      ocrConfidence: Number(extractionValidation.ocrConfidence ?? 0),
+      mathIntegrityScore: Number(extractionValidation.mathIntegrityScore ?? extractionValidation.confidence ?? 0),
+      confidenceTier: extractionValidation.tier || "",
+      issues: extractionValidation.issues || [],
       solveDecision,
+      reviewAction: acceptedReviewAction,
+      editedBeforeSolving: solveDecision === "edited",
+      canonicalProblem,
       canonicalInputHash: canonicalProblem.hash,
-    });
+    };
 
-    const { duplicate, value } = await runDeduplicatedRequest(cacheKey, async () => {
-      let result = createLocalRuleExplanation(problemLatex, { source: "image" });
-      let source = "local rule";
-      const willCallOpenAi = isOpenAiConfigured();
-      const { reservation } = await checkAndReserveUsage({
-        req,
-        identity,
-        kind: "image",
-        estimatedTokens: willCallOpenAi ? estimatedTokens : 0,
-        estimatedCostMicros: willCallOpenAi ? estimatedCostMicros : 0,
-      });
-      let usage;
-      let accumulatedAiUsage = null;
-      let accumulatedAiCallCount = 0;
-      const solveMetrics = {
-        initialSuccess: false,
-        repairSuccess: false,
-        escalationAttempted: false,
-        escalationSuccess: false,
-        finalFailure: false,
-      };
-      const candidateLedger = [];
-      let degradedFallbackMetadata = null;
-      let presentationDegradedMetadata = null;
-      const qualityRepairAttemptedCandidateIds = new Set();
-      let lateCompactRetryAvailable = true;
-      let finalGenerationStage = null;
-      const solveTelemetry = createSolveOrchestrationTelemetry({
-        requestId,
-        endpoint: "/api/solve-extracted-problem",
-        startedAt,
-      });
-      const candidateContext = {
-        requestId,
-        endpoint: "/api/solve-extracted-problem",
-        originatingProblemHash: hashDebugText(problemLatex),
-      };
-      const retainCandidate = ({
-        resolvedSource,
-        candidateResult,
-        error = null,
-        accepted = !error,
-      }) => recordSolveCandidate(candidateLedger, {
-        ...classifySolveCandidate({
-          source: resolvedSource,
-          result: candidateResult,
-          error,
-          parseSchemaSuccess: Boolean(candidateResult),
-          accepted,
-        }),
-        provenance: {
-          originatingProblemHash: candidateContext.originatingProblemHash,
-        },
-      }, candidateContext);
-      const adoptSafeFallback = (selected, laterError, failedLaterStage, totalUsage, totalCallCount) => {
-        if (!selected) return false;
-        result = selected.result;
-        accumulatedAiUsage = totalUsage;
-        accumulatedAiCallCount = totalCallCount;
-        degradedFallbackMetadata = {
-          source: selected.source,
-          failedLaterStage,
-          laterErrorCode: laterError?.code || null,
-        };
-        attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-        attachDegradedFallbackMetadata(result, degradedFallbackMetadata);
-        source = `live AI ${selected.source} degraded fallback`;
-        solveMetrics.finalFailure = false;
-        finalGenerationStage = orchestrationGenerationStage(selected.source.replace("-compact", ""), {
-          _omniOpenAiDiagnostics: { compactFallback: selected.source.endsWith("-compact") },
-        });
-        solveTelemetry.recordFallback({
-          source: selected.source,
-          candidateId: selected.provenance?.candidateId || null,
-        });
-        return true;
-      };
-
-      try {
-        if (result) {
-          try {
-            acceptStructurallyParsedSolve(result);
-          } catch (error) {
-            if (!isOpenAiConfigured()) throw error;
-            result = null;
-          }
-        }
-
-        if (!result) {
-          if (!isOpenAiConfigured()) {
-            throw createOpenAiRequiredError();
-          }
-          let initialCandidateResult = null;
-          let initialResolvedSource = "initial";
-          try {
-            result = await createMathExplanation({
-              prompt,
-              originalProblem: problemLatex,
-              modelPath: initialRouting.selectedInitialModelRole,
-              debugContext: {
-                requestId,
-                endpoint: "/api/solve-extracted-problem",
-                normalizedProblem: problemLatex,
-                promptHash,
-                initialRouting,
-              },
-              onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
-                requestId,
-                endpoint: "/api/solve-extracted-problem",
-                prompt,
-                promptHash,
-                problem: problemLatex,
-                problemText,
-                canonicalProblem,
-                canonicalDisplayText,
-                canonicalDisplaySource,
-                canonicalMathInput,
-                canonicalMathInputSource,
-                extraction,
-                repairAttempted: false,
-                qualityRepairAttempted: false,
-              }),
-              orchestrationTelemetry: solveTelemetry,
-            });
-            accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
-            accumulatedAiCallCount += aiCallCountFrom(result);
-            attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-            initialResolvedSource = candidateSource("initial", result);
-            traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM solve response");
-            result = applyLocalRulesToExplanation(result);
-            initialCandidateResult = result;
-            acceptStructurallyParsedSolve(result);
-            const acceptedInitialCandidate = retainCandidate({
-              resolvedSource: initialResolvedSource,
-              candidateResult: initialCandidateResult,
-              accepted: true,
-            });
-            finalGenerationStage = orchestrationGenerationStage("initial", initialCandidateResult);
-            solveTelemetry.recordCandidateSelection({
-              generationStage: finalGenerationStage,
-              outcome: "passed",
-              responseClassification: "clean_candidate",
-              candidateId: acceptedInitialCandidate?.provenance?.candidateId || null,
-              candidateProvenance: acceptedInitialCandidate?.provenance || null,
-            });
-            solveMetrics.initialSuccess = true;
-            source = "live AI call";
-          } catch (firstError) {
-            if ([
-              "AI_SERVICE_UNAVAILABLE",
-              "AI_PROVIDER_RATE_LIMITED",
-              "AI_SERVICE_ERROR",
-              "SERVER_CONFIG_ERROR",
-            ].includes(firstError.code)) {
-              throw firstError;
-            }
-            accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(firstError));
-            accumulatedAiCallCount += aiCallCountFrom(firstError);
-            const initialInvalidResult = result;
-            let initialRejectedCandidate = null;
-            if (isSolutionQualityValidationError(firstError) && initialCandidateResult) {
-              initialRejectedCandidate = retainCandidate({
-                resolvedSource: initialResolvedSource,
-                candidateResult: initialCandidateResult,
-                error: firstError,
-                accepted: false,
-              });
-            }
-            const failureAction = decideSolveFailureAction({
-              candidate: initialRejectedCandidate,
-              source: initialResolvedSource,
-              result: initialCandidateResult,
-              error: firstError,
-              parseSchemaSuccess: Boolean(initialCandidateResult),
-              accepted: false,
-            });
-            if (initialCandidateResult) {
-              solveTelemetry.recordCandidateSelection({
-                generationStage: orchestrationGenerationStage("initial", initialCandidateResult),
-                outcome: "failed",
-                responseClassification: "parsed_candidate_failure",
-                failureClassification: {
-                  ...failureAction.failureClassification,
-                  issueCodes: failureAction.candidate?.qualityIssueCodes || firstError.solutionIssues || [],
-                },
-                candidateId: failureAction.candidate?.provenance?.candidateId || null,
-                candidateProvenance: failureAction.candidate?.provenance || null,
-              });
-            }
-            if (failureAction.action === "response_generation_failure") {
-              await captureSolveQualityFailure({
-                error: firstError,
-                result: null,
-                stage: "initial",
-                requestId,
-                endpoint: "/api/solve-extracted-problem",
-                prompt,
-                promptHash,
-                problem: problemLatex,
-                problemText,
-                canonicalProblem,
-                canonicalDisplayText,
-                canonicalDisplaySource,
-                canonicalMathInput,
-                canonicalMathInputSource,
-                extraction,
-                repairAttempted: false,
-                failureClassification: "response_generation_failure",
-                qualityRepairAttempted: false,
-                compactRetryAttempted: Boolean(firstError?._omniOpenAiDiagnostics?.attemptType?.includes("compact")),
-                freshEscalationAttempted: false,
-              });
-              logSolveDebug("solve_failure_classification", {
-                requestId,
-                endpoint: "/api/solve-extracted-problem",
-                ...failureAction.failureClassification,
-                qualityRepairAttempted: false,
-                compactRetryAttempted: Boolean(firstError?._omniOpenAiDiagnostics?.attemptType?.includes("compact")),
-                freshEscalationAttempted: false,
-                recoveryAction: "hard_failure",
-              });
-              throw firstError;
-            }
-            const repairIssues = firstError.solutionIssues || [firstError.code || firstError.message];
-            const repairFeedback = buildRepairFeedbackDetails(repairIssues, {
-              error: firstError,
-              currentResult: initialInvalidResult,
-            });
-            await captureSolveQualityFailure({
-              error: firstError,
-              result,
-              stage: "initial",
-              requestId,
-              endpoint: "/api/solve-extracted-problem",
-              prompt,
-              promptHash,
-              problem: problemLatex,
-              problemText,
-              canonicalProblem,
-              canonicalDisplayText,
-              canonicalDisplaySource,
-              canonicalMathInput,
-              canonicalMathInputSource,
-              extraction,
-              repairAttempted: failureAction.action !== "accept_presentation_degraded",
-              failureClassification: "parsed_candidate_failure",
-              qualityRepairAttempted: failureAction.action !== "accept_presentation_degraded",
-              compactRetryAttempted: Boolean(firstError?._omniOpenAiDiagnostics?.attemptType?.includes("compact")),
-              freshEscalationAttempted: false,
-              repairFeedback,
-            });
-            logSolveDebug("solve_failure_action", {
-              requestId,
-              endpoint: "/api/solve-extracted-problem",
-              source: initialResolvedSource,
-              action: failureAction.action,
-              qualityIssueCodes: failureAction.candidate.qualityIssueCodes,
-              candidateId: failureAction.candidate.provenance?.candidateId || null,
-              failureClassification: failureAction.failureClassification?.category || "parsed_candidate_failure",
-              qualityRepairAttempted: failureAction.action !== "accept_presentation_degraded",
-              compactRetryAttempted: Boolean(firstError?._omniOpenAiDiagnostics?.attemptType?.includes("compact")),
-              freshEscalationAttempted: false,
-            });
-            if (failureAction.action === "accept_presentation_degraded") {
-              result = initialCandidateResult;
-              presentationDegradedMetadata = {
-                source: initialResolvedSource,
-                candidateId: failureAction.candidate.provenance?.candidateId || null,
-                issueCodes: failureAction.candidate.qualityIssueCodes,
-              };
-              attachPresentationDegradedMetadata(result, presentationDegradedMetadata);
-              solveMetrics.initialSuccess = true;
-              finalGenerationStage = orchestrationGenerationStage("initial", initialCandidateResult);
-              solveTelemetry.recordCandidateSelection({
-                generationStage: finalGenerationStage,
-                outcome: "accepted_presentation_degraded",
-                responseClassification: "parsed_candidate_failure",
-                candidateId: presentationDegradedMetadata.candidateId,
-                candidateProvenance: failureAction.candidate?.provenance || null,
-              });
-              source = `live AI ${initialResolvedSource} presentation-degraded`;
-              logSolveDebug("solve_candidate_accepted_presentation_degraded", {
-                requestId,
-                endpoint: "/api/solve-extracted-problem",
-                source: initialResolvedSource,
-                candidateId: presentationDegradedMetadata.candidateId,
-                qualityIssueCodes: presentationDegradedMetadata.issueCodes,
-              });
-            } else {
-            claimQualityRepairAttempt(qualityRepairAttemptedCandidateIds, initialInvalidResult);
-            const repairPrompt = buildRepairSolvePrompt(prompt, repairIssues, {
-              problem: problemLatex,
-              previousResult: initialInvalidResult,
-              error: firstError,
-            });
-            logSolveDebug("repair_retry", {
-              requestId,
-              endpoint: "/api/solve-extracted-problem",
-              retryCount: 1,
-              failedRules: firstError.solutionIssues || [firstError.code || firstError.message].filter(Boolean),
-              repairPromptHash: hashDebugText(repairPrompt),
-            });
-            const repairPromptHash = hashDebugText(repairPrompt);
-            let repairCandidateResult = null;
-            let repairResolvedSource = "repair";
-            try {
-              result = await createMathExplanation({
-                prompt: repairPrompt,
-                originalProblem: problemLatex,
-                allowCompactRetry: lateCompactRetryAvailable,
-                debugContext: {
-                  requestId,
-                  endpoint: "/api/solve-extracted-problem",
-                  normalizedProblem: problemLatex,
-                  promptHash: repairPromptHash,
-                  retryPurpose: "quality-repair",
-                  initialRouting,
-                },
-                onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
-                  requestId,
-                  endpoint: "/api/solve-extracted-problem",
-                  prompt: repairPrompt,
-                  promptHash: repairPromptHash,
-                  problem: problemLatex,
-                  problemText,
-                  canonicalProblem,
-                  canonicalDisplayText,
-                  canonicalDisplaySource,
-                  canonicalMathInput,
-                  canonicalMathInputSource,
-                  extraction,
-                  repairAttempted: true,
-                }),
-                orchestrationTelemetry: solveTelemetry,
-              });
-              if (result?._omniOpenAiDiagnostics?.compactFallback) {
-                lateCompactRetryAvailable = false;
-              }
-              accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
-              accumulatedAiCallCount += aiCallCountFrom(result);
-              attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-              repairResolvedSource = candidateSource("repair", result);
-              traceMathStage("Explanation generation", problemLatex, result.expression || result.problem || "", "LLM repair solve response");
-              result = applyLocalRulesToExplanation(result);
-              repairCandidateResult = result;
-              acceptStructurallyParsedSolve(result);
-              const acceptedRepairCandidate = retainCandidate({
-                resolvedSource: repairResolvedSource,
-                candidateResult: repairCandidateResult,
-                accepted: true,
-              });
-              finalGenerationStage = orchestrationGenerationStage("repair", repairCandidateResult);
-              solveTelemetry.recordCandidateSelection({
-                generationStage: finalGenerationStage,
-                outcome: "passed",
-                responseClassification: "clean_candidate",
-                candidateId: acceptedRepairCandidate?.provenance?.candidateId || null,
-                candidateProvenance: acceptedRepairCandidate?.provenance || null,
-              });
-              solveMetrics.repairSuccess = true;
-              source = "live AI repair call";
-            } catch (repairError) {
-              let rejectedRepairCandidate = null;
-              if (isSolutionQualityValidationError(repairError) && repairCandidateResult) {
-                rejectedRepairCandidate = retainCandidate({
-                  resolvedSource: repairResolvedSource,
-                  candidateResult: repairCandidateResult,
-                  error: repairError,
-                  accepted: false,
-                });
-                solveTelemetry.recordCandidateSelection({
-                  generationStage: orchestrationGenerationStage("repair", repairCandidateResult),
-                  outcome: "failed",
-                  responseClassification: "parsed_candidate_failure",
-                  failureClassification: {
-                    ...classifySolveFailure({ error: repairError, candidate: repairCandidateResult }),
-                    issueCodes: repairError.solutionIssues || [],
-                  },
-                  candidateId: rejectedRepairCandidate?.provenance?.candidateId || null,
-                  candidateProvenance: rejectedRepairCandidate?.provenance || null,
-                });
-              }
-              const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(repairError));
-              const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(repairError);
-              attachAccumulatedAiUsage(repairError, failureUsage, failureCallCount);
-              const escalationDecision = decideSolveEscalation(repairError, { afterRepairAttempt: true });
-              if (escalationDecision.shouldEscalate) {
-                solveMetrics.escalationAttempted = true;
-                const escalationModel = getOpenAiModelForPath("escalation");
-                const escalationStartedAt = Date.now();
-                const escalationRepairFeedback = {
-                  ...buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
-                    error: repairError,
-                    previousResult: initialInvalidResult,
-                    currentResult: result,
-                  }),
-                  escalation: {
-                    attempted: true,
-                    reason: escalationDecision.reason,
-                    triggeringValidatorIssues: escalationDecision.triggeringValidatorIssues,
-                    model: escalationModel,
-                    elapsedMs: 0,
-                    success: null,
-                  },
-                  metrics: { ...solveMetrics },
-                };
-                await captureSolveQualityFailure({
-                  error: repairError,
-                  result,
-                  stage: "repair",
-                  requestId,
-                  endpoint: "/api/solve-extracted-problem",
-                  prompt: repairPrompt,
-                  promptHash: repairPromptHash,
-                  problem: problemLatex,
-                  problemText,
-                  canonicalProblem,
-                  canonicalDisplayText,
-                  canonicalDisplaySource,
-                  canonicalMathInput,
-                  canonicalMathInputSource,
-                  extraction,
-                  repairAttempted: true,
-                  repairFeedback: escalationRepairFeedback,
-                  previousResult: initialInvalidResult,
-                });
-                const escalationPrompt = buildFreshEscalationSolvePrompt({
-                  problem: problemLatex,
-                  canonicalLatex: canonicalMathInput || canonicalProblem.canonicalLatex || problemLatex,
-                  canonicalText: canonicalDisplayText || canonicalProblem.canonicalText || problemText,
-                  issues: escalationDecision.triggeringValidatorIssues,
-                  previousResult: result,
-                  error: repairError,
-                  priorFailures: [{
-                    stage: "initial",
-                    result: initialInvalidResult,
-                    error: firstError,
-                  }],
-                });
-                const escalationPromptHash = hashDebugText(escalationPrompt);
-                let escalationAttemptUsage = null;
-                let escalationAttemptCallCount = 0;
-                let escalationCandidateResult = null;
-                let escalationResolvedSource = "escalation";
-                logSolveDebug(escalationDecision.reason === "structural_recovery_after_failed_repair" ? "structural_recovery_retry" : "escalation_retry", {
-                  requestId,
-                  endpoint: "/api/solve-extracted-problem",
-                  reason: escalationDecision.reason,
-                  triggeringValidatorIssues: escalationDecision.triggeringValidatorIssues,
-                  model: escalationModel,
-                  escalationPromptHash,
-                });
-                try {
-                  result = await createMathExplanation({
-                    prompt: escalationPrompt,
-                    originalProblem: problemLatex,
-                    modelPath: "escalation",
-                    allowCompactRetry: lateCompactRetryAvailable,
-                    debugContext: {
-                      requestId,
-                      endpoint: "/api/solve-extracted-problem",
-                      normalizedProblem: problemLatex,
-                      promptHash: escalationPromptHash,
-                      initialRouting,
-                      retryPurpose: escalationDecision.reason === "structural_recovery_after_failed_repair"
-                        ? "quality-structural-recovery"
-                        : "quality-escalation",
-                      attemptType: "escalation",
-                    },
-                    onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
-                      requestId,
-                      endpoint: "/api/solve-extracted-problem",
-                      prompt: escalationPrompt,
-                      promptHash: escalationPromptHash,
-                      problem: problemLatex,
-                      problemText,
-                      canonicalProblem,
-                      canonicalDisplayText,
-                      canonicalDisplaySource,
-                      canonicalMathInput,
-                      canonicalMathInputSource,
-                      extraction,
-                      repairAttempted: true,
-                    }),
-                    orchestrationTelemetry: solveTelemetry,
-                  });
-                  escalationAttemptUsage = aiUsageFrom(result);
-                  escalationAttemptCallCount = aiCallCountFrom(result);
-                  accumulatedAiUsage = mergeOpenAiUsageValues(failureUsage, escalationAttemptUsage);
-                  accumulatedAiCallCount = failureCallCount + escalationAttemptCallCount;
-                  attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-                  escalationResolvedSource = candidateSource("escalation", result);
-                  traceMathStage(
-                    "Explanation generation",
-                    problemLatex,
-                    result.expression || result.problem || "",
-                    escalationDecision.reason === "structural_recovery_after_failed_repair"
-                      ? "LLM structural recovery solve response"
-                      : "LLM escalated solve response"
-                  );
-                  result = applyLocalRulesToExplanation(result);
-                  escalationCandidateResult = result;
-                  acceptStructurallyParsedSolve(result);
-                  const acceptedEscalationCandidate = retainCandidate({
-                    resolvedSource: escalationResolvedSource,
-                    candidateResult: escalationCandidateResult,
-                    accepted: true,
-                  });
-                  finalGenerationStage = orchestrationGenerationStage("escalation", escalationCandidateResult);
-                  solveTelemetry.recordCandidateSelection({
-                    generationStage: finalGenerationStage,
-                    outcome: "passed",
-                    responseClassification: "clean_candidate",
-                    candidateId: acceptedEscalationCandidate?.provenance?.candidateId || null,
-                    candidateProvenance: acceptedEscalationCandidate?.provenance || null,
-                  });
-                  solveMetrics.escalationSuccess = true;
-                  logSolveDebug("solve_metrics", {
-                    requestId,
-                    endpoint: "/api/solve-extracted-problem",
-                    ...solveMetrics,
-                    finalFailure: false,
-                    escalationReason: escalationDecision.reason,
-                    triggeringValidatorIssues: escalationDecision.triggeringValidatorIssues,
-                    escalationModel,
-                    escalationElapsedMs: Date.now() - escalationStartedAt,
-                  });
-                  source = escalationDecision.reason === "structural_recovery_after_failed_repair"
-                    ? "live AI structural recovery call"
-                    : "live AI escalation call";
-                } catch (escalationError) {
-                  let rejectedEscalationCandidate = null;
-                  if (isSolutionQualityValidationError(escalationError) && escalationCandidateResult) {
-                    rejectedEscalationCandidate = retainCandidate({
-                      resolvedSource: escalationResolvedSource,
-                      candidateResult: escalationCandidateResult,
-                      error: escalationError,
-                      accepted: false,
-                    });
-                    solveTelemetry.recordCandidateSelection({
-                      generationStage: orchestrationGenerationStage("escalation", escalationCandidateResult),
-                      outcome: "failed",
-                      responseClassification: "parsed_candidate_failure",
-                      failureClassification: {
-                        ...classifySolveFailure({ error: escalationError, candidate: escalationCandidateResult }),
-                        issueCodes: escalationError.solutionIssues || [],
-                      },
-                      candidateId: rejectedEscalationCandidate?.provenance?.candidateId || null,
-                      candidateProvenance: rejectedEscalationCandidate?.provenance || null,
-                    });
-                  }
-                  const failedAttemptUsage = aiUsageFrom(escalationError) || escalationAttemptUsage;
-                  const failedAttemptCallCount = aiCallCountFrom(escalationError) || escalationAttemptCallCount;
-                  const escalationUsage = mergeOpenAiUsageValues(failureUsage, failedAttemptUsage);
-                  const escalationCallCount = failureCallCount + failedAttemptCallCount;
-                  attachAccumulatedAiUsage(escalationError, escalationUsage, escalationCallCount);
-                  const failedEscalationStage = failedCandidateStage("escalation", escalationError);
-                  const selectedFallback = selectSafeFallbackAfterFailure(candidateLedger, escalationError, {
-                    ...candidateContext,
-                    failedStage: failedEscalationStage,
-                  });
-                  const fallbackAdopted = adoptSafeFallback(
-                    selectedFallback,
-                    escalationError,
-                    failedEscalationStage,
-                    escalationUsage,
-                    escalationCallCount,
-                  );
-                  solveMetrics.finalFailure = !fallbackAdopted;
-                  const escalationElapsedMs = Date.now() - escalationStartedAt;
-                  logSolveDebug("solve_metrics", {
-                    requestId,
-                    endpoint: "/api/solve-extracted-problem",
-                    ...solveMetrics,
-                    escalationReason: escalationDecision.reason,
-                    triggeringValidatorIssues: escalationDecision.triggeringValidatorIssues,
-                    escalationModel,
-                    escalationElapsedMs,
-                  });
-                  await captureSolveQualityFailure({
-                    error: escalationError,
-                    result,
-                    stage: "escalation",
-                    requestId,
-                    endpoint: "/api/solve-extracted-problem",
-                    prompt: escalationPrompt,
-                    promptHash: escalationPromptHash,
-                    problem: problemLatex,
-                    problemText,
-                    canonicalProblem,
-                    canonicalDisplayText,
-                    canonicalDisplaySource,
-                    canonicalMathInput,
-                    canonicalMathInputSource,
-                    extraction,
-                    repairAttempted: true,
-                    repairFeedback: {
-                      ...buildRepairFeedbackDetails(escalationError.solutionIssues || [escalationError.code || escalationError.message], {
-                        error: escalationError,
-                        previousResult: initialInvalidResult,
-                        currentResult: result,
-                      }),
-                      escalation: {
-                        attempted: true,
-                        reason: escalationDecision.reason,
-                        triggeringValidatorIssues: escalationDecision.triggeringValidatorIssues,
-                        model: escalationModel,
-                        tokenUsage: failedAttemptUsage || null,
-                        elapsedMs: escalationElapsedMs,
-                        success: false,
-                      },
-                      metrics: { ...solveMetrics },
-                    },
-                    previousResult: initialInvalidResult,
-                  });
-                  if (!fallbackAdopted) throw escalationError;
-                }
-              } else {
-                const failedRepairStage = failedCandidateStage("repair", repairError);
-                const selectedFallback = selectSafeFallbackAfterFailure(candidateLedger, repairError, {
-                  ...candidateContext,
-                  failedStage: failedRepairStage,
-                });
-                const fallbackAdopted = adoptSafeFallback(
-                  selectedFallback,
-                  repairError,
-                  failedRepairStage,
-                  failureUsage,
-                  failureCallCount,
-                );
-                solveMetrics.finalFailure = !fallbackAdopted;
-                logSolveDebug("solve_metrics", {
-                  requestId,
-                  endpoint: "/api/solve-extracted-problem",
-                  ...solveMetrics,
-                  escalationReason: escalationDecision.reason,
-                  triggeringValidatorIssues: escalationDecision.triggeringValidatorIssues,
-                });
-              }
-              if (escalationDecision.shouldEscalate) {
-                // Escalation succeeded and result/source have been updated.
-              } else {
-                await captureSolveQualityFailure({
-                  error: repairError,
-                  result,
-                  stage: "repair",
-                  requestId,
-                  endpoint: "/api/solve-extracted-problem",
-                  prompt: repairPrompt,
-                  promptHash: repairPromptHash,
-                  problem: problemLatex,
-                  problemText,
-                  canonicalProblem,
-                  canonicalDisplayText,
-                  canonicalDisplaySource,
-                  canonicalMathInput,
-                  canonicalMathInputSource,
-                  extraction,
-                  repairAttempted: true,
-                  repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
-                    error: repairError,
-                    previousResult: initialInvalidResult,
-                    currentResult: result,
-                  }),
-                  previousResult: initialInvalidResult,
-                });
-                if (!degradedFallbackMetadata) throw repairError;
-              }
-            }
-            }
-          }
-        }
-        if (!degradedFallbackMetadata && !presentationDegradedMetadata) {
-          acceptStructurallyParsedSolve(result);
-        }
-        const beforeAnnotation = result.expression || result.problem || problemLatex;
-        result = annotateMathExplanation(result);
-        attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-        if (degradedFallbackMetadata) {
-          attachDegradedFallbackMetadata(result, degradedFallbackMetadata);
-        }
-        if (presentationDegradedMetadata) {
-          attachPresentationDegradedMetadata(result, presentationDegradedMetadata);
-        }
-        traceMathStage("Tokenization", beforeAnnotation, result.expression || result.problem || "", "annotate explanation tokens/chunks");
-        result.imageSource = {
-          ...(extraction.imageSource || {}),
-          imageHash: extraction.imageSource?.imageHash || extraction.imageHash || null,
-          filename: extraction.imageSource?.filename || null,
-          contentType: extraction.imageSource?.contentType || null,
-          bytes: extraction.imageSource?.bytes || null,
-          rawExtractedText: extraction.rawExtractedText || extraction.extractedProblemText || extraction.imageSource?.rawExtractedText || "",
-          cleanedExtractedText: extraction.extractedProblemText || extraction.imageSource?.cleanedExtractedText || "",
-          rawExtractedLatex: extraction.rawExtractedLatex || extraction.extractedProblemLatex || extraction.imageSource?.rawExtractedLatex || "",
-          rawText: extraction.rawText || extraction.imageSource?.rawText || extraction.rawExtractedText || "",
-          displayText: extraction.displayText || extraction.imageSource?.displayText || problemText,
-          normalizedText: extraction.normalizedText || extraction.imageSource?.normalizedText || problemLatex,
-          validationText: extraction.validationText || extraction.imageSource?.validationText || extraction.normalizedText || problemLatex,
-          finalProblemText: problemText,
-          finalProblemLatex: problemLatex,
-          confidence: Number(extraction.confidence ?? extraction.extractionValidation?.confidence ?? extraction.imageSource?.confidence ?? 0),
-          ocrConfidence: Number(extraction.ocrConfidence ?? extraction.extractionValidation?.ocrConfidence ?? extraction.imageSource?.ocrConfidence ?? 0),
-          mathIntegrityScore: Number(extraction.mathIntegrityScore ?? extraction.extractionValidation?.mathIntegrityScore ?? extraction.imageSource?.mathIntegrityScore ?? extraction.confidence ?? 0),
-          confidenceTier: extraction.confidenceTier || extraction.extractionValidation?.tier || extraction.imageSource?.confidenceTier || "",
-          issues: Array.isArray(extraction.issues)
-            ? extraction.issues
-            : extraction.extractionValidation?.issues || extraction.imageSource?.issues || [],
-          solveDecision,
-          editedBeforeSolving: solveDecision === "edited",
-          canonicalProblem,
-          canonicalInputHash: canonicalProblem.hash,
-        };
-        result.canonicalProblem = canonicalProblem;
-        result.canonicalInputHash = canonicalProblem.hash;
-        result.extractedProblemText = result.imageSource.finalProblemText || result.imageSource.cleanedExtractedText || result.imageSource.rawExtractedText;
-        result.extractedProblemLatex = result.imageSource.rawExtractedLatex;
-        result.extractionValidation = extraction.extractionValidation || {
-          confidence: result.imageSource.confidence,
-          ocrConfidence: result.imageSource.ocrConfidence,
-          mathIntegrityScore: result.imageSource.mathIntegrityScore,
-          tier: result.imageSource.confidenceTier,
-          issues: result.imageSource.issues,
-        };
-        result.confidence = result.extractionValidation.confidence;
-        result.ocrConfidence = result.extractionValidation.ocrConfidence;
-        result.mathIntegrityScore = result.extractionValidation.mathIntegrityScore;
-        result.confidenceTier = result.extractionValidation.tier;
-
-        usage = await settleAiUsageReservation(reservation, result._aiUsage, {
-          providerCalls: result._aiCallCount || 0,
-          settlementReason: "success",
-        });
-        solveTelemetry.finalize({
-          finalOutcome: degradedFallbackMetadata
-            ? "fallback"
-            : presentationDegradedMetadata
-              ? "presentation_degraded"
-              : finalGenerationStage
-                ? "success"
-                : "local_success",
-          fallbackUsed: Boolean(degradedFallbackMetadata),
-          finalGenerationStage,
-        });
-      } catch (error) {
-        try {
-          usage = await settleFailureUsageOrRelease(reservation, error, result);
-          if (usage) error.usage = usage;
-        } catch (releaseError) {
-          console.warn("Could not settle failed token reservation:", releaseError.message);
-        }
-        solveTelemetry.finalize({
-          finalOutcome: "hard_failure",
-          finalFailureClassification: {
-            ...classifySolveFailure({
-              error,
-              candidate: isSolutionQualityValidationError(error) ? result : null,
-            }),
-            issueCodes: error?.solutionIssues || [],
-          },
-          fallbackUsed: false,
-        });
-        throw error;
-      }
-
-      setCachedExplanation(cacheKey, result);
-      logAcceptedSolvePayload({
-        requestId,
-        endpoint: "/api/solve-extracted-problem",
-        problem: problemLatex,
-        result,
-        source,
-      });
-      result.canonicalProblem = canonicalProblem;
-      result.canonicalInputHash = canonicalProblem.hash;
-      const saved = await saveExplanationBestEffort(req, { source: "image", problem: problemLatex, result, identity });
-      return { result, usage, saved, source };
-    });
-
-    const { result, usage, saved, source } = value;
-    logSolveTiming({
-      endpoint: "/api/solve-extracted-problem",
-      startedAt,
-      source,
-      identity,
-      prompt,
-      requestBodyChars,
-      aiUsage: result._aiUsage,
-      apiCallCount: result._aiCallCount || 0,
-    });
-    sendJson(
-      res,
-      200,
-      buildResponse(result, {
-        usage,
-        saved,
-        source: duplicate ? `${source} (deduplicated)` : source,
-        demoMode: !isOpenAiConfigured(),
-        canonicalProblem,
-      }),
-      createUsageHeaders(usage)
-    );
-    logSolveDebug("http_response", {
+    logImageUploadDebug("solve-extracted-canonicalized", {
       requestId,
-      endpoint: "/api/solve-extracted-problem",
-      statusCode: 200,
-      source,
-      finalUiState: "success-response-sent",
-      stepCount: Array.isArray(result?.steps) ? result.steps.length : 0,
+      imageHash: imageSource.imageHash,
+      reviewEvidencePath: extraction.extractionValidation ? "extraction.extractionValidation" : "legacy-extraction-summary",
+      ocrSolveDecision: ocrDecision,
+      inputSource: canonicalProblem.source,
+      canonicalInputHash: canonicalProblem.hash,
+      solveDecision,
+      reviewActionKind: acceptedReviewAction?.kind || null,
     });
+
+    const sharedRequest = copyInternalRequest(req, {
+      url: "/api/explain",
+      body: {
+        problemInput: {
+          problemText: problem,
+          source: "ocr",
+        },
+        problem,
+        canonicalProblem,
+        history: body.history || [],
+        debugRequestId: requestId,
+        clientRequestId: body.clientRequestId,
+        reference: body.reference || [
+          "ocr",
+          imageSource.imageHash || "no-image-hash",
+          solveDecision,
+        ].join(":"),
+        depth: body.depth || "intermediate",
+      },
+    });
+    canonicalSolveRequestContexts.set(sharedRequest, {
+      endpoint: "/api/solve-extracted-problem",
+      identityOperation: "solve-extracted-problem",
+      inputSource: canonicalProblem.source,
+      usageKind: "image",
+      persistenceSource: "image",
+      sourceMetadata: {
+        imageSource,
+        extractedProblemText: imageSource.finalProblemText || imageSource.cleanedExtractedText || imageSource.rawExtractedText,
+        extractedProblemLatex: imageSource.rawExtractedLatex,
+        extractionValidation,
+        reviewAction: acceptedReviewAction,
+        ocrSolveDecision: ocrDecision,
+        confidence: extractionValidation.confidence,
+        ocrConfidence: extractionValidation.ocrConfidence,
+        mathIntegrityScore: extractionValidation.mathIntegrityScore,
+        confidenceTier: extractionValidation.tier,
+      },
+    });
+
+    await handleExplainRequest(sharedRequest, res);
   });
 }
 
@@ -3913,352 +3066,62 @@ export async function handleExplainImageRequest(req, res) {
   }
 
   await runHandler(res, async () => {
-    const startedAt = Date.now();
-    const identity = await requireClerkIdentity(req);
-    throttleRequest(req, identity, "ai");
-    assertAiEnabled();
-    let body;
-    try {
-      body = await readBody(req, MAX_IMAGE_BYTES + MAX_JSON_BYTES);
-    } catch (error) {
-      logRejectedUpload({ reason: "multipart_body_too_large" });
-      throw error;
-    }
-    const { fields, files } = parseMultipartForm(body, req.headers["content-type"]);
-    const requestId = optionalShortText(fields.debugRequestId || fields.clientRequestId || "", "Debug request id", 120)
-      || createDebugRequestId("solve-image");
-    const problem = requireTextProblem(fields.prompt || "Explain the math problem in this image.");
-    const image = requireImage(files.file);
-    logImageUploadDebug("received", {
-      received: Boolean(image),
-      filename: image.filename || null,
-      contentType: image.contentType,
-      bytes: image.buffer.length,
-      prompt: problem,
+    // Compatibility endpoint: preserve the multipart contract while enforcing
+    // the same OCR -> canonical ProblemInput -> shared solve boundary as the UI.
+    const requestBody = await readBody(req, MAX_IMAGE_BYTES + MAX_JSON_BYTES);
+    const extractionRequest = copyInternalRequest(req, {
+      url: "/api/extract-image-problem",
+      body: requestBody,
     });
-    const imageHash = createImageHash(image);
-    const cacheKey = createExplanationCacheKey({
-      userId: identity.clerkUserId,
-      problem,
-      reference: fields.selectedTokenId || fields.selectedStepId || fields.reference || imageHash,
-      depth: fields.depth || "intermediate",
-      type: "image",
-      imageHash,
-    });
-    const cached = getCachedExplanation(cacheKey);
-    if (cached) {
-      const usage = await getUsageForKind(req, "image", identity);
-      logExplanationSource({
-        source: "cached",
-        kind: "image",
-        endpoint: "/api/explain-image",
-        identity,
-      });
-      sendJson(
-        res,
-        200,
-        buildResponse(cached, { usage, source: "cached", demoMode: !isOpenAiConfigured() }),
-        createUsageHeaders(usage)
-      );
+    const extractionResponse = {
+      statusCode: 200,
+      headers: {},
+      body: "",
+      writeHead(statusCode, headers = {}) {
+        this.statusCode = statusCode;
+        this.headers = headers;
+      },
+      end(chunk = "") {
+        this.body += chunk;
+      },
+    };
+    await handleExtractImageProblemRequest(extractionRequest, extractionResponse);
+    if (extractionResponse.statusCode !== 200) {
+      res.writeHead(extractionResponse.statusCode, extractionResponse.headers);
+      res.end(extractionResponse.body);
       return;
     }
 
-    const prompt = buildMathExplanationPrompt({ problem, image: true });
-    const promptHash = hashDebugText(prompt);
-    const solverSampling = getOpenAiSamplingForPath("solver");
-    logSolveDebug("request_received", {
-      requestId,
-      endpoint: "/api/explain-image",
-      normalizedProblem: problem,
-      normalizedProblemHash: hashDebugText(problem),
-      promptHash,
-      model: getOpenAiModelForPath("solver"),
-      temperature: solverSampling.temperature ?? null,
-      topP: solverSampling.top_p ?? null,
-      temperatureSource: solverSampling.temperature === undefined ? "provider_default" : "payload",
-      topPSource: solverSampling.top_p === undefined ? "provider_default" : "payload",
-      cacheKey,
-      imageHash,
+    const extraction = requireObject(JSON.parse(extractionResponse.body || "{}"), "Extraction");
+    const canonicalProblem = normalizeCanonicalProblem({
+      problem: extraction.extractedProblemText || extraction.rawExtractedText || "",
+      problemLatex: extraction.extractedProblemLatex || "",
+    }, {
+      source: "ocr-direct",
+      extractionWarnings: extraction.issues || extraction.extractionValidation?.issues || [],
+      extractionConfidence: extraction.confidence ?? extraction.extractionValidation?.confidence,
     });
-    traceMathStage("Prompt construction", problem, prompt, "insert image-upload context into image solve prompt");
-    logImageUploadDebug("openai-input", {
-      forwardedToOpenAI: true,
-      filename: image.filename || null,
-      contentType: image.contentType,
-      bytes: image.buffer.length,
-      promptChars: prompt.length,
-      imageHash,
+    const { fields } = parseMultipartForm(requestBody, req.headers["content-type"]);
+    const solveRequest = copyInternalRequest(req, {
+      url: "/api/solve-extracted-problem",
+      headers: { ...req.headers, "content-type": "application/json" },
+      body: {
+        problemInput: {
+          problemText: getCanonicalSolverInput(canonicalProblem),
+          source: "ocr",
+          sourceMetadata: { extraction, solveDecision: "direct" },
+        },
+        problem: getCanonicalSolverInput(canonicalProblem),
+        problemText: canonicalProblem.canonicalText,
+        canonicalProblem,
+        extraction,
+        solveDecision: "direct",
+        debugRequestId: fields.debugRequestId || fields.clientRequestId || "",
+      },
     });
-    const initialMaxOutputTokens = getSolveOutputTokenBudget({ modelPath: "solver" });
-    const estimatedTokens = estimateOpenAiTokenBudget({ prompt, image, maxOutputTokens: initialMaxOutputTokens });
-    const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, image, maxOutputTokens: initialMaxOutputTokens }));
-    const { duplicate, value } = await runDeduplicatedRequest(cacheKey, async () => {
-      let result = createLocalRuleExplanation(problem, { source: "image" });
-      let source = "local rule";
-      const willCallOpenAi = !result && isOpenAiConfigured();
-      const { reservation } = await checkAndReserveUsage({
-        req,
-        identity,
-        kind: "image",
-        estimatedTokens: willCallOpenAi ? estimatedTokens : 0,
-        estimatedCostMicros: willCallOpenAi ? estimatedCostMicros : 0,
-      });
-      let usage;
-      let accumulatedAiUsage = null;
-      let accumulatedAiCallCount = 0;
-      const qualityRepairAttemptedCandidates = new Set();
-
-      try {
-        if (result) {
-          try {
-            acceptStructurallyParsedSolve(result);
-          } catch (error) {
-            if (!isOpenAiConfigured()) throw error;
-            result = null;
-          }
-        }
-
-        if (!result) {
-          if (!isOpenAiConfigured()) {
-            throw createOpenAiRequiredError();
-          } else {
-            try {
-              result = await createMathExplanation({
-                prompt,
-                image,
-                originalProblem: problem,
-                debugContext: {
-                  requestId,
-                  endpoint: "/api/explain-image",
-                  normalizedProblem: problem,
-                  promptHash,
-                },
-                onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
-                  requestId,
-                  endpoint: "/api/explain-image",
-                  prompt,
-                  promptHash,
-                  problem,
-                  problemText: "",
-                  repairAttempted: false,
-                  qualityRepairAttempted: false,
-                }),
-              });
-              accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
-              accumulatedAiCallCount += aiCallCountFrom(result);
-              attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-              traceMathStage("Explanation generation", problem, result.extractedProblemLatex || result.expression || "", "LLM image solve response");
-              result = applyLocalRulesToExplanation(result);
-              acceptStructurallyParsedSolve(result);
-              source = "live AI call";
-            } catch (firstError) {
-              if ([
-                "AI_SERVICE_UNAVAILABLE",
-                "AI_PROVIDER_RATE_LIMITED",
-                "AI_SERVICE_ERROR",
-                "SERVER_CONFIG_ERROR",
-              ].includes(firstError.code)) {
-                throw firstError;
-              }
-              accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(firstError));
-              accumulatedAiCallCount += aiCallCountFrom(firstError);
-              const initialInvalidResult = result;
-              const failureClassification = classifySolveFailure({
-                error: firstError,
-                candidate: initialInvalidResult,
-              });
-              const repairIssues = firstError.solutionIssues || [firstError.code || firstError.message];
-              const repairFeedback = buildRepairFeedbackDetails(repairIssues, {
-                error: firstError,
-                currentResult: initialInvalidResult,
-              });
-              await captureSolveQualityFailure({
-                error: firstError,
-                result,
-                stage: "initial",
-                requestId,
-                endpoint: "/api/explain-image",
-                prompt,
-                promptHash,
-                problem: result?.extractedProblemLatex || result?.expression || problem,
-                problemText: result?.extractedProblemText || "",
-                repairAttempted: failureClassification.category === "parsed_candidate_failure",
-                failureClassification: failureClassification.category,
-                qualityRepairAttempted: failureClassification.category === "parsed_candidate_failure",
-                compactRetryAttempted: false,
-                freshEscalationAttempted: false,
-                repairFeedback,
-              });
-              logSolveDebug("solve_failure_classification", {
-                requestId,
-                endpoint: "/api/explain-image",
-                ...failureClassification,
-                qualityRepairAttempted: failureClassification.category === "parsed_candidate_failure",
-                compactRetryAttempted: false,
-                freshEscalationAttempted: false,
-              });
-              if (failureClassification.category === "response_generation_failure") {
-                throw firstError;
-              }
-              claimQualityRepairAttempt(qualityRepairAttemptedCandidates, initialInvalidResult);
-              const repairPrompt = buildRepairSolvePrompt(prompt, repairIssues, {
-                problem: result?.extractedProblemLatex || result?.expression || problem,
-                previousResult: initialInvalidResult,
-                error: firstError,
-              });
-              logSolveDebug("repair_retry", {
-                requestId,
-                endpoint: "/api/explain-image",
-                retryCount: 1,
-                failedRules: firstError.solutionIssues || [firstError.code || firstError.message].filter(Boolean),
-                repairPromptHash: hashDebugText(repairPrompt),
-              });
-              const repairPromptHash = hashDebugText(repairPrompt);
-              try {
-                result = await createMathExplanation({
-                  prompt: repairPrompt,
-                  originalProblem: problem,
-                  debugContext: {
-                    requestId,
-                    endpoint: "/api/explain-image",
-                    normalizedProblem: problem,
-                    promptHash: repairPromptHash,
-                    retryPurpose: "quality-repair",
-                  },
-                  onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
-                    requestId,
-                    endpoint: "/api/explain-image",
-                    prompt: repairPrompt,
-                    promptHash: repairPromptHash,
-                    problem: result?.extractedProblemLatex || result?.expression || problem,
-                    problemText: result?.extractedProblemText || "",
-                    repairAttempted: true,
-                  }),
-                });
-                accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
-                accumulatedAiCallCount += aiCallCountFrom(result);
-                attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-                traceMathStage("Explanation generation", problem, result.extractedProblemLatex || result.expression || "", "LLM image repair solve response");
-                result = applyLocalRulesToExplanation(result);
-                acceptStructurallyParsedSolve(result);
-                source = "live AI repair call";
-              } catch (repairError) {
-                const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(repairError));
-                const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(repairError);
-                attachAccumulatedAiUsage(repairError, failureUsage, failureCallCount);
-                await captureSolveQualityFailure({
-                  error: repairError,
-                  result,
-                  stage: "repair",
-                  requestId,
-                  endpoint: "/api/explain-image",
-                  prompt: repairPrompt,
-                  promptHash: repairPromptHash,
-                  problem: result?.extractedProblemLatex || result?.expression || problem,
-                  problemText: result?.extractedProblemText || "",
-                  repairAttempted: true,
-                  repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
-                    error: repairError,
-                    previousResult: initialInvalidResult,
-                    currentResult: result,
-                  }),
-                  previousResult: initialInvalidResult,
-                });
-                throw repairError;
-              }
-            }
-          }
-        }
-        acceptStructurallyParsedSolve(result);
-        const beforeAnnotation = result.extractedProblemLatex || result.expression || "";
-        result = annotateMathExplanation(result);
-        attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
-        traceMathStage("Tokenization", beforeAnnotation, result.extractedProblemLatex || result.expression || "", "annotate image solution tokens/chunks");
-        result.extractionValidation = validateExtraction({
-          extractedProblemText: result.extractedProblemText,
-          extractedProblemLatex: result.extractedProblemLatex || result.expression,
-          ocrConfidence: fields.ocrConfidence,
-        });
-        result.confidence = result.extractionValidation.confidence;
-        result.ocrConfidence = result.extractionValidation.ocrConfidence;
-        result.mathIntegrityScore = result.extractionValidation.mathIntegrityScore;
-        result.confidenceTier = result.extractionValidation.tier;
-        logExtractionReviewDebug(result.extractionValidation);
-        logImageUploadDebug("extracted", {
-          extractedProblemText: result.extractedProblemText || "",
-          extractedProblemLatex: result.extractedProblemLatex || result.expression || "",
-          generatedProblemLatex: result.expression || "",
-          firstStepLatex: result.steps?.[0]?.math || "",
-          finalAnswerLatex: result.finalAnswerLatex || result.finalAnswer || "",
-          extractionValidation: result.extractionValidation,
-        });
-
-        usage = await settleAiUsageReservation(reservation, result._aiUsage, {
-          providerCalls: result._aiCallCount || 0,
-          settlementReason: "success",
-        });
-      } catch (error) {
-        try {
-          usage = await settleFailureUsageOrRelease(reservation, error, result);
-          if (usage) error.usage = usage;
-        } catch (releaseError) {
-          console.warn("Could not settle failed token reservation:", releaseError.message);
-        }
-        throw error;
-      }
-
-      setCachedExplanation(cacheKey, result);
-      logAcceptedSolvePayload({
-        requestId,
-        endpoint: "/api/explain-image",
-        problem,
-        result,
-        source,
-      });
-      logSolveTiming({
-        endpoint: "/api/explain-image",
-        startedAt,
-        source,
-        identity,
-        prompt,
-        aiUsage: result._aiUsage,
-        apiCallCount: result._aiCallCount || (willCallOpenAi ? 1 : 0),
-      });
-      logExplanationSource({
-        source,
-        kind: "image",
-        endpoint: "/api/explain-image",
-        identity,
-        prompt,
-        aiUsage: result._aiUsage,
-      });
-      const saved = await saveExplanationBestEffort(req, { source: "image", problem, result, identity });
-      return { result, usage, saved, source };
-    });
-
-    const { result, usage, saved, source } = value;
-    sendJson(
-      res,
-      200,
-      buildResponse(result, {
-        usage,
-        saved,
-        source: duplicate ? `${source} (deduplicated)` : source,
-        demoMode: !isOpenAiConfigured(),
-      }),
-      createUsageHeaders(usage)
-    );
-    logSolveDebug("http_response", {
-      requestId,
-      endpoint: "/api/explain-image",
-      statusCode: 200,
-      source,
-      finalUiState: "success-response-sent",
-      stepCount: Array.isArray(result?.steps) ? result.steps.length : 0,
-    });
+    await handleSolveExtractedProblemRequest(solveRequest, res);
   });
 }
-
 async function handleLazyExplanationRequest(req, res, mode) {
   if (req.method !== "POST") {
     sendMethodNotAllowed(res, ["POST"]);
@@ -4566,23 +3429,25 @@ export async function handleExplainFollowupRequest(req, res) {
   }
 
   await runHandler(res, async () => {
+    const startedAt = Date.now();
+    const timeout = resolveOpenAiRequestTimeout("pinned");
+    const deadlineAt = startedAt + timeout.timeoutMs;
     const body = requireObject(await readJson(req));
-    console.info("[omnimath:followup-request]", {
+    const correlation = followupCorrelation(body);
+    logHoverDebug("followup_dispatch", {
       route: "/api/explain-followup",
-      bodyKeys: Object.keys(body),
-      selectedLatex: body.selectedLatex || body.selectedText || "",
-      selectedText: body.selectedText || "",
-      hasPinnedExplanation: Boolean(body.pinnedExplanation),
-      hasSolutionContext: Boolean(body.solution),
-      hasCurrentStep: Boolean(body.currentStep),
-      historyCount: Array.isArray(body.history) ? body.history.length : 0,
+      ...correlation,
+      semanticId: body.provenanceSnapshot?.target?.semanticId || body.semanticSelection?.id || null,
+      stepId: body.provenanceSnapshot?.origin?.stepId || body.stepId || null,
+      timeoutMs: timeout.timeoutMs,
     });
     const identityResult = await resolveFollowupIdentity(req);
     const identity = identityResult.identity || identityResult;
     throttleRequest(req, identity, "ai");
     assertAiEnabled();
     const history = parseFollowupHistory(body.history);
-    const prompt = buildFollowupPrompt(body, history);
+    requireFollowupQuestion(body.question);
+    const { prompt, snapshot } = buildProvenanceFollowupPrompt(body, history);
     const { reservation, usage: reservedUsage, fallbackReason } = await reserveFollowupUsage(req, identity, prompt);
     let answer;
     let aiUsage;
@@ -4596,13 +3461,27 @@ export async function handleExplainFollowupRequest(req, res) {
           code: configError.code,
           message: configError.message,
         });
-        answer = createFollowupFallbackAnswer(body, history, "local pinned context");
+        answer = createGeneralFollowupFallback(body, history, "local pinned context");
       } else {
         try {
-          const result = await createFollowupAnswer({ prompt });
-          answer = result.text;
+          const result = await createFollowupAnswer({ prompt, deadlineAt });
+          answer = String(result.text || "").trim();
+          if (!answer) {
+            throw Object.assign(new Error("The AI service returned an empty follow-up answer."), {
+              statusCode: 502,
+              code: "INVALID_AI_RESPONSE",
+              publicMessage: "The AI service returned an incomplete explanation. Please try again.",
+            });
+          }
           aiUsage = result.usage;
         } catch (openAiError) {
+          logHoverDebug("followup_error", {
+            ...correlation,
+            semanticId: snapshot.target.semanticId || snapshot.target.targetId || null,
+            code: openAiError.code || null,
+            statusCode: openAiError.statusCode || null,
+            elapsedMs: Date.now() - startedAt,
+          });
           if (!isProductionRuntime()) {
             console.warn("[omnimath:followup-fallback]", {
               reason: "OpenAI request failed",
@@ -4610,7 +3489,7 @@ export async function handleExplainFollowupRequest(req, res) {
               message: openAiError.message,
               statusCode: openAiError.statusCode || null,
             });
-            answer = createFollowupFallbackAnswer(body, history, "local pinned context after AI failure");
+            answer = createGeneralFollowupFallback(body, history, "local pinned context after AI failure");
           } else {
             throw openAiError;
           }
@@ -4656,10 +3535,17 @@ export async function handleExplainFollowupRequest(req, res) {
       answer,
       usage,
       fallback: !aiUsage,
+      ...correlation,
       fallbackReason: !aiUsage
         ? (fallbackReason || identityResult.fallbackReason || "OPENAI_API_KEY is not configured on the server.")
         : undefined,
     }, createUsageHeaders(usage));
+    logHoverDebug("followup_finish", {
+      ...correlation,
+      semanticId: snapshot.target.semanticId || snapshot.target.targetId || null,
+      fallback: !aiUsage,
+      elapsedMs: Date.now() - startedAt,
+    });
   });
 }
 

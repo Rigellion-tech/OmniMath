@@ -16,13 +16,16 @@ export const MODEL_ROLES = Object.freeze({
 export const DEFAULT_OPENAI_MODELS = {
   imageExtraction: "gpt-4.1",
   extractionReview: "gpt-4.1-mini",
-  solver: "gpt-5.6-luna",
-  repair: "gpt-5.6-terra",
+  solver: "gpt-5.6-sol",
+  repair: "gpt-5.6-sol",
   escalation: "gpt-5.6-sol",
   premiumEscalation: "gpt-5.6-sol",
   hover: "gpt-4.1-mini",
   pinned: "gpt-4.1-mini",
 };
+
+// Shared canonical solve requests use Sol even when the generic solver role is configured differently.
+export const CANONICAL_SOLVE_MODEL = "gpt-5.6-sol";
 
 export const DEFAULT_OPENAI_SAMPLING = {
   solver: {
@@ -397,6 +400,16 @@ function resolveReasoningEffort(role = "solver", capability = {}, debugContext =
         omittedReason: effort ? "" : "unsupported_reasoning_effort",
       };
     }
+    if (!difficultRole && role === "solver") {
+      const compactEffort = [candidate, "high", "medium", "low", "minimal", "none"]
+        .find((effort) => capability.reasoningEfforts.includes(effort));
+      return {
+        requestedEffort: compactEffort || candidate,
+        effort: compactEffort || null,
+        source: "compact_solver_retry_inherits_authoritative_reasoning",
+        omittedReason: compactEffort ? "" : "unsupported_reasoning_effort",
+      };
+    }
     if (!difficultRole && capability.reasoningEfforts.includes("none")) {
       return {
         requestedEffort: "none",
@@ -461,6 +474,9 @@ export function getOpenAiModelResolutions() {
 }
 
 export function getOpenAiModelForPath(path, debugContext = {}) {
+  if (path === "canonicalSolve" && roleFromPath(path, debugContext) === "solver") {
+    return CANONICAL_SOLVE_MODEL;
+  }
   const role = roleFromPath(path, debugContext);
   return getOpenAiModels()[role] || getOpenAiModels().solver;
 }
@@ -476,7 +492,9 @@ export function selectOpenAiModel({
   debugContext = {},
 } = {}) {
   const role = roleFromPath(modelPath, debugContext);
-  const modelSelection = model
+  const modelSelection = modelPath === "canonicalSolve" && role === "solver"
+    ? { value: CANONICAL_SOLVE_MODEL, source: "canonical_solve_policy" }
+    : model
     ? { value: model, source: "explicit_override" }
     : resolveRoleModel(role);
   const modelId = modelSelection.value;

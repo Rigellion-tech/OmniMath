@@ -22,7 +22,7 @@ export function normalizeCanonicalProblem(body = {}, fallback = {}) {
   return createCanonicalProblemPayload({
     canonicalText: raw.canonicalText || fallback.canonicalText || body.problem || body.prompt || body.problemLatex || "",
     canonicalLatex: raw.canonicalLatex || fallback.canonicalLatex || body.problemLatex || "",
-    source: raw.source || fallback.source || "typed",
+    source: fallback.forceSource || raw.source || fallback.source || "typed",
     extractionWarnings: raw.extractionWarnings || fallback.extractionWarnings || [],
     extractionConfidence: raw.extractionConfidence ?? fallback.extractionConfidence,
   });

@@ -10,6 +10,20 @@ function readable(parts) {
 }
 
 describe("math text render segments", () => {
+  it("keeps dense variational prompt prose readable while isolating its math", () => {
+    const source = "For J[u]=∫_Ω(1/2|∇u|²+α/6|∇u|⁶+β/2 u²−λ/q|u|^q)dx, α,β,λ>0, 2<q<4, u|∂Ω=0: derive the Euler-Lagrange PDE, linearize it at a critical point u*, compute J''[u*](v,v), and give the lowest-eigenvalue/Rayleigh-quotient condition for u* to be a strict local minimum. Show the nonlinear gradient-term linearization explicitly.";
+    const parts = getMathTextRenderParts(source);
+    const math = parts.filter((part) => part.type === "math").map((part) => part.value);
+
+    assert.equal(math.some((value) => /Euler|Lagrange|lowest|eigenvalue|Rayleigh|quotient|gradient|term/u.test(value)), false);
+    assert.equal(math.some((value) => value.includes("J''[u*](v,v)")), true);
+    assert.equal(math.some((value) => value === "u*"), true);
+    assert.equal(math[0].includes("\\nabla u"), true);
+    assert.equal(math[0].includes("\\nablau"), false);
+    assert.match(readable(parts), /derive the Euler-Lagrange PDE, linearize it at a critical point u\*, compute J''\[u\*\]\(v,v\), and give the lowest-eigenvalue\/Rayleigh-quotient condition/u);
+    assert.match(readable(parts), /Show the nonlinear gradient-term linearization explicitly\.$/u);
+  });
+
   it("preserves spaces around word + inline math + word", () => {
     const parts = getMathTextRenderParts("The term $c$ is the constant.");
 

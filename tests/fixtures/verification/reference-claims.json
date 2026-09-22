@@ -1,0 +1,539 @@
+[
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "identical polynomial",
+    "left": "x^2+2*x+1",
+    "right": "x^2+2*x+1",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "different syntax",
+    "left": "\\frac{2*x+2}{2}",
+    "right": "x+1",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "distribution",
+    "left": "(x+1)^2",
+    "right": "x^2+2*x+1",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "multiple variables",
+    "left": "(x+y)^2",
+    "right": "x^2+2*x*y+y^2",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "subtle coefficient",
+    "left": "(x+1)^2",
+    "right": "x^2+2.001*x+1",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "exact error below numerical tolerance",
+    "left": "x+0.000000000000001",
+    "right": "x",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "decimal rationals",
+    "left": "0.1+0.2",
+    "right": "0.3",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "large integers remain exact",
+    "left": "9007199254740993",
+    "right": "9007199254740992",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "numerical trigonometric identity",
+    "left": "sin(x)^2+cos(x)^2",
+    "right": "1",
+    "state": "numerically_supported"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "cancellation requires domain",
+    "left": "x/x",
+    "right": "1",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "nonzero denominator inferred",
+    "left": "(x^2+1)/(x^2+1)",
+    "right": "1",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "square root branch",
+    "left": "sqrt(x^2)",
+    "right": "x",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "log branch unknown",
+    "left": "ln(x^2)",
+    "right": "2*ln(x)",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "inverse branch",
+    "left": "asin(sin(x))",
+    "right": "x",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "fractional powers no unsafe rewrite",
+    "left": "(x^2)^0.5",
+    "right": "x",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "power needs domain",
+    "left": "x^0",
+    "right": "1",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "zero times undefined",
+    "left": "0*(1/x)",
+    "right": "0",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "unknown functions not erased",
+    "left": "\\Gamma(x)",
+    "right": "\\Gamma(x)",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "no legacy hyperbolic rewrite",
+    "left": "\\operatorname{sech}(x)",
+    "right": "1/cos(x)",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "ambiguous logarithm base",
+    "left": "log(x)",
+    "right": "ln(x)",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "case sensitive variables",
+    "left": "C",
+    "right": "c",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "no approximate constant proof",
+    "left": "pi",
+    "right": "3.141592653589793",
+    "state": "numerically_supported"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "zero denominator never proved",
+    "left": "1/0",
+    "right": "1/0",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "full expression required",
+    "left": "x+1; x=2",
+    "right": "x+1",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 11,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "unbound functions not multiplication",
+    "left": "f(x)",
+    "right": "f*x",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "correct derivative",
+    "expression": "x^3",
+    "right": "3*x^2",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "correct cosine sign",
+    "expression": "cos(x)",
+    "right": "-sin(x)",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "wrong sign",
+    "expression": "cos(x)",
+    "right": "sin(x)",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "missing factor",
+    "expression": "x^3",
+    "right": "x^2",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "chain rule",
+    "expression": "sin(3*x^2)",
+    "right": "6*x*cos(3*x^2)",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "chain rule error",
+    "expression": "sin(3*x^2)",
+    "right": "cos(3*x^2)",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "product rule",
+    "expression": "x*sin(x)",
+    "right": "sin(x)+x*cos(x)",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "quotient rule known domain",
+    "expression": "x/(1+x^2)",
+    "right": "(1-x^2)/(1+x^2)^2",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "absolute value unsupported",
+    "expression": "abs(x)",
+    "right": "1",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 75,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "square-root differentiability boundary",
+    "expression": "sqrt(x)",
+    "right": "1/(2*sqrt(x))",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 91,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "correct antiderivative",
+    "integrand": "x^2",
+    "right": "x^3/3+C",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 91,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "missing coefficient",
+    "integrand": "x^2",
+    "right": "x^3+C",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 91,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "wrong sign",
+    "integrand": "sin(x)",
+    "right": "cos(x)+C",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 91,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "additive numeric constant",
+    "integrand": "cos(x)",
+    "right": "sin(x)+17",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 91,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "additive parameter constant",
+    "integrand": "2*x",
+    "right": "x^2+a",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 91,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "correct chain coefficient",
+    "integrand": "cos(2*x)",
+    "right": "sin(2*x)/2+C",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 91,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "not finite differences",
+    "integrand": "cos(x)",
+    "right": "sin(x)+C",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "exact result",
+    "integrand": "x^2",
+    "lower": "0",
+    "upper": "1",
+    "right": "1/3",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "subtle error",
+    "integrand": "x^2",
+    "lower": "0",
+    "upper": "1",
+    "right": "0.3334",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "reversed limits",
+    "integrand": "x",
+    "lower": "1",
+    "upper": "0",
+    "right": "-1/2",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "zero interval polynomial",
+    "integrand": "x",
+    "lower": "1",
+    "upper": "1",
+    "right": "0",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "numerical Gaussian",
+    "integrand": "exp(-x^2)",
+    "lower": "0",
+    "upper": "1",
+    "right": "0.7468241328124271",
+    "state": "numerically_supported"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "numerical disagreement is not certified quadrature",
+    "integrand": "exp(-x^2)",
+    "lower": "0",
+    "upper": "1",
+    "right": "0.7469",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "interior pole rejected",
+    "integrand": "1/(x-0.317)",
+    "lower": "0",
+    "upper": "1",
+    "right": "0",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "singular integral rejected",
+    "integrand": "1/x",
+    "lower": "-1",
+    "upper": "1",
+    "right": "0",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 103,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "improper limits unsupported",
+    "integrand": "exp(-x)",
+    "lower": "0",
+    "upper": "\\infty",
+    "right": "1",
+    "state": "inconclusive"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 121,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "valid root",
+    "left": "x^2",
+    "right": "4",
+    "value": "2",
+    "state": "verified"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 121,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "invalid root",
+    "left": "x^2",
+    "right": "4",
+    "value": "3",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 121,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "extraneous squared root",
+    "left": "sqrt(x+1)",
+    "right": "x-1",
+    "value": "0",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 121,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "pole introduced by multiplying",
+    "left": "1/(x-1)",
+    "right": "2",
+    "value": "1",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 121,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "root outside sqrt domain",
+    "left": "sqrt(x)",
+    "right": "1",
+    "value": "-1",
+    "state": "contradicted"
+  },
+  {
+    "path": "tests/mathVerification.test.mjs",
+    "line": 121,
+    "sha256": "d0e53bbc473361fbd3f98877ef22817b6d6efae5edf21beb84e08b2abcce8ff3",
+    "name": "root outside log domain",
+    "left": "ln(x)",
+    "right": "0",
+    "value": "-1",
+    "state": "contradicted"
+  }
+]

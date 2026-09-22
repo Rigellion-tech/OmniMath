@@ -113,6 +113,7 @@ export function createPendingReviewedProblemState({
   canonicalProblem = null,
   extraction = {},
   solveDecision = "direct",
+  reviewAction = null,
 } = {}) {
   const reviewedText = String(problemText || canonicalProblem?.canonicalText || problem || "").trim();
   const reviewedLatex = String(problemLatex || canonicalProblem?.canonicalLatex || "").trim();
@@ -120,6 +121,7 @@ export function createPendingReviewedProblemState({
     ...(extraction || {}),
     canonicalProblem,
     solveDecision,
+    reviewAction,
     finalProblemText: reviewedText,
     editedBeforeSolving: solveDecision === "edited",
   };
@@ -138,6 +140,8 @@ export function createPendingReviewedProblemState({
     extractedProblemText: reviewedText,
     extractedProblemLatex: reviewedLatex,
     canonicalProblem,
+    extractionValidation: extraction?.extractionValidation || null,
+    reviewAction,
     imageSource,
     pendingSolve: true,
     steps: [],

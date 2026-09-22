@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, GraduationCap, Menu } from "lucide-react";
+import { AlertTriangle, Menu } from "lucide-react";
 import { HoverProvider } from "@/lib/HoverContext";
 import { useAuthToken } from "@/lib/auth";
 import { cleanLatexSnippet, getProblemLabel, getSessionLabel, getStatusStepText } from "@/lib/problemLabels";
@@ -23,7 +23,6 @@ import {
 } from "@/lib/solutionState";
 import {
   createUserSession,
-  fetchUsageSnapshot,
   fetchUserSessions,
   updateUserSession,
 } from "@/api/userClient";
@@ -33,7 +32,7 @@ import { measureOmniSync } from "@/lib/performanceDiagnostics";
 import { createOperationId, logSessionOperation } from "@/lib/sessionOperations";
 import ProblemBlock from "@/components/math/ProblemBlock";
 import ExplanationPanel from "@/components/math/ExplanationPanel";
-import ProblemInput from "@/components/math/ProblemInput";
+import PrimaryMathComposer from "@/components/math/PrimaryMathComposer";
 import ExportButton from "@/components/math/ExportButton";
 import ImageUpload from "@/components/math/ImageUpload";
 import GenerationStatus from "@/components/math/GenerationStatus";
@@ -229,7 +228,6 @@ export default function Home() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [sessionError, setSessionError] = useState("");
   const [syncStatus, setSyncStatus] = useState("");
-  const [usageByKind, setUsageByKind] = useState({ ai: null, explanation: null, image: null });
   const [generationStatusBySession, setGenerationStatusBySession] = useState({});
   const boardRef = useRef(null);
   const saveTimerRef = useRef(null);
@@ -372,13 +370,9 @@ export default function Home() {
     setSessionLoading(true);
     setSessionError("");
 
-    Promise.all([
-      fetchUserSessions({ getToken }),
-      fetchUsageSnapshot({ getToken }).catch(() => null),
-    ])
-      .then(([data, usageData]) => {
+    fetchUserSessions({ getToken })
+      .then((data) => {
         if (cancelled) return;
-        if (usageData?.usage) setUsageByKind(usageData.usage);
         const restored = (data.sessions || [])
           .filter((session) => !isDemoSession(session))
           .map((session) => normalizeSession({
@@ -389,7 +383,15 @@ export default function Home() {
 
         const currentSessions = sessionsRef.current;
         const currentActiveSessionId = activeSessionIdRef.current;
-        const merged = mergeSessionListPreservingActiveSolution(currentSessions, currentActiveSessionId, restored);
+        const protectedSessionIds = Object.entries(activeOperationsRef.current)
+          .filter(([, operation]) => Boolean(operation))
+          .map(([sessionId]) => sessionId);
+        const merged = mergeSessionListPreservingActiveSolution(
+          currentSessions,
+          currentActiveSessionId,
+          restored,
+          { protectedSessionIds },
+        );
 
         if (merged.sessions.length > 0) {
           const nextActive = merged.sessions.find((session) => session.id === merged.activeSessionId) || merged.sessions[0];
@@ -410,16 +412,18 @@ export default function Home() {
           setActiveSessionId(nextActive.id);
           sessionsRef.current = merged.sessions;
           activeSessionIdRef.current = nextActive.id;
-          setSessionGenerationStatus(nextActive.id, {
-            type: restoredSteps.length ? "success" : "empty",
-            label: restoredSteps.length
-              ? merged.preservedActive ? "Explanation ready" : "Session restored"
-              : "Session ready",
-            detail: restoredSteps.length
-              ? getStatusStepText(restoredSteps)
-              : getSessionLabel(nextActive, "Ready for a problem."),
-            meta: "",
-          });
+          if (!merged.preservedPending) {
+            setSessionGenerationStatus(nextActive.id, {
+              type: restoredSteps.length ? "success" : "empty",
+              label: restoredSteps.length
+                ? merged.preservedActive ? "Explanation ready" : "Session restored"
+                : "Session ready",
+              detail: restoredSteps.length
+                ? getStatusStepText(restoredSteps)
+                : getSessionLabel(nextActive, "Ready for a problem."),
+              meta: "",
+            });
+          }
         } else {
           const session = createSession({ title: "New math session", dirty: false });
           setSessions([session]);
@@ -546,15 +550,6 @@ export default function Home() {
     };
   }, [getToken, isMock, isSignedIn, sessions, settings.productivity.autosave]);
 
-  const handleUsageUpdate = (usage) => {
-    if (!usage?.kind) return;
-    setUsageByKind((prev) => ({
-      ...prev,
-      [usage.kind]: usage,
-      ...(usage.aggregateKind ? { [usage.aggregateKind]: { ...usage, kind: usage.aggregateKind } } : {}),
-    }));
-  };
-
   const handleNewSession = () => {
     const session = createSession();
     const nextSessions = [session, ...sessionsRef.current];
@@ -614,14 +609,35 @@ export default function Home() {
     });
   };
 
-  const handleHistoryChange = (messages) => {
-    updateActiveSession((session) => ({
-      messages,
-      title:
-        session.problem?.steps?.length || messages.length === 0
-          ? session.title
-          : compactTitle(messages[0]?.text),
-    }));
+  const handleHistoryChange = (messages, { operationContext = null, targetSessionId = "" } = {}) => {
+    const operationDecision = operationContext
+      ? getOperationApplyDecision(operationContext)
+      : { apply: true, targetSessionId: targetSessionId || activeSessionIdRef.current, reason: "legacy-history" };
+    if (!operationDecision.apply) {
+      logSessionOperation("operation-history-discarded", {
+        operationContext,
+        activeSessionId: activeSessionIdRef.current,
+        reason: operationDecision.reason,
+        applied: false,
+      });
+      return;
+    }
+    const sessionId = operationDecision.targetSessionId;
+    setSessions((prev) => {
+      const nextSessions = prev.map((session) => session.id === sessionId
+        ? {
+            ...session,
+            messages,
+            title: session.problem?.steps?.length || messages.length === 0
+              ? session.title
+              : compactTitle(messages[0]?.text),
+            updatedAt: new Date().toISOString(),
+            dirty: true,
+          }
+        : session);
+      sessionsRef.current = nextSessions;
+      return nextSessions;
+    });
   };
 
   const handleProblemGenerated = (data, operationContext = data?._operationContext || null) => {
@@ -633,7 +649,6 @@ export default function Home() {
     if (normalizedData.canonicalProblem) {
       logCanonicalProblem("solve response", normalizedData.canonicalProblem, { endpoint: normalizedData.metadata?.endpoint });
     }
-    handleUsageUpdate(normalizedData.usage || normalizedData.metadata?.usage);
     const operationDecision = operationContext
       ? getOperationApplyDecision(operationContext)
       : { apply: true, targetSessionId: data?._requestSessionId || data?.requestSessionId || activeSessionIdRef.current, reason: "legacy-request" };
@@ -760,7 +775,6 @@ export default function Home() {
   };
 
   const handleExtractionReview = (extraction, operationContext = extraction?._operationContext || null) => {
-    handleUsageUpdate(extraction?.usage);
     const operationDecision = getOperationApplyDecision(operationContext);
     if (!operationDecision.apply) {
       logSessionOperation("operation-result-discarded", {
@@ -843,7 +857,6 @@ export default function Home() {
     retryable = false,
     operationContext = null,
   }) => {
-    handleUsageUpdate(usage);
     const operationDecision = operationContext
       ? getOperationApplyDecision(operationContext)
       : { apply: true, targetSessionId: activeSessionIdRef.current, reason: "legacy-error" };
@@ -919,12 +932,12 @@ export default function Home() {
     });
   };
 
-  const handleWindowsChange = useCallback((windows) => {
+  const handleWindowsChange = useCallback((windows, sessionId = activeSessionId) => {
     if (!settings.interaction.stickyLensPositions) return;
     const pinnedWindows = windows.filter((window) => window.pinned);
     setSessions((prev) =>
       prev.map((session) => {
-        if (session.id !== activeSessionId) return session;
+        if (session.id !== sessionId) return session;
         const current = import.meta.env.DEV
           ? measureOmniSync("session.pinned-windows.stringify-current", () => JSON.stringify(session.pinnedWindows || []), {
             pinnedWindowCount: session.pinnedWindows?.length || 0,
@@ -975,28 +988,14 @@ export default function Home() {
     problem.sessionId,
     renderedStepCount,
   ]);
-  const aiUsage = usageByKind.ai || usageByKind.explanation || usageByKind.image;
-  const tokenDaily = aiUsage?.tokens?.daily;
-  const tokenMonthly = aiUsage?.tokens?.monthly;
-  const usageBadges = [
-    { key: "ai", label: "AI", usage: aiUsage },
-    tokenDaily && {
-      key: "tokens",
-      label: "Tokens",
-      usage: {
-        ...tokenDaily,
-        monthly: tokenMonthly,
-      },
-    },
-  ].filter((item) => item?.usage);
 
   return (
     <HoverProvider
-      key={providerKey}
       initialWindows={activeSession?.pinnedWindows || []}
       onWindowsChange={handleWindowsChange}
       settings={settings}
       problem={problem}
+      sessionId={providerKey}
     >
       <div className="omni-shell min-h-screen w-full overflow-x-hidden text-foreground">
         <SessionSidebar
@@ -1013,46 +1012,30 @@ export default function Home() {
 
         <div className="min-h-screen lg:pl-[280px]">
           <header className="sticky top-0 z-40 border-b border-white/[0.06] bg-[#061116]/80 backdrop-blur-xl">
-            <div className="mx-auto flex w-full max-w-[clamp(1100px,88vw,1680px)] flex-col gap-4 px-4 py-4 sm:px-6 xl:px-10">
-              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="mx-auto flex w-full max-w-[clamp(1100px,88vw,1680px)] flex-col gap-2 px-4 py-2 sm:px-6 xl:px-10">
+              <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
                   <button
                     type="button"
                     onClick={() => setSidebarOpen(true)}
-                    className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-2.5 text-slate-200/75 transition-colors hover:text-teal-100 lg:hidden"
+                    className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-2 text-slate-200/75 transition-colors hover:text-teal-100 lg:hidden"
                     aria-label="Open sessions"
                   >
                     <Menu className="h-5 w-5" />
                   </button>
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
-                      <h1 className="truncate font-sans text-xl font-semibold tracking-normal text-cyan-50">
-                        {getSessionLabel(activeSession, "OmniMath")}
+                      <h1 className="shrink-0 font-sans text-base font-semibold tracking-normal text-cyan-50">
+                        OmniMath
                       </h1>
-                      <span className="shrink-0 rounded-full border border-teal-300/20 bg-teal-300/10 px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-200/80">
-                        AI Tutor
+                      <span className="truncate text-xs text-slate-400" title={getSessionLabel(activeSession, "New session")}>
+                        {getSessionLabel(activeSession, "New session")}
                       </span>
                     </div>
-                    <p className="mt-0.5 truncate text-sm text-slate-300/60">
-                      Guided math explanations with inspectable steps.
-                    </p>
                   </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3">
-                  {usageBadges.map(({ key, label, usage }) => (
-                    <div
-                      key={key}
-                      className="rounded-full border border-teal-300/[0.16] bg-teal-300/[0.055] px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-teal-100/75"
-                    >
-                      {label}: {getUsageUsed(usage)}/{usage.limit} used today
-                      {usage.monthly ? ` · ${getUsageUsed(usage.monthly)}/${usage.monthly.limit} used this month` : ""}
-                    </div>
-                  ))}
-                  <div className="hidden items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.035] px-3 py-1.5 text-xs text-slate-300/60 md:flex">
-                    <GraduationCap className="h-3.5 w-3.5 text-teal-200/70" />
-                    Hover, drag-select, or right-click to pin.
-                  </div>
                   <ExportButton
                     targetRef={boardRef}
                     filename={getProblemLabel(problem, "omnimath-session").toLowerCase().replace(/\s+/g, "-")}
@@ -1062,30 +1045,32 @@ export default function Home() {
                 </div>
               </div>
 
-              <div className="flex flex-col gap-3 xl:flex-row xl:items-start">
-                <div className="min-w-0 flex-1">
-                  <ProblemInput
-                    key={activeSession?.id}
+              <div>
+                  <PrimaryMathComposer
                     activeSessionId={activeSession?.id}
+                    problem={problem}
                     history={activeSession?.messages ?? []}
                     onHistoryChange={handleHistoryChange}
                     onReset={handleProblemReset}
                     onProblemGenerated={handleProblemGenerated}
                     onGenerationStart={handleGenerationStart}
                     onGenerationError={handleGenerationError}
+                    canApplyOperation={canApplyOperation}
+                    imageUpload={(
+                      <ImageUpload
+                        activeSessionId={activeSession?.id}
+                        history={activeSession?.messages ?? []}
+                        onCreateOperation={createOperationContext}
+                        canApplyOperation={canApplyOperation}
+                        onProblemGenerated={handleProblemGenerated}
+                        onGenerationStart={handleGenerationStart}
+                        onGenerationError={handleGenerationError}
+                        onExtractionReview={handleExtractionReview}
+                        onUsageUpdate={null}
+                        onReviewedProblemSubmitted={handleReviewedProblemSubmitted}
+                      />
+                    )}
                   />
-                </div>
-                <ImageUpload
-                  activeSessionId={activeSession?.id}
-                  onCreateOperation={createOperationContext}
-                  canApplyOperation={canApplyOperation}
-                  onProblemGenerated={handleProblemGenerated}
-                  onGenerationStart={handleGenerationStart}
-                  onGenerationError={handleGenerationError}
-                  onExtractionReview={handleExtractionReview}
-                  onUsageUpdate={handleUsageUpdate}
-                  onReviewedProblemSubmitted={handleReviewedProblemSubmitted}
-                />
               </div>
 
               {displayedGenerationStatus.type !== "error" && displayedGenerationStatus.type !== "limit" && (
@@ -1094,7 +1079,7 @@ export default function Home() {
             </div>
           </header>
 
-          <main ref={boardRef} className="relative z-10 mx-auto w-full max-w-[clamp(1100px,88vw,1680px)] px-4 py-8 sm:px-6 xl:px-10">
+          <main ref={boardRef} className="relative z-10 mx-auto w-full max-w-[clamp(1100px,88vw,1680px)] px-4 py-4 sm:px-6 xl:px-10">
             <div className="mx-auto min-w-0">
               <IssueCard status={displayedGenerationStatus} />
               <ProblemBlock problem={problem} loading={isGenerating} />

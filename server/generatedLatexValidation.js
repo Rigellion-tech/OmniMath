@@ -1,5 +1,5 @@
-import katex from "katex";
 import { splitEquationChainLatex } from "../src/lib/equationChains.js";
+import { katexParsesLatex } from "../src/lib/latexRenderability.js";
 
 const LOST_COMMAND_NAMES = [
   "frac",
@@ -244,7 +244,9 @@ function commandIssues(value = "") {
   issues.push(...fractionCommandIssues(text));
   if (/(^|[^\\])\\sqrt(?!\s*(?:\[[^\]]+\]\s*)?\{)/u.test(text)) issues.push("incomplete_sqrt_command");
   if (/\\(?:left|right|begin|end|text|mathrm|mathbf|vec|hat)\s*$/u.test(text)) issues.push("incomplete_command");
-  if (/(^|[^\\])\\\s*$/u.test(text)) issues.push("trailing_backslash");
+  // Scan the original field. Removing a trailing \text{...} body first turns a
+  // valid TeX control space (`\ `) into a seeming incomplete escape.
+  if (/(^|[^\\])\\$/u.test(String(value || ""))) issues.push("trailing_backslash");
   if (LOST_COMMAND_PATTERN.test(text)) issues.push("lost_latex_command_backslash");
   if (/\{(?:frac|sqrt|int|iint|iiint|oint|sin|cos|tan|ln|log|pi|delta)\}/iu.test(text)) {
     issues.push("malformed_command_remnant");
@@ -253,17 +255,9 @@ function commandIssues(value = "") {
 }
 
 function katexParses(value = "") {
-  try {
-    katex.renderToString(value, {
-      throwOnError: true,
-      strict: "error",
-      trust: false,
-      displayMode: /\\begin\s*\{(?:aligned|align|alignat|gathered|split|array|matrix|pmatrix|bmatrix)\}/u.test(value),
-    });
-    return null;
-  } catch (error) {
-    return error?.message || "KaTeX parse failed";
-  }
+  return katexParsesLatex(value, {
+    displayMode: /\\begin\s*\{(?:aligned|align|alignat|gathered|split|array|matrix|pmatrix|bmatrix|cases)\}/u.test(value),
+  }) ? null : "KaTeX could not render this expression";
 }
 
 function splitGeneratedLines(value = "") {
@@ -271,8 +265,10 @@ function splitGeneratedLines(value = "") {
   if (/\\begin\s*\{([A-Za-z*]+)\}[\s\S]*\\end\s*\{\1\}/u.test(source)) return [source];
   return source
     .split(/\r?\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+    // A terminal `\ ` is a valid TeX control-space token. Trimming the line
+    // here would turn it into a bare, invalid slash before KaTeX sees it.
+    .map((line) => line.trimStart())
+    .filter((line) => Boolean(line.trim()));
 }
 
 function stripTextCommandBodies(value = "") {
@@ -315,7 +311,7 @@ function finalAnswerContractIssues(value = "") {
   if (splitGeneratedLines(source).length > 1) {
     issues.push("final_answer_contains_multiple_physical_lines");
   }
-  if (/\\\\(?=\s|$|\[)|\\\\(?:Rightarrow|Longrightarrow|rightarrow|implies)\b/u.test(source)) {
+  if (/(^|[^\\])\\\\(?!\\)|\\newline\b/u.test(source)) {
     issues.push("final_answer_contains_line_break_command");
   }
   if (/\\(?:Rightarrow|Longrightarrow|rightarrow|implies)\b|⇒|⟹/u.test(source)) {
@@ -366,37 +362,53 @@ export function validateGeneratedLatex(value = "", {
   allowEmpty = false,
   strictParse = true,
 } = {}) {
-  const source = String(value || "").trim();
+  const raw = String(value || "");
+  const source = raw.trim();
   const issues = [];
+  const warnings = [];
   if (!source) {
     if (!allowEmpty) issues.push("empty_latex");
-    return { valid: issues.length === 0, fieldPath, value: source, issues };
+    return { valid: issues.length === 0, fieldPath, value: source, issues, warnings };
   }
 
-  if (!hasBalancedBraces(source)) issues.push("unmatched_braces");
+  const lexicalIssues = [];
+  if (!hasBalancedBraces(source)) lexicalIssues.push("unmatched_braces");
   if (/(^|[^\\])\\left\b/u.test(source) || /(^|[^\\])\\right\b/u.test(source)) {
     const leftCount = (source.match(/\\left\b/g) || []).length;
     const rightCount = (source.match(/\\right\b/g) || []).length;
-    if (leftCount !== rightCount) issues.push("unmatched_left_right");
+    if (leftCount !== rightCount) lexicalIssues.push("unmatched_left_right");
   }
-  if (!hasBalancedPlainDelimiters(source)) issues.push("unmatched_delimiters");
-  issues.push(...commandIssues(source));
+  if (!hasBalancedPlainDelimiters(source)) lexicalIssues.push("unmatched_delimiters");
+  lexicalIssues.push(...commandIssues(raw));
   if (finalAnswer && strictFinalAnswerContract) {
-    issues.push(...finalAnswerContractIssues(source));
+    warnings.push(...finalAnswerContractIssues(source));
   }
   if (finalAnswer) {
     const detached = detachedFinalAnswerIssue(source);
-    if (detached) issues.push(detached);
+    if (detached) warnings.push(detached);
   }
 
-  if (strictParse) {
-    for (const [index, line] of splitGeneratedLines(source).entries()) {
-      const parseError = katexParses(line);
-      if (parseError) {
-        issues.push(`katex_parse_failed:${index + 1}:${parseError}`);
-        break;
-      }
+  // KaTeX is the renderability authority. A lexical heuristic cannot reject
+  // a field that the same renderer used by the UI accepts.
+  let parseError = null;
+  for (const [index, line] of splitGeneratedLines(raw).entries()) {
+    const error = katexParses(line);
+    if (error) {
+      parseError = `katex_parse_failed:${index + 1}:${error}`;
+      break;
     }
+  }
+  if (parseError && strictParse) issues.push(parseError);
+  for (const issue of lexicalIssues) {
+    // Plain TeX delimiters such as [a+b) can parse as independent glyphs even
+    // though the expression is structurally unfinished. An empty TeX fraction
+    // operand also parses but cannot express a complete mathematical value.
+    // Interval notation is handled by hasBalancedPlainDelimiters above.
+    (parseError || issue === "unmatched_delimiters" || issue === "incomplete_fraction_command"
+      ? issues : warnings).push(issue);
+  }
+  if (parseError && !strictParse && lexicalIssues.length === 0) {
+    warnings.push(parseError);
   }
 
   return {
@@ -404,11 +416,14 @@ export function validateGeneratedLatex(value = "", {
     fieldPath,
     value: source,
     issues: [...new Set(issues)],
+    warnings: [...new Set(warnings)],
   };
 }
 
+export function collectGeneratedLatexValidationFindings(fields = []) {
+  return fields.map((field) => validateGeneratedLatex(field.value, field));
+}
+
 export function collectGeneratedLatexValidationIssues(fields = []) {
-  return fields
-    .map((field) => validateGeneratedLatex(field.value, field))
-    .filter((result) => !result.valid);
+  return collectGeneratedLatexValidationFindings(fields).filter((result) => !result.valid);
 }

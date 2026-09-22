@@ -461,7 +461,7 @@ function tokenIdFromEventTarget(event) {
     ?.getAttribute("data-token-id") || null;
 }
 
-export function HoverProvider({ children, initialWindows = [], onWindowsChange, settings, problem }) {
+export function HoverProvider({ children, initialWindows = [], onWindowsChange, settings, problem, sessionId = "" }) {
   const normalizedInitialWindows = initialWindows.map((window) => ({ ...window, pinned: true }));
   const [activeChunkId, setActiveChunkId] = useState(null);
   const [activeChunkData, setActiveChunkData] = useState(null);
@@ -475,6 +475,8 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const [hoverLens, setHoverLens] = useState(null);
   const [pinnedLenses, setPinnedLenses] = useState(normalizedInitialWindows);
   const [selectionState, setSelectionState] = useState(emptySelectionState);
+  const previousSessionIdRef = useRef(sessionId);
+  const skipWindowPersistenceRef = useRef(false);
   const selectionStateRef = useRef(selectionState);
   selectionStateRef.current = selectionState;
   const timerRefs = useRef({ short: null, medium: null, deep: null, preview: null, clear: null });
@@ -492,6 +494,38 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const tokenRegistryRef = useRef(new Map());
   const measuredLeafRegistryRef = useRef(new Map());
 
+  useEffect(() => {
+    if (previousSessionIdRef.current === sessionId) return;
+    previousSessionIdRef.current = sessionId;
+    skipWindowPersistenceRef.current = true;
+    Object.values(timerRefs.current).forEach((timer) => {
+      if (timer) clearTimeout(timer);
+    });
+    timerRefs.current = { short: null, medium: null, deep: null, preview: null, clear: null };
+    hoverRevisionRef.current += 1;
+    previousActiveTokenRef.current = null;
+    activeChunkIdRef.current = null;
+    activeStepIdRef.current = null;
+    hoverLensRef.current = null;
+    logicalHoverOwnerRef.current = null;
+    hoverPointerRef.current = null;
+    hoverAnchorRef.current = { element: null, rect: null, size: DEFAULT_QUICK_TOOLTIP_SIZE };
+    tokenRegistryRef.current.clear();
+    measuredLeafRegistryRef.current.clear();
+    selectionStateRef.current = emptySelectionState();
+    setActiveChunkId(null);
+    setActiveChunkData(null);
+    setExplanationLevel(0);
+    setActiveStepId(null);
+    setActiveConceptId(null);
+    setSelectedChunkData(null);
+    setSelectedChunkStepId(null);
+    setSelectedConceptId(null);
+    setHoverLens(null);
+    setPinnedLenses(normalizedInitialWindows);
+    setSelectionState(emptySelectionState());
+  }, [sessionId]);
+
   const getStepContext = useCallback((stepId) => {
     const currentStep = problem?.steps?.find((step) => step.id === stepId) || null;
     return {
@@ -504,8 +538,12 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   }, [problem]);
 
   useEffect(() => {
-    onWindowsChange?.(pinnedLenses);
-  }, [pinnedLenses, onWindowsChange]);
+    if (skipWindowPersistenceRef.current) {
+      skipWindowPersistenceRef.current = false;
+      return;
+    }
+    onWindowsChange?.(pinnedLenses, sessionId);
+  }, [pinnedLenses, onWindowsChange, sessionId]);
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof window === "undefined") return undefined;
@@ -1601,6 +1639,15 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     );
   }, []);
 
+  const updateExplanationWindow = useCallback((id, updates) => {
+    setPinnedLenses((prev) => prev.map((window) => {
+      if (window.id !== id) return window;
+      const patch = typeof updates === "function" ? updates(window) : updates;
+      if (!patch || Object.keys(patch).every((key) => window[key] === patch[key])) return window;
+      return { ...window, ...patch };
+    }));
+  }, []);
+
   const moveExplanationWindow = useCallback((id, x, y, size = WINDOW_SIZE) => {
     const position = clampPosition(x, y, size, 0);
     setPinnedLenses((prev) => {
@@ -1757,6 +1804,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     closeExplanationWindow,
     toggleWindowPin,
     setWindowDepth,
+    updateExplanationWindow,
     moveExplanationWindow,
   }), [
     addPinnedChunkLens,
@@ -1792,6 +1840,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     settings,
     setWindowDepth,
     toggleWindowPin,
+    updateExplanationWindow,
   ]);
 
   return (

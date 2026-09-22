@@ -4,6 +4,7 @@ import KeyboardShortcutsModal from "./KeyboardShortcutsModal";
 import { InteractiveMathLine } from "./MathStep";
 import MathRenderer from "./MathRenderer";
 import { normalizeMathRendererInput } from "./MathRenderer";
+import MathText from "./MathText";
 import SolutionFlow from "./SolutionFlow";
 import WorkspaceCompareView from "./WorkspaceCompareView";
 import { useHoverActions } from "@/lib/HoverContext";
@@ -62,11 +63,19 @@ function problemStatementLines(problem) {
     && !canonicalLatex
     && !problem.imageSource
     && !problem.extractedProblemText;
+  if (shouldPreviewCanonicalText) {
+    lines.push({
+      id: "problem-mixed-source",
+      kind: "mixed",
+      text: canonicalText,
+      role: "problem",
+    });
+    return lines;
+  }
   const expression = statementLineLatex(
     canonicalLatex
     || problem.extractedProblemLatex
     || problem.problemLatex
-    || (shouldPreviewCanonicalText ? canonicalText : "")
     || (!problem.imageSource && !problem.extractedProblemText ? problem.originalProblem : "")
     || (!problem.imageSource && !problem.extractedProblemText ? problem.problem : "")
     || problem.expression
@@ -126,13 +135,16 @@ function getProblemSubtitle(problem, text = "") {
 
 function getProblemMetadata(problem) {
   const parts = [];
+  const reviewAction = problem?.reviewAction || problem?.imageSource?.reviewAction || null;
   if (problem?.imageSource || problem?.extractedProblemText || problem?.extractedProblemLatex) {
     parts.push("From image OCR");
   }
-  if (problem?.imageSource?.solveDecision === "edited" || problem?.imageSource?.editedBeforeSolving) {
+  if (reviewAction?.kind === "edited") {
     parts.push("edited extraction");
-  } else if (problem?.imageSource || problem?.extractedProblemText || problem?.extractedProblemLatex) {
+  } else if (reviewAction?.kind === "confirmed_unchanged") {
     parts.push("reviewed extraction");
+  } else if (problem?.imageSource || problem?.extractedProblemText || problem?.extractedProblemLatex) {
+    parts.push("automated extraction");
   }
   const confidence = problem?.confidence ?? problem?.extractionValidation?.confidence;
   if (Number.isFinite(confidence)) parts.push(`${Math.round(confidence)}% confidence`);
@@ -200,9 +212,16 @@ function ProblemSummaryCard({ problem, lines }) {
                 {lines.map((line) => (
                   <div
                     key={line.id}
-                    className="min-w-0 max-w-full font-serif text-[20px] italic leading-[2.2rem] text-cyan-50/90 md:text-[22px] md:leading-[2.45rem]"
+                    className={cn(
+                      "min-w-0 max-w-full text-cyan-50/90",
+                      line.kind === "mixed"
+                        ? "omni-text-wrap-safe font-sans text-base not-italic leading-8"
+                        : "font-serif text-[20px] italic leading-[2.2rem] md:text-[22px] md:leading-[2.45rem]"
+                    )}
                   >
-                    <InteractiveMathLine line={line} stepId="full-problem-preview" />
+                    {line.kind === "mixed"
+                      ? <MathText>{line.text}</MathText>
+                      : <InteractiveMathLine line={line} stepId="full-problem-preview" />}
                   </div>
                 ))}
               </div>
@@ -225,19 +244,28 @@ function ExtractionReview({ problem }) {
       : [];
   if (!extractedText && !extractedLatex) return null;
 
-  const validation = problem.extractionValidation || {};
-  const issues = Array.isArray(validation.issues) ? validation.issues : [];
-  const status = validation.status || "ok";
-  const mathIntegrityScore = Number.isFinite(validation.mathIntegrityScore)
+  const validation = problem.extractionValidation || problem.imageSource?.extractionValidation || null;
+  const hasValidation = Boolean(validation && typeof validation === "object");
+  const issues = Array.isArray(validation?.issues) ? validation.issues : [];
+  const status = validation?.status || "unknown";
+  const automatedDecision = problem.ocrSolveDecision || problem.imageSource?.ocrSolveDecision || null;
+  const automatedReviewRequired = automatedDecision?.reviewRequired === true;
+  const mathIntegrityScore = Number.isFinite(validation?.mathIntegrityScore)
     ? validation.mathIntegrityScore
-    : Number.isFinite(validation.confidence) ? validation.confidence : null;
-  const ocrConfidence = Number.isFinite(validation.ocrConfidence)
+    : Number.isFinite(validation?.confidence) ? validation.confidence : null;
+  const ocrConfidence = Number.isFinite(validation?.ocrConfidence)
     ? validation.ocrConfidence
-    : Number.isFinite(validation.metrics?.ocrConfidence) ? validation.metrics.ocrConfidence : null;
+    : Number.isFinite(validation?.metrics?.ocrConfidence) ? validation.metrics.ocrConfidence : null;
   const isDanger = status === "danger";
   const isWarning = status === "warning";
-  const StatusIcon = isDanger || isWarning ? AlertTriangle : CheckCircle2;
-  const statusLabel = isDanger ? "Review required" : isWarning ? "Review suggested" : "Extraction checked";
+  const StatusIcon = !hasValidation || automatedReviewRequired || isDanger || isWarning ? AlertTriangle : CheckCircle2;
+  const statusLabel = !hasValidation
+    ? "Extraction check unavailable"
+    : automatedReviewRequired || isDanger
+      ? "Automated check flagged review"
+      : isWarning
+        ? "Automated check: review suggested"
+        : "Automated checks passed";
   const shouldShowRenderedFallback = !extractedText && displaySegments.length > 0;
   const latexLine = !extractedText && extractedLatex && displaySegments.length === 0
     ? {

@@ -20,6 +20,7 @@ import {
   RESPONSE_FAILURE_TYPES,
 } from "./mathExplanationSchema.js";
 import { sanitizeStringValues } from "../src/lib/textSanitization.js";
+import { assertSolveCandidateStructure, inspectSolveCandidateStructure } from "./solveCandidateStructure.js";
 import { inspectLatexControlCharacterStage } from "./latexControlCharacterRecovery.js";
 import { logBackendReasoningLatexStage } from "./reasoningLatexDiagnostics.js";
 import {
@@ -92,6 +93,84 @@ function logOpenAiDebug(event, details = {}) {
   console.info("[omnimath:openai-debug]", {
     event,
     ...details,
+  });
+}
+
+const ACCEPTANCE_TELEMETRY_MAX_ISSUES = 40;
+const ACCEPTANCE_TELEMETRY_MAX_ISSUE_CHARS = 160;
+const CANONICAL_INPUT_PROBE_MAX_CHARS = 4000;
+
+function boundedTelemetryIssues(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [values])
+    .flatMap((value) => typeof value === "string" ? [value] : [])
+    .map((value) => value.trim().slice(0, ACCEPTANCE_TELEMETRY_MAX_ISSUE_CHARS))
+    .filter(Boolean))]
+    .slice(0, ACCEPTANCE_TELEMETRY_MAX_ISSUES);
+}
+
+function acceptanceTelemetryEnabled() {
+  const value = String(process.env.OMNIMATH_SOLVE_ACCEPTANCE_TELEMETRY ?? "true").toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+/**
+ * Emit only bounded candidate metadata. This is intentionally independent of
+ * the verbose solve debug flag so production can reconstruct acceptance
+ * decisions without writing prompts, history, or generated LaTeX to logs.
+ */
+export function logSolveCandidateOutcome({
+  requestId = null,
+  attemptId = null,
+  candidateId = null,
+  solveMode = null,
+  model = null,
+  providerCompletionStatus = null,
+  truncationState = null,
+  normalizationActions = [],
+  fatalFindings = [],
+  recoverableFindings = [],
+  warnings = [],
+  retryReason = null,
+  previousUsableCandidate = false,
+  selectedForUi = false,
+  outcome = null,
+} = {}) {
+  if (!acceptanceTelemetryEnabled()) return;
+  console.info("[omnimath:solve-candidate-outcome]", {
+    requestId,
+    attemptId,
+    candidateId,
+    solveMode,
+    model,
+    providerCompletionStatus,
+    truncationState,
+    normalizationActions: boundedTelemetryIssues(normalizationActions),
+    fatalFindings: boundedTelemetryIssues(fatalFindings),
+    recoverableFindings: boundedTelemetryIssues(recoverableFindings),
+    warnings: boundedTelemetryIssues(warnings),
+    retryReason: typeof retryReason === "string" ? retryReason.slice(0, ACCEPTANCE_TELEMETRY_MAX_ISSUE_CHARS) : null,
+    previousUsableCandidate: Boolean(previousUsableCandidate),
+    selectedForUi: Boolean(selectedForUi),
+    outcome: typeof outcome === "string" ? outcome : null,
+  });
+}
+
+function logCanonicalInputProbe({ requestId = null, model = null, solveMode = null, inputSource = null, canonicalInput = "", providerInput = [] } = {}) {
+  const enabled = process.env.NODE_ENV !== "production"
+    && ["1", "true", "yes"].includes(String(process.env.OMNIMATH_DEBUG_CANONICAL_INPUT || "").toLowerCase());
+  if (!enabled) return;
+  const bounded = String(canonicalInput || "").slice(0, CANONICAL_INPUT_PROBE_MAX_CHARS);
+  const promptText = providerInput?.[0]?.content?.find((item) => item?.type === "input_text")?.text || "";
+  const occurrenceCount = canonicalInput ? promptText.split(String(canonicalInput)).length - 1 : 0;
+  console.info("[omnimath:canonical-input-probe]", {
+    requestId,
+    model,
+    solveMode,
+    canonicalInputChars: String(canonicalInput || "").length,
+    truncated: bounded.length < String(canonicalInput || "").length,
+    canonicalProblemInput: { problemText: bounded, source: inputSource },
+    providerInputHash: hashDebugText(JSON.stringify(providerInput)),
+    canonicalTextOccurrencesInProviderInput: occurrenceCount,
   });
 }
 
@@ -244,7 +323,7 @@ export function getSolveTotalTimeoutMs() {
 }
 
 function getOpenAiMaxAttempts(modelPath = "solver") {
-  if (modelPath === "solver") return 3;
+  if (modelPath === "solver" || modelPath === "canonicalSolve") return 3;
   return 2;
 }
 
@@ -1443,7 +1522,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
     rawOutputChars: outputDiagnostics.rawOutputChars,
     rawOutput: outputText,
   });
-  if (isLengthFinishReason(responseBody)) {
+  if (isExplicitlyIncompleteResponse(responseBody) || isLengthFinishReason(responseBody)) {
     const error = createTruncatedJsonError(outputText, responseBody);
     attachResponseFailureDiagnostics(error, outputDiagnostics, {
       responseFailureType: RESPONSE_FAILURE_TYPES.TRUNCATED,
@@ -1610,6 +1689,14 @@ async function requestOpenAi({
   };
   logOpenAiModelSelection(modelPath, { purpose, selection });
   logOpenAiRequest({ purpose, payload });
+  logCanonicalInputProbe({
+    requestId: debugContext.requestId || null,
+    model: selection.modelId,
+    solveMode: selection.solveMode,
+    inputSource: debugContext.inputSource || null,
+    canonicalInput: debugContext.normalizedProblem || "",
+    providerInput: payload.input,
+  });
   logOpenAiDebug("request_settings", {
     requestId: debugContext.requestId || null,
     purpose,
@@ -1642,7 +1729,15 @@ async function requestOpenAi({
   return responseBody;
 }
 
-async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "text_completion", modelPath = "solver" }) {
+async function requestOpenAiText({
+  content,
+  maxOutputTokens = 900,
+  purpose = "text_completion",
+  modelPath = "solver",
+  deadlineAt = null,
+  timeoutRole = null,
+  requireComplete = false,
+}) {
   const selection = selectOpenAiModel({ modelPath });
   const payload = {
     model: selection.modelId,
@@ -1656,8 +1751,9 @@ async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "te
     modelPath,
     payload,
     debugContext: {
-      modelRole: selection.role,
+      modelRole: timeoutRole || selection.role,
       solveMode: selection.solveMode,
+      solveDeadlineAt: Number(deadlineAt) || null,
     },
   });
 
@@ -1678,9 +1774,29 @@ async function requestOpenAiText({ content, maxOutputTokens = 900, purpose = "te
       ?? 0,
   };
   return {
-    text: extractOutputText(responseBody, diagnostics).trim(),
+    text: extractOpenAiTextResponse(responseBody, { diagnostics, requireComplete }),
     usage: responseBody.usage || null,
   };
+}
+
+export function extractOpenAiTextResponse(responseBody, { diagnostics = {}, requireComplete = false } = {}) {
+  if (requireComplete && isExplicitlyIncompleteResponse(responseBody)) {
+    throw attachResponseFailureDiagnostics(
+      createTruncatedJsonError("", responseBody),
+      diagnostics,
+      { responseFailureType: RESPONSE_FAILURE_TYPES.TRUNCATED },
+    );
+  }
+  const output = extractOutputText(responseBody, diagnostics).trim();
+  if (requireComplete && !output) {
+    throw attachResponseFailureDiagnostics(Object.assign(new Error("OpenAI response text was empty."), {
+      statusCode: 502,
+      code: "AI_RESPONSE_INVALID",
+      responseFailureType: "empty_text",
+      publicMessage: "The AI service returned an incomplete explanation.",
+    }), diagnostics, { responseFailureType: "empty_text" });
+  }
+  return output;
 }
 
 function mergeUsage(left, right) {
@@ -1729,23 +1845,17 @@ function compactRetryFeedback(error = {}) {
       "- Use fewer steps and concise reasoning so the JSON completes.",
     ].join("\n");
   }
-  if (
-    type === RESPONSE_FAILURE_TYPES.FIELD_STRUCTURE
-    || hasIssueCode(error, "final_answer_splits_into_multiple_unrelated_fragments")
-  ) {
+  if (type === RESPONSE_FAILURE_TYPES.FIELD_STRUCTURE) {
     const codeText = issueCodes.length ? issueCodes.join(", ") : "field_structure";
     return [
-      "The previous response violated the final-answer field contract. Retry in compact mode.",
+      "The previous response violated a required structured field contract. Retry in compact mode.",
       `Validation issue code: ${codeText}`,
       "",
-      "Final-answer structure correction:",
-      "- Return the final result as exactly one standalone mathematical expression.",
-      "- Do not include derivation text in the final answer.",
-      "- Do not include \\Rightarrow.",
-      "- Do not include line breaks.",
-      "- Do not include multiple unrelated equations.",
-      "- Put derivation only in earlier steps.",
-      "- For compact format, ensure the last step latex contains only the final standalone result.",
+      "Required-field correction:",
+      "- Include the required title, problem, steps, and step fields.",
+      "- Keep the final step complete and renderable.",
+      "- Preserve systems, conditions, branches, and related equations when they are part of the answer.",
+      "- Put derivation text in reasoning fields when practical.",
     ].join("\n");
   }
   if (type === RESPONSE_FAILURE_TYPES.JSON_PARSE) {
@@ -1786,7 +1896,7 @@ function compactRetryFeedback(error = {}) {
     "Validation correction:",
     "- Return valid JSON matching the compact schema.",
     "- Keep all math fields valid LaTeX.",
-    "- Keep the final result as one standalone expression in the last step.",
+    "- Keep the complete final result in the last step, including related conditions or equations.",
   ].filter((line) => line !== "").join("\n");
 }
 
@@ -1803,13 +1913,13 @@ Compact mode output rules:
 - Set anchors to [] for every step unless one anchor is essential.
 - Keep reasoning to 1 concise sentence, maximum 25 words.
 - Do not restate the entire original problem as step 1.
-- For equation solving, each displayed latex step must transform the equation currently being solved.
+- For equation solving, each displayed latex step should transform the equation currently being solved.
 - Put coefficient facts and identity checks in reasoning, not as standalone latex steps.
 - For perfect-square quadratics, use the shortest chain: original equation, factored square equation, linear equation, final answer.
 - Preserve mathematical correctness over hover interactivity.
 - Use compact equations for verification; avoid prose-heavy derivations.
-- The last step latex is treated as finalAnswerLatex and must obey the standalone-final-expression contract: exactly one final expression, or one equation assigning the original expression to the final value.
-- The last step latex must contain no prose, explanation, intermediate derivation, \\Rightarrow, multiline content, display separators, or multiple unrelated equations.
+  - The last step latex is treated as finalAnswerLatex and must contain the complete final result.
+  - Preserve related systems, boundary or initial conditions, branches, and equivalent final forms in the last step when they are part of the answer.
 - Return JSON only.
 
 Original problem context:
@@ -1915,6 +2025,49 @@ async function notifyGeneratedResponseFailure(callback, details = {}) {
   }
 }
 
+function normalizeProviderSolveCandidate(value, { image = false, compact = false, originalProblem = "" } = {}) {
+  const structured = image
+    ? assertImageSolveResponse(value)
+    : compact
+      ? assertCompactSolveResponse(value, originalProblem)
+      : assertFastSolveResponse(value, originalProblem);
+  const normalized = image
+    ? convertImageSolveToMathExplanation(structured)
+    : convertFastSolveToMathExplanation(structured, { originalProblem, includeProblemStep: false });
+
+  // Evaluate the entire candidate while it is still inside the retry boundary.
+  // A completed provider JSON object is not yet a usable browser solution.
+  const inspection = inspectSolveCandidateStructure(normalized, { stage: "normalized" });
+  if (!inspection.usable) {
+    try {
+      assertSolveCandidateStructure(normalized, { stage: "normalized" });
+    } catch (error) {
+      error.compactRetryable = true;
+      throw error;
+    }
+  }
+  const structuredInspection = inspectSolveCandidateStructure(structured, { strictParse: false });
+  const sourceSteps = Array.isArray(value?.steps) ? value.steps : [];
+  const sourceFinal = compact ? sourceSteps.at(-1)?.latex : value?.finalAnswerLatex;
+  const normalizationActions = [];
+  if (typeof sourceFinal === "string" && sourceFinal !== structured.finalAnswerLatex) {
+    normalizationActions.push("final_answer_normalized");
+  }
+  if (sourceSteps.some((step, index) => {
+    const source = image ? step?.equationLatex : step?.latex;
+    return typeof source === "string" && source !== structured.steps?.[index]?.latex;
+  })) normalizationActions.push("step_latex_normalized");
+  if (structured.finalAnswerLatex !== normalized.finalAnswerLatex) {
+    normalizationActions.push("final_answer_render_prepared");
+  }
+  Object.defineProperties(normalized, {
+    _omniNormalizationActions: { value: normalizationActions, configurable: true },
+    _omniRecoverableFindings: { value: structuredInspection.recoverableIssues, configurable: true },
+    _omniWarnings: { value: [...new Set([...structuredInspection.warnings, ...inspection.warnings])], configurable: true },
+  });
+  return normalized;
+}
+
 export async function createMathExplanation({
   prompt,
   image,
@@ -1966,6 +2119,18 @@ export async function createMathExplanation({
     });
   } catch (error) {
     attachOpenAiUsageToError(error, null, providerCallCountFromError(error));
+    logSolveCandidateOutcome({
+      requestId: solveDebugContext.requestId || null,
+      attemptId: `${solveDebugContext.requestId || "solve"}:initial-provider`,
+      candidateId: null,
+      solveMode: solveDebugContext.solveMode || debugAttemptType(solveDebugContext),
+      model: error?._omniOpenAiDiagnostics?.model || null,
+      providerCompletionStatus: "provider_failure",
+      truncationState: error?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "truncated" : null,
+      fatalFindings: [error?.code, error?.responseFailureType],
+      retryReason: error?.code || error?.responseFailureType || null,
+      outcome: "provider_failure",
+    });
     recordOrchestrationGeneration(orchestrationTelemetry, {
       error,
       debugContext: solveDebugContext,
@@ -1980,7 +2145,7 @@ export async function createMathExplanation({
   try {
     parsed = parseJsonResponse(
       responseBody,
-      (value) => (image ? assertImageSolveResponse(value) : assertFastSolveResponse(value)),
+      (value) => normalizeProviderSolveCandidate(value, { image, originalProblem }),
       {
         ...solveDebugContext,
         purpose,
@@ -1992,6 +2157,20 @@ export async function createMathExplanation({
       && !image
       && allowCompactRetry !== false;
     attachOpenAiUsageToError(error, usage, aiCallCount);
+    logSolveCandidateOutcome({
+      requestId: solveDebugContext.requestId || null,
+      attemptId: `${solveDebugContext.requestId || "solve"}:initial-full`,
+      candidateId: `${solveDebugContext.requestId || "solve"}:candidate-1`,
+      solveMode: solveDebugContext.solveMode || debugAttemptType(solveDebugContext),
+      model: error?._omniOpenAiDiagnostics?.model || null,
+      providerCompletionStatus: error?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "incomplete" : "completed",
+      truncationState: error?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "truncated" : "complete",
+      fatalFindings: [error?.code, error?.responseFailureType, ...(error?.solutionIssues || [])],
+      recoverableFindings: error?.recoverableFindings || [],
+      warnings: error?.warnings || [],
+      retryReason: compactRetryAllowed ? (error?.responseFailureType || error?.code || "validation") : null,
+      outcome: "rejected",
+    });
     recordOrchestrationGeneration(orchestrationTelemetry, {
       error,
       debugContext: solveDebugContext,
@@ -2056,6 +2235,19 @@ export async function createMathExplanation({
       });
     } catch (compactRequestError) {
       attachOpenAiUsageToError(compactRequestError, usage, aiCallCount + providerCallCountFromError(compactRequestError));
+      logSolveCandidateOutcome({
+        requestId: solveDebugContext.requestId || null,
+        attemptId: `${solveDebugContext.requestId || "solve"}:compact-provider`,
+        candidateId: `${solveDebugContext.requestId || "solve"}:candidate-2`,
+        solveMode: compactDebugContext.solveMode || "compact",
+        model: compactRequestError?._omniOpenAiDiagnostics?.model || null,
+        providerCompletionStatus: "provider_failure",
+        truncationState: compactRequestError?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "truncated" : null,
+        fatalFindings: [compactRequestError?.code, compactRequestError?.responseFailureType],
+        previousUsableCandidate: false,
+        retryReason: compactRequestError?.code || compactRequestError?.responseFailureType || null,
+        outcome: "provider_failure",
+      });
       recordOrchestrationGeneration(orchestrationTelemetry, {
         error: compactRequestError,
         usageOverride: null,
@@ -2072,7 +2264,7 @@ export async function createMathExplanation({
     try {
       parsed = parseJsonResponse(
         compactResponse,
-        (value) => assertCompactSolveResponse(value, originalProblem),
+        (value) => normalizeProviderSolveCandidate(value, { compact: true, originalProblem }),
         {
           ...solveDebugContext,
           purpose: "math_compact_solve_retry",
@@ -2084,6 +2276,19 @@ export async function createMathExplanation({
       );
     } catch (compactError) {
       attachOpenAiUsageToError(compactError, usage, aiCallCount);
+      logSolveCandidateOutcome({
+        requestId: solveDebugContext.requestId || null,
+        attemptId: `${solveDebugContext.requestId || "solve"}:compact`,
+        candidateId: `${solveDebugContext.requestId || "solve"}:candidate-2`,
+        solveMode: "compact",
+        model: compactError?._omniOpenAiDiagnostics?.model || null,
+        providerCompletionStatus: compactError?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "incomplete" : "completed",
+        truncationState: compactError?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "truncated" : "complete",
+        fatalFindings: [compactError?.code, compactError?.responseFailureType, ...(compactError?.solutionIssues || [])],
+        previousUsableCandidate: false,
+        retryReason: compactError?.code || compactError?.responseFailureType || null,
+        outcome: "rejected",
+      });
       recordOrchestrationGeneration(orchestrationTelemetry, {
         error: compactError,
         usageOverride: compactResponse.usage || null,
@@ -2120,6 +2325,20 @@ export async function createMathExplanation({
       candidateProduced: true,
       compactRetryAttempted: true,
     });
+    logSolveCandidateOutcome({
+      requestId: solveDebugContext.requestId || null,
+      attemptId: `${solveDebugContext.requestId || "solve"}:compact`,
+      candidateId: `${solveDebugContext.requestId || "solve"}:candidate-2`,
+      solveMode: "compact",
+      model: compactResponse?._omniOpenAiMeta?.model || compactResponse?.model || null,
+      providerCompletionStatus: "completed",
+      truncationState: "complete",
+      previousUsableCandidate: false,
+      normalizationActions: parsed?._omniNormalizationActions || [],
+      recoverableFindings: parsed?._omniRecoverableFindings || [],
+      warnings: parsed?._omniWarnings || [],
+      outcome: "parsed_candidate",
+    });
   }
   if (!compactFallback) {
     recordOrchestrationGeneration(orchestrationTelemetry, {
@@ -2128,10 +2347,21 @@ export async function createMathExplanation({
       startedAt: fullStartedAt,
       candidateProduced: true,
     });
+    logSolveCandidateOutcome({
+      requestId: solveDebugContext.requestId || null,
+      attemptId: `${solveDebugContext.requestId || "solve"}:initial-full`,
+      candidateId: `${solveDebugContext.requestId || "solve"}:candidate-1`,
+      solveMode: solveDebugContext.solveMode || debugAttemptType(solveDebugContext),
+      model: responseBody?._omniOpenAiMeta?.model || responseBody?.model || null,
+      providerCompletionStatus: "completed",
+      truncationState: "complete",
+      normalizationActions: parsed?._omniNormalizationActions || [],
+      recoverableFindings: parsed?._omniRecoverableFindings || [],
+      warnings: parsed?._omniWarnings || [],
+      outcome: "parsed_candidate",
+    });
   }
-  const result = image
-    ? convertImageSolveToMathExplanation(parsed)
-    : convertFastSolveToMathExplanation(parsed, { originalProblem, includeProblemStep: false });
+  const result = parsed;
 
   if (parsed?._omniOpenAiDiagnostics) {
     attachOpenAiDiagnostics(result, {
@@ -2219,9 +2449,13 @@ export async function createImageProblemExtraction({ prompt, image }) {
   return result;
 }
 
-export async function createFollowupAnswer({ prompt }) {
+export async function createFollowupAnswer({ prompt, deadlineAt = null }) {
   const result = await requestOpenAiText({
     content: [{ type: "input_text", text: prompt }],
+    purpose: "math_explanation_followup",
+    deadlineAt,
+    timeoutRole: "pinned",
+    requireComplete: true,
   });
   return result;
 }

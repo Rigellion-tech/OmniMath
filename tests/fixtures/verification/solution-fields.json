@@ -1,0 +1,1822 @@
+[
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:22",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 22,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "latex": "\\int_0^{\\pi/2}2t(-\\ln \\cos t)\\cot t\\,dt=-2\\int_0^{\\pi/2}t\\ln(\\cos t)\\cot t\\,dt"
+        },
+        {
+          "id": "s2",
+          "latex": "I"
+        }
+      ],
+      "finalAnswerLatex": "I"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:42",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 42,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "I=\\int_0^1x\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "latex": "\\begin{aligned}\nI&:=\\int_0^1x\\,dx\\\\\n&=\\frac12\n\\end{aligned}"
+        },
+        {
+          "id": "s2",
+          "latex": "I=\\frac12"
+        }
+      ],
+      "finalAnswerLatex": "I=\\frac12"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:60",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 60,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "I=\\int_0^1 t\\,dt",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "latex": "I = \\left[ \\frac{t^2}{2} \\right]_0^1 = \\frac12"
+        },
+        {
+          "id": "s2",
+          "latex": "I=\\frac12"
+        }
+      ],
+      "finalAnswerLatex": "I=\\frac12"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:81",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 81,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "```latex\n\\[\n\\\\iiint_V \\\\nabla \\\\cdot (\\\\nabla \\\\times \\\\mathbf F)\\,dV\n\\]\n```",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "$$\\\\iiint_V \\\\nabla \\\\cdot (\\\\nabla \\\\times \\\\mathbf F)\\,dV$$"
+        },
+        {
+          "id": "step-2",
+          "latex": "\\[\\\\nabla \\\\cdot (\\\\nabla \\\\times \\\\mathbf F)=0\\]"
+        }
+      ],
+      "finalAnswerLatex": "$0$"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:112",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 112,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2+70x+1225=0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "(x+35)^2=0"
+        },
+        {
+          "id": "step-2",
+          "latex": "x+35=0"
+        },
+        {
+          "id": "step-3",
+          "latex": "x=-35"
+        }
+      ],
+      "finalAnswerLatex": "x=-35"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:149",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 149,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2+70x+1225=0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "(x+35)^2=0"
+        },
+        {
+          "id": "step-3",
+          "latex": "x + 35 = 0\nx = -35"
+        }
+      ],
+      "finalAnswerLatex": "x=-35"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:180",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 180,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2+70x+1225=0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "recognize",
+          "latex": "x^2 + 2\\cdot35\\cdot x + 35^2 = (x + 35)^2"
+        },
+        {
+          "id": "solve",
+          "latex": ""
+        }
+      ],
+      "finalAnswerLatex": "x=-35"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:217",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 217,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2+88x+1936=0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "recognize",
+          "latex": "x^2 + 88x + 1936 = (x + 44)^2 = 0"
+        },
+        {
+          "id": "solve",
+          "latex": ""
+        }
+      ],
+      "finalAnswerLatex": "x=-44"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:259",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 259,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2-10x+25=0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "recognize",
+          "latex": "x^2 - 10x + 25 = (x - 5)^2 = 0"
+        },
+        {
+          "id": "solve",
+          "latex": ""
+        }
+      ],
+      "finalAnswerLatex": "x=5"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:292",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 292,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx"
+        },
+        {
+          "id": "step-2",
+          "latex": "dx"
+        },
+        {
+          "id": "step-3",
+          "latex": "t=\\arctan x"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi^3}{16}"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:354",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 354,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\iint limits_s (\\nabla \\times \\mathbfF)\\cdot\\mathbfn\\,dS",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "\\iint limits_s (\\nabla \\times \\mathbfF)\\cdot\\mathbfn\\,dS=\\oint_C \\mathbfF\\cdot\\mathbfdr"
+        },
+        {
+          "id": "step-2",
+          "latex": "\\mathbfF(x,y,0)=<e^{x^2}\\sin(y),0,xy^2>"
+        }
+      ],
+      "finalAnswerLatex": "-\\iint_D e^{x^2}\\cos(y)\\,dA"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:383",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 383,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\mathbf{F}(x,y,z)",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "\\left\\langle 0\\cdot\\sin(0),8\\cos^3\\theta+\\ln(1)+\\frac{\\cos(0)}{1+4\\cos^2\\theta+9\\sin^2\\theta},\\arctan(2\\cos\\theta-3\\sin\\theta)+0\\right\\rangle"
+        }
+      ],
+      "finalAnswerLatex": "18\\pi"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:410",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 410,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{7\\pi}{8}\\zeta(3)"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:431",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 431,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "equationLatex": "\\frac{d}{dx} x^2"
+        },
+        {
+          "equationLatex": "\\frac{d}{dx}x^2=2x"
+        }
+      ],
+      "finalAnswerLatex": "2x"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:469",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 469,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "equationLatex": "\\iiint_V \\nabla \\cdot (\\nabla \\times \\mathbf F)\\,dV \\quad \\text{and}V\\text{isthesolidregioninsi\\,de}\\z=9 - x^2 - y^2"
+        },
+        {
+          "equationLatex": "\\nabla \\cdot (\\nabla \\times \\mathbf F)=0"
+        }
+      ],
+      "finalAnswerLatex": "0"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:509",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 509,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x+35^2=0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "empty",
+          "latex": ""
+        },
+        {
+          "id": "evaluate",
+          "latex": "x+1225=0"
+        }
+      ],
+      "finalAnswerLatex": "x=-1225"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:538",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 538,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "3x^2+5x-18=0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "factor",
+          "latex": "(3x-4)(x+3)=0"
+        },
+        {
+          "id": "model-final",
+          "latex": "\\boxed{x=\\frac{4}{3}\\quad\\text{or}\\quad x=-3}"
+        }
+      ],
+      "finalAnswerLatex": "x=\\frac{4}{3}\\quad\\text{or}\\quad x=-3"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:569",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 569,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x=1",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "bad",
+          "latex": "x={frac}{1}{2}"
+        }
+      ],
+      "finalAnswerLatex": "{frac}{1}{2}"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:585",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 585,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x=1",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "bad",
+          "latex": "x=\\frac{1}{2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{1}{2"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:601",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 601,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^\\infty f(x)\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "final",
+          "latex": "\\frac{\\pi^3}{12}"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi^3}{12}"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:638",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 638,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "I=\\int_0^1 x\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "solve",
+          "latex": "I=\\frac{1}{2}"
+        }
+      ],
+      "finalAnswerLatex": "I=2\n\\frac{1}{2}"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:659",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 659,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "I=\\int_0^1 x\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "solve",
+          "latex": "I=\\frac{1}{2}"
+        }
+      ],
+      "finalAnswerLatex": "I'=0\\Rightarrow I=\\frac{1}{2}"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:676",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 676,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^1 x\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "solve",
+          "latex": "\\frac{1}{2}"
+        }
+      ],
+      "finalAnswerLatex": "Therefore the answer is \\frac{1}{2}"
+    }
+  },
+  {
+    "id": "tests/fastSolvePipeline.test.mjs:693",
+    "provenance": {
+      "path": "tests/fastSolvePipeline.test.mjs",
+      "line": 693,
+      "sha256": "37da9b7e746b691b2f55da5bd34e736af196027bae6590b61761d2e2b76f9b30"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "A+B",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "solve",
+          "latex": "A=B"
+        }
+      ],
+      "finalAnswerLatex": "A=B,\\quad C=D"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:25",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 25,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^n",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "local-step",
+          "math": "f g x"
+        }
+      ],
+      "finalAnswer": "f g x"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:49",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 49,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^n",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "local-step",
+          "math": "x^n"
+        }
+      ],
+      "finalAnswer": "The power rule says d/dx x^n = n x^(n-1)."
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:67",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 67,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x + 35^2 = 0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "x+35^2=0"
+        },
+        {
+          "id": "s2",
+          "math": "x=-35"
+        }
+      ],
+      "finalAnswerLatex": "x=-35"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:79",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 79,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x + 35^2 = 0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "x+35^2=0"
+        },
+        {
+          "id": "s2",
+          "math": "x+1225=0"
+        },
+        {
+          "id": "s3",
+          "math": "x=-1225"
+        }
+      ],
+      "finalAnswerLatex": "x=-1225"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:93",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 93,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2 + 70x + 1225 = 0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "x+35^2=0"
+        },
+        {
+          "id": "s2",
+          "math": "x=-35"
+        }
+      ],
+      "finalAnswerLatex": "x=-35"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:106",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 106,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2 + 70x + 1225 = 0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "(x+35)^2=0"
+        },
+        {
+          "id": "s2",
+          "math": "x+35=0"
+        },
+        {
+          "id": "s3",
+          "math": "x=-35"
+        }
+      ],
+      "finalAnswerLatex": "x=-35"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:118",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 118,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2 + 88x + 1936 = 0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "x^2+88x+1936=(x+44)^2=0"
+        },
+        {
+          "id": "s2",
+          "math": ""
+        },
+        {
+          "id": "s3",
+          "math": "x=-44"
+        }
+      ],
+      "finalAnswerLatex": "x=-44"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:148",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 148,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2 + 88x + 1936 = 0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "(x+44)^2=0"
+        },
+        {
+          "id": "s2",
+          "math": "x+44=0"
+        },
+        {
+          "id": "s3",
+          "math": "x=\\pm44"
+        }
+      ],
+      "finalAnswerLatex": "x=\\pm44"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:161",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 161,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "x^2 - 10x + 25 = 0",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "(x-5)^2=0"
+        },
+        {
+          "id": "s2",
+          "math": "x-5=0"
+        },
+        {
+          "id": "s3",
+          "math": "x=5"
+        }
+      ],
+      "finalAnswerLatex": "x=5"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:173",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 173,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\iint_S (\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "stokes",
+          "math": "\\iint_S (\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS=\\oint_C\\mathbf F\\cdot d\\mathbf r"
+        },
+        {
+          "id": "green",
+          "math": "\\iint_D G(r,\\theta)\\,dA"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^{2\\pi}\\int_0^3 G(r,\\theta)\\,dr\\,d\\theta"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:199",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 199,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\iint_S (\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "\\iint_S(\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS=\\oint_C\\mathbf F\\cdot d\\mathbf r"
+        },
+        {
+          "id": "s2",
+          "math": "x=2r\\cos\\theta,\\quad y=3r\\sin\\theta,\\quad J=6r"
+        },
+        {
+          "id": "s3",
+          "math": "\\frac{\\cos(xy)}{1+x^2+y^2}\\text{ vanishes by odd oscillatory cancellation}"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^{2\\pi} 24\\cos^3\\theta\\,d\\theta"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:228",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 228,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^1 \\frac{\\ln x}{1+x}\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "\\frac{1}{1+x}=\\sum_{n=0}^{\\infty}(-1)^nx^n"
+        },
+        {
+          "id": "s2",
+          "math": "\\int_0^1 \\frac{\\ln x}{1+x}\\,dx=-\\sum_{n=1}^{\\infty}\\frac{(-1)^{n-1}}{n^2}"
+        },
+        {
+          "id": "s3",
+          "math": "I=-\\frac{\\pi^2}{12}"
+        }
+      ],
+      "finalAnswerLatex": "-\\frac{\\pi^2}{12}"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:269",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 269,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\nabla\\times F",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "\\nabla\\times F=\\langle R_y-Q_z, P_z-R_x, Q_x-P_y\\rangle"
+        },
+        {
+          "id": "s2",
+          "math": "\\nabla\\times F=\\langle 0-0,0-0,0-0\\rangle=\\mathbf 0"
+        }
+      ],
+      "finalAnswerLatex": "\\nabla\\times F=\\mathbf 0"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:300",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 300,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\iint_S(\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "\\iint_S(\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS=\\oint_C\\mathbf F\\cdot d\\mathbf r"
+        },
+        {
+          "id": "s2",
+          "math": "18\\pi"
+        }
+      ],
+      "finalAnswerLatex": "18\\pi"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:325",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 325,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "\\iint_S(\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS=\\oint_C\\mathbf F\\cdot d\\mathbf r"
+        },
+        {
+          "id": "s2",
+          "math": "x=2r\\cos\\theta,\\quad y=3r\\sin\\theta"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^1\\int_0^{2\\pi} f(r,\\theta)\\,d\\theta\\,dr"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:353",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 353,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "\\iint_S(\\nabla\\times\\mathbf F)\\cdot\\mathbf n\\,dS=\\oint_C\\mathbf F\\cdot d\\mathbf r"
+        },
+        {
+          "id": "s2",
+          "math": "x=2r\\cos\\theta,\\quad y=3r\\sin\\theta,\\quad J=6r"
+        }
+      ],
+      "finalAnswerLatex": "24\\pi"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:380",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 380,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^1 \\frac{\\ln x}{1-x}\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "\\int_0^1 \\frac{\\ln x}{1-x}\\,dx"
+        },
+        {
+          "id": "s2",
+          "math": "\\int_0^1 \\frac{\\ln x}{1-x}\\,dx=\\zeta(3)"
+        }
+      ],
+      "finalAnswerLatex": "\\zeta(3)"
+    }
+  },
+  {
+    "id": "tests/stokesRegression.test.mjs:405",
+    "provenance": {
+      "path": "tests/stokesRegression.test.mjs",
+      "line": 405,
+      "sha256": "d8faafcf20491ad311d8cda810949e75d8fa6b5001bcf2d5f6ebde7f6c5e781e"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^1 \\frac{\\ln^2 x}{1-x}\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "s1",
+          "math": "n\\in\\mathbb N_0,\\quad \\frac{1}{1-x}=\\sum_{n=0}^{\\infty}x^n,\\quad \\int_0^1 x^n\\ln^2x\\,dx=\\frac{2}{(n+1)^3}"
+        },
+        {
+          "id": "s2",
+          "math": "\\int_0^1 \\frac{\\ln^2x}{1-x}\\,dx=2\\sum_{n=1}^{\\infty}\\frac{1}{n^3}=2\\zeta(3)"
+        }
+      ],
+      "finalAnswerLatex": "2\\zeta(3)"
+    }
+  },
+  {
+    "id": "tests/solveCandidateLifecycle.test.mjs:17",
+    "provenance": {
+      "path": "tests/solveCandidateLifecycle.test.mjs",
+      "line": 17,
+      "sha256": "d1ef9ca18f3fbc3d94d67d9a0912b390188d3bd30c8cc0237f2e049050f4a2ad"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [],
+      "finalAnswerLatex": "1"
+    }
+  },
+  {
+    "id": "tests/solveCandidateLifecycle.test.mjs:22",
+    "provenance": {
+      "path": "tests/solveCandidateLifecycle.test.mjs",
+      "line": 22,
+      "sha256": "d1ef9ca18f3fbc3d94d67d9a0912b390188d3bd30c8cc0237f2e049050f4a2ad"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [],
+      "finalAnswerLatex": "1"
+    }
+  },
+  {
+    "id": "tests/solveCandidateLifecycle.test.mjs:105",
+    "provenance": {
+      "path": "tests/solveCandidateLifecycle.test.mjs",
+      "line": 105,
+      "sha256": "d1ef9ca18f3fbc3d94d67d9a0912b390188d3bd30c8cc0237f2e049050f4a2ad"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "\\int_0^1 x\\,dx",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "id": "step-1",
+          "latex": "1/2"
+        }
+      ],
+      "finalAnswerLatex": "1/2"
+    }
+  },
+  {
+    "id": "tests/solveCandidateLifecycle.test.mjs:106",
+    "provenance": {
+      "path": "tests/solveCandidateLifecycle.test.mjs",
+      "line": 106,
+      "sha256": "d1ef9ca18f3fbc3d94d67d9a0912b390188d3bd30c8cc0237f2e049050f4a2ad"
+    },
+    "origin": "existing_integration_fixture",
+    "problem": "",
+    "unresolvedSteps": 0,
+    "candidate": {
+      "steps": [
+        {
+          "equationLatex": "1/2"
+        }
+      ],
+      "finalAnswerLatex": "1/2"
+    }
+  },
+  {
+    "id": "2026-07-18T15-27-38-625Z_solve-extracted-problem_repro-integral-mrqisvz2_initial.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-18T15-27-38-625Z_solve-extracted-problem_repro-integral-mrqisvz2_initial.json",
+      "sha256": "f1f0b8e6acd00a117d852986245e658f5171cf7e89efd9441314b40851007508",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "Evaluate the integral from 0 to infinity of the natural logarithm of (1 plus x^2) times arctan x divided by x times (1 plus x^2), with respect to x.",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "I = \\int_0^{\\pi/2} \\frac{\\ln(1+\\tan^2 \\theta) \\cdot \\theta}{\\tan \\theta (1+\\tan^2 \\theta)} \\cdot \\sec^2 \\theta \\, d\\theta"
+        },
+        {
+          "id": "step2",
+          "math": "I = \\int_0^{\\pi/2}\n\\frac{\\ln(\\sec^2 \\theta) \\cdot \\theta}{\\tan \\theta \\cdot \\sec^2 \\theta} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\pi/2} \\frac{2 \\ln(\\sec \\theta) \\cdot \\theta}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "I = 2\n\\int_0^{\\pi/2} \\theta \\cdot \\frac{-\\ln(\\cos \\theta)}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = 2 \\int_0^{\\pi/2} \\theta \\cdot \\frac{-\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "I = -2\n\\int_0^{\\pi/2} \\theta \\cdot \\frac{\\cos \\theta}{\\sin \\theta} \\ln(\\cos \\theta) \\, d\\theta = -2 \\int_0^{\\pi/2} \\theta \\cot \\theta \\ln(\\cos \\theta) \\, d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "I = -2 \\left[ \\theta \\int \\cot \\theta \\ln(\\cos \\theta) d\\theta - \\int \\left( \\int \\cot \\theta \\ln(\\cos \\theta) d\\theta \\right) d\\theta \\right]"
+        },
+        {
+          "id": "step6",
+          "math": "\\int \\cot \\theta \\ln(\\cos \\theta) d\\theta = -\\frac{1}{2} \\ln^2(\\sin \\theta) + C"
+        },
+        {
+          "id": "step7",
+          "math": "I = -2\n\\int_0^{\\pi/2} \\theta \\cot \\theta \\ln(\\cos \\theta) \\, d\\theta = \\frac{\\pi}{2} \\ln^2 2"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\frac{\\pi}{2} \\ln^2 2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2} \\ln^2 2"
+    }
+  },
+  {
+    "id": "2026-07-18T15-27-59-296Z_solve-extracted-problem_repro-integral-mrqisvz2_repair.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-18T15-27-59-296Z_solve-extracted-problem_repro-integral-mrqisvz2_repair.json",
+      "sha256": "30019d4daad43f693c640e8bafa8f19a410bb137aa41375710e90f816b1ae010",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "Evaluate the integral from 0 to infinity of the natural logarithm of (1 plus x^2) times arctan x divided by x times (1 plus x^2), with respect to x.",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "I = \\int_0^{\\pi/2} \\frac{\\ln(1+\\tan^2 t) \\cdot t}{\\tan t (1+\\tan^2 t)} \\cdot \\sec^2 t \\, dt"
+        },
+        {
+          "id": "step2",
+          "math": "I = \\int_0^{\\pi/2}\n\\frac{\\ln(1+\\tan^2 t) \\cdot t}{\\tan t (1+\\tan^2 t)} \\cdot \\sec^2 t \\, dt = \\int_0^{\\pi/2}\n\\frac{\\ln(\\sec^2 t) \\cdot t}{\\tan t \\sec^2 t} \\cdot \\sec^2 t \\, dt = \\int_0^{\\pi/2} \\frac{t \\cdot 2 \\ln(\\sec t)}{\\tan t} \\, dt"
+        },
+        {
+          "id": "step3",
+          "math": "I = 2\n\\int_0^{\\pi/2} \\frac{t \\ln(\\sec t)}{\\tan t} \\, dt = 2\n\\int_0^{\\pi/2} \\frac{t (-\\ln \\cos t)}{\\frac{\\sin t}{\\cos t}} \\, dt = 2\n\\int_0^{\\pi/2} t \\cdot (-\\ln \\cos t) \\cdot \\frac{\\cos t}{\\sin t} \\, dt = -2 \\int_0^{\\pi/2} t \\frac{\\cos t}{\\sin t} \\ln \\cos t \\, dt"
+        },
+        {
+          "id": "step4",
+          "math": "I = -2 \\int_0^{\\pi/2} t \\frac{\\cos t}{\\sin t} \\ln \\cos t \\, dt"
+        },
+        {
+          "id": "step5",
+          "math": "du = dt, \\quad v = \\int \\frac{\\cos t}{\\sin t} \\ln \\cos t \\, dt"
+        },
+        {
+          "id": "step6",
+          "math": "v = \\int\n\\frac{\\cos t}{\\sin t} \\ln \\cos t \\, dt = \\int\n\\frac{w}{\\sqrt{1-w^2}} \\ln w \\cdot \\left(-\\frac{dw}{\\sin t}\\right) = -\\int \\frac{w \\ln w}{\\sqrt{1-w^2}} \\cdot \\frac{dw}{\\sin t}"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\frac{\\pi}{2} \\ln 2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2} \\ln 2"
+    }
+  },
+  {
+    "id": "2026-07-18T15-31-16-304Z_solve-extracted-problem_repro-integral-final-mrqixkh5_initial.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-18T15-31-16-304Z_solve-extracted-problem_repro-integral-final-mrqixkh5_initial.json",
+      "sha256": "9fcaa6bb40dadf476ccd126f3be70436d63d82081f867b7dc627de2c7373ddeb",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "Evaluate the integral from 0 to infinity of the natural logarithm of (1 plus x^2) times arctan x divided by x times (1 plus x^2), with respect to x.",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x = \\tan t, \\quad \\,dx = \\sec^2 t \\, dt"
+        },
+        {
+          "id": "step2",
+          "math": "\\int_0^{\\pi/2} \\frac{\\ln(1+\\tan^2 t) \\arctan(\\tan t)}{\\tan t (1+\\tan^2 t)} \\sec^2 t \\, dt"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\pi/2} \\frac{\\ln(\\sec^2 t) \\cdot t}{\\tan t \\cdot \\sec^2 t} \\sec^2 t \\, dt = \\int_0^{\\pi/2} \\frac{2 \\ln(\\sec t) \\cdot t}{\\tan t} \\, dt"
+        },
+        {
+          "id": "step4",
+          "math": "\\int_0^{\\pi/2} 2 t \\ln(\\sec t) \\cot t \\, dt = \\int_0^{\\pi/2} 2 t \\ln\\left(\\frac{1}{\\cos t}\\right) \\frac{\\cos t}{\\sin t} \\, dt"
+        },
+        {
+          "id": "step5",
+          "math": "\\int_{0}^{\\frac{\\pi}{2}} 2t-\\ln\\cost\\cot t\\,dt=-2\\int_0^{\\pi/2}t\\ln(\\cost)\\cott\\,dt"
+        },
+        {
+          "id": "step6",
+          "math": "\\text{Let } u = t, \\quad dv = \\ln(\\cos t) \\cot t \\, dt"
+        },
+        {
+          "id": "step7",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2) \\arctan x}{x(1+x^2)} \\, \\,dx = \\frac{\\pi}{2} \\ln 2"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\frac{\\pi}{2} \\ln 2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2} \\ln 2"
+    }
+  },
+  {
+    "id": "2026-07-18T15-31-53-906Z_solve-extracted-problem_repro-integral-final-mrqixkh5_repair.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-18T15-31-53-906Z_solve-extracted-problem_repro-integral-final-mrqixkh5_repair.json",
+      "sha256": "d47a6a08f99a98006e4749be85707ad2e75046b1c072ac777dc83504926fbbb3",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "Evaluate the integral from 0 to infinity of the natural logarithm of (1 plus x^2) times arctan x divided by x times (1 plus x^2), with respect to x.",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "I = \\int_0^{\\pi/2} \\frac{\\ln(1+\\tan^2 t) \\cdot t}{\\tan t (1+\\tan^2 t)} \\cdot \\sec^2 t \\, dt"
+        },
+        {
+          "id": "step2",
+          "math": "I = \\int_0^{\\pi/2}\n\\frac{\\ln(\\sec^2 t) \\cdot t}{\\tan t \\cdot \\sec^2 t} \\cdot \\sec^2 t \\, dt = \\int_0^{\\pi/2} \\frac{t \\cdot 2 \\ln(\\sec t)}{\\tan t} \\, dt"
+        },
+        {
+          "id": "step3",
+          "math": "I = 2\n\\int_0^{\\pi/2} t \\cdot \\frac{\\ln(\\sec t)}{\\tan t} \\, dt = 2\n\\int_0^{\\pi/2} t \\cdot \\frac{\\ln(1/\\cos t)}{\\sin t / \\cos t} \\, dt = 2 \\int_0^{\\pi/2} t \\cdot \\frac{-\\ln(\\cos t)}{\\sin t / \\cos t} \\, dt"
+        },
+        {
+          "id": "step4",
+          "math": "I = 2\n\\int_0^{\\pi/2} t \\cdot \\frac{-\\ln(\\cos t) \\cdot \\cos t}{\\sin t} \\, dt = -2 \\int_0^{\\pi/2} t \\cdot \\frac{\\cos t}{\\sin t} \\ln(\\cos t) \\, dt"
+        },
+        {
+          "id": "step5",
+          "math": "I=-2\\int_0^{\\pi/2}t\\cott\\cdot \\ln \\cos t\\,dt"
+        },
+        {
+          "id": "step6",
+          "math": "du = -\\tan t \\, dt, \\quad v = \\int t \\cot t \\, dt"
+        },
+        {
+          "id": "step7",
+          "math": "v = t \\ln(\\sin t) - \\int \\ln(\\sin t) \\, dt"
+        },
+        {
+          "id": "step8",
+          "math": "I = -2 \\left[ t \\ln(\\cos t) \\cdot (t \\ln(\\sin t) - \\int \\ln(\\sin t) \\, dt) \\Big|_0^{\\pi/2} - \\int_0^{\\pi/2} (t \\ln(\\sin t) - \\int \\ln(\\sin t) \\, dt)(-\\tan t) \\, dt \\right]"
+        },
+        {
+          "id": "step9",
+          "math": "I=-2\\int_0^{\\pi/2}(t\\ln(\\sint)-\\int\\ln(\\sint)\\,dt)\\tant\\,dt"
+        },
+        {
+          "id": "step10",
+          "math": "I = 2 \\int_0^{\\pi/2} t \\tan t \\ln(\\sin t) \\, dt - 2 \\int_0^{\\pi/2} \\tan t \\left( \\int_0^t \\ln(\\sin s) \\, ds \\right) dt"
+        },
+        {
+          "id": "final-answer",
+          "math": "0"
+        }
+      ],
+      "finalAnswerLatex": "0"
+    }
+  },
+  {
+    "id": "2026-07-18T16-08-28-762Z_solve-extracted-problem_manual-integral-mrqk9aaj_initial.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-18T16-08-28-762Z_solve-extracted-problem_manual-integral-mrqk9aaj_initial.json",
+      "sha256": "760d6129640ef074d2b820259f4a7d6e96976f16e9f51b8de07ead43640a9588",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "Evaluate the integral from 0 to infinity of (ln(1 + x^2) times arctan x) divided by (x times (1 + x^2)) with respect to x.",
+    "candidate": {
+      "steps": [
+        {
+          "id": "1",
+          "math": "I = \\int_0^{\\pi/2} \\frac{\\ln(1+\\tan^2 \\theta) \\cdot \\theta}{\\tan \\theta (1+\\tan^2 \\theta)} \\cdot \\sec^2 \\theta \\, d\\theta"
+        },
+        {
+          "id": "2",
+          "math": "I = \\int_0^{\\pi/2}\n\\frac{\\ln(\\sec^2 \\theta) \\cdot \\theta}{\\tan \\theta \\cdot \\sec^2 \\theta} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\pi/2} \\frac{2 \\ln(\\sec \\theta) \\cdot \\theta}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "3",
+          "math": "I = 2\n\\int_0^{\\pi/2} \\theta \\cdot \\frac{-\\ln(\\cos \\theta)}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = 2 \\int_0^{\\pi/2} \\theta \\cdot \\frac{-\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta"
+        },
+        {
+          "id": "4",
+          "math": "I = 2\n\\int_0^{\\pi/2} \\theta \\cdot \\frac{\\cos \\theta}{\\sin \\theta} (-\\ln(\\cos \\theta)) \\, d\\theta = 2 \\int_0^{\\pi/2} \\theta \\cot \\theta \\sum_{n=1}^\\infty \\frac{(\\sin \\theta)^{2n}}{2n} \\, d\\theta"
+        },
+        {
+          "id": "5",
+          "math": "I = 2\n\\sum_{n=1}^\\infty \\frac{1}{2n} \\int_0^{\\pi/2} \\theta \\cot \\theta (\\sin \\theta)^{2n} \\, d\\theta = \\sum_{n=1}^\\infty \\frac{1}{n} \\int_0^{\\pi/2} \\theta \\cot \\theta (\\sin \\theta)^{2n} \\, d\\theta"
+        },
+        {
+          "id": "6",
+          "math": "\\int_0^{\\pi/2} \\theta \\cot \\theta (\\sin \\theta)^{2n} \\, d\\theta = \\frac{\\pi}{2(2n+1)}"
+        },
+        {
+          "id": "7",
+          "math": "I = \\frac{\\pi}{2}\n\\sum_{n=1}^\\infty \\frac{1}{n(2n+1)} = \\frac{\\pi}{2}\n(2 \\ln 2 - 1) = \\pi \\ln 2 - \\frac{\\pi}{2}"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\pi \\ln 2 - \\frac{\\pi}{2}"
+        }
+      ],
+      "finalAnswerLatex": "\\pi \\ln 2 - \\frac{\\pi}{2}"
+    }
+  },
+  {
+    "id": "2026-07-18T16-09-03-977Z_solve-extracted-problem_manual-integral-mrqk9aaj_repair.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-18T16-09-03-977Z_solve-extracted-problem_manual-integral-mrqk9aaj_repair.json",
+      "sha256": "b5ef0c29d18454ddcf76b84177443378d69359ee49bccca8442e0435b63065b9",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "Evaluate the integral from 0 to infinity of (ln(1 + x^2) times arctan x) divided by (x times (1 + x^2)) with respect to x.",
+    "candidate": {
+      "steps": [
+        {
+          "id": "1",
+          "math": "I = \\int_0^{\\pi/2} \\frac{\\ln(1+\\tan^2 \\theta) \\cdot \\theta}{\\tan \\theta (1+\\tan^2 \\theta)} \\cdot \\sec^2 \\theta \\, d\\theta"
+        },
+        {
+          "id": "2",
+          "math": "I = \\int_0^{\\pi/2}\n\\frac{\\ln(\\sec^2 \\theta) \\cdot \\theta}{\\tan \\theta \\cdot \\sec^2 \\theta} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\pi/2} \\frac{2 \\ln(\\sec \\theta) \\cdot \\theta}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "3",
+          "math": "I = 2\n\\int_0^{\\pi/2} \\theta \\cdot \\frac{\\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta = 2\n\\int_0^{\\pi/2} \\theta \\cdot \\frac{-\\ln(\\cos \\theta)}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = 2 \\int_0^{\\pi/2} \\theta \\cdot \\frac{-\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta"
+        },
+        {
+          "id": "4",
+          "math": "-\\ln(\\cos \\theta) = \\sum_{n=1}^\\infty\n\\frac{(\\sin \\theta)^{2n}}{2n} \\implies I = 2 \\int_0^{\\pi/2} \\theta \\cot \\theta \\sum_{n=1}^\\infty \\frac{(\\sin \\theta)^{2n}}{2n} \\, d\\theta"
+        },
+        {
+          "id": "5",
+          "math": "I = 2\n\\sum_{n=1}^\\infty \\frac{1}{2n} \\int_0^{\\pi/2} \\theta \\cot \\theta (\\sin \\theta)^{2n} \\, d\\theta = \\sum_{n=1}^\\infty \\frac{1}{n} \\int_0^{\\pi/2} \\theta \\cot \\theta (\\sin \\theta)^{2n} \\, d\\theta"
+        },
+        {
+          "id": "6",
+          "math": "\\text{Let } u = \\theta, \\quad dv = \\cot \\theta (\\sin \\theta)^{2n} d\\theta"
+        },
+        {
+          "id": "7",
+          "math": "du = d\\theta, \\quad v = \\int\n\\cot \\theta (\\sin \\theta)^{2n} d\\theta = \\int\n\\frac{\\cos \\theta}{\\sin \\theta} (\\sin \\theta)^{2n} d\\theta = \\int \\cos \\theta (\\sin \\theta)^{2n-1} d\\theta"
+        },
+        {
+          "id": "8",
+          "math": "v = \\int\n\\cos \\theta (\\sin \\theta)^{2n-1} d\\theta = \\frac{(\\sin \\theta)^{2n}}{2n} + C"
+        },
+        {
+          "id": "9",
+          "math": "\\int_0^{\\pi/2} \\theta \\cot \\theta (\\sin \\theta)^{2n} d\\theta = \\left. \\theta \\cdot \\frac{(\\sin \\theta)^{2n}}{2n} \\right|_0^{\\pi/2} - \\int_0^{\\pi/2} \\frac{(\\sin \\theta)^{2n}}{2n} d\\theta"
+        },
+        {
+          "id": "10",
+          "math": "\\left. \\theta \\cdot \\frac{(\\sin \\theta)^{2n}}{2n} \\right|_0^{\\pi/2} = \\frac{\\pi}{4n}, \\quad\n\\int_0^{\\pi/2} (\\sin \\theta)^{2n} d\\theta = \\frac{\\sqrt{\\pi} \\, \\Gamma\\left(n+\\frac{1}{2}\\right)}{2 \\, \\Gamma(n+1)}"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\pi \\ln 2 - \\frac{\\pi}{2}"
+        }
+      ],
+      "finalAnswerLatex": "\\pi \\ln 2 - \\frac{\\pi}{2}"
+    }
+  },
+  {
+    "id": "2026-07-27T17-30-09-009Z_solve-extracted-problem_integral-live-ms3i574e_initial.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-27T17-30-09-009Z_solve-extracted-problem_integral-live-ms3i574e_initial.json",
+      "sha256": "5157688d727afdd80a927ee73b0e51d3b1fbcc6d58c65550323720e513d17573",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x=\\tan \\theta, \\quad \\,dx=\\sec^2 \\theta \\, d\\theta, \\quad \\theta \\in [0, \\frac{\\pi}{2})"
+        },
+        {
+          "id": "step2",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(1+\\tan^2 \\theta) \\cdot \\theta}{\\tan \\theta (1+\\tan^2 \\theta)} \\cdot \\sec^2 \\theta \\, d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(\\sec^2 \\theta) \\cdot \\theta}{\\tan \\theta \\cdot \\sec^2 \\theta} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\ln(\\sec^2 \\theta)}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\cdot 2 \\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta = 2 \\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "2 \\int_0^{\\frac{\\pi}{2}} \\theta \\ln\\left(\\frac{1}{\\cos \\theta}\\right) \\frac{\\cos \\theta}{\\sin \\theta} \\, d\\theta = 2\n\\int_0^{\\frac{\\pi}{2}} \\theta \\frac{-\\ln(\\cos \\theta)}{\\sin \\theta / \\cos \\theta} \\, d\\theta = 2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\ln(\\cos \\theta)}{\\sin \\theta / \\cos \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step6",
+          "math": "2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\ln(\\cos \\theta)}{\\sin \\theta / \\cos \\theta} \\, d\\theta = 2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step7",
+          "math": "\\ln(\\cos \\theta) = -\\sum_{n=1}^\\infty \\frac{\\cos(2n \\theta)}{n} - \\ln 2"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx=\\frac{7}{8}\\zeta(3)"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx=\\frac{7}{8}\\zeta(3)"
+    }
+  },
+  {
+    "id": "2026-07-27T17-30-26-610Z_solve-extracted-problem_integral-live-ms3i574e_repair.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-27T17-30-26-610Z_solve-extracted-problem_integral-live-ms3i574e_repair.json",
+      "sha256": "d5eedab49d63798da6097a74577d0173b354b024a563e2e2d9dd6dea40fb9283",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x=\\tan \\theta, \\quad \\,dx=\\sec^2 \\theta \\, d\\theta, \\quad \\theta \\in [0, \\frac{\\pi}{2})"
+        },
+        {
+          "id": "step2",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(1+\\tan^2 \\theta) \\cdot \\theta}{\\tan \\theta (1+\\tan^2 \\theta)} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\ln(\\sec^2 \\theta)}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\cdot 2 \\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta = 2 \\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta = 2\n\\int_0^{\\frac{\\pi}{2}} \\theta \\frac{-\\ln(\\cos \\theta)}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = 2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "\\ln(\\cos \\theta) = -\\ln 2 - \\sum_{n=1}^\\infty \\frac{\\cos(2 n \\theta)}{n}"
+        },
+        {
+          "id": "step6",
+          "math": "I = 2\n\\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta = -2 \\ln 2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\cos \\theta}{\\sin \\theta} \\, d\\theta - 2 \\sum_{n=1}^\\infty \\frac{1}{n} \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\cos(2 n \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2) \\arctan x}{x(1+x^2)} \\, \\,dx = \\frac{\\pi}{2} \\ln^2 2"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2) \\arctan x}{x(1+x^2)} \\, \\,dx = \\frac{\\pi}{2} \\ln^2 2"
+    }
+  },
+  {
+    "id": "2026-07-27T17-38-46-362Z_solve-extracted-problem_integral-live-ms3ifndh_initial.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-27T17-38-46-362Z_solve-extracted-problem_integral-live-ms3ifndh_initial.json",
+      "sha256": "3beee123c544c9a5e6ed387d765de100d80a8efd4e47ce4ff12194a63762ffa2",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x=\\tan \\theta, \\quad \\,dx=\\sec^2 \\theta \\, d\\theta, \\quad \\theta \\in [0, \\frac{\\pi}{2})"
+        },
+        {
+          "id": "step2",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(1+\\tan^2 \\theta) \\cdot \\theta}{\\tan \\theta (1+\\tan^2 \\theta)} \\cdot \\sec^2 \\theta \\, d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(\\sec^2 \\theta) \\cdot \\theta}{\\tan \\theta \\sec^2 \\theta} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\frac{\\pi}{2}} \\frac{2 \\theta \\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "\\int_0^{\\frac{\\pi}{2}} 2 \\theta \\frac{\\ln(\\frac{1}{\\cos \\theta})}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = \\int_0^{\\frac{\\pi}{2}}\n2 \\theta \\frac{-\\ln(\\cos \\theta)}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = \\int_0^{\\frac{\\pi}{2}} 2 \\theta \\frac{-\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "-2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{\\cos \\theta}{\\sin \\theta} \\ln(\\cos \\theta) \\, d\\theta = -2 \\int_0^{\\frac{\\pi}{2}} \\theta \\cot \\theta \\ln(\\cos \\theta) \\, d\\theta"
+        },
+        {
+          "id": "step6",
+          "math": "\\text{Let } u=\\theta, \\quad dv=\\cot \\theta \\ln(\\cos \\theta) d\\theta"
+        },
+        {
+          "id": "step7",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(1+x^2) \\arctan x}{x(1+x^2)} \\, \\,dx = \\frac{\\pi}{2} \\ln 2"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx = \\frac{\\pi}{2} \\ln 2"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx = \\frac{\\pi}{2} \\ln 2"
+    }
+  },
+  {
+    "id": "2026-07-27T17-39-13-477Z_solve-extracted-problem_integral-live-ms3ifndh_repair.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-27T17-39-13-477Z_solve-extracted-problem_integral-live-ms3ifndh_repair.json",
+      "sha256": "24e774deeeb1c11b1313f96cd38a933e52dbd22090b3369611bd386e1e72c8fc",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x=\\tan \\theta, \\quad \\,dx=\\sec^2 \\theta \\, d\\theta, \\quad \\theta \\in [0, \\frac{\\pi}{2})"
+        },
+        {
+          "id": "step2",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(1+\\tan^2 \\theta) \\cdot \\theta}{\\tan \\theta (1+\\tan^2 \\theta)} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\frac{\\pi}{2}}\n\\frac{\\ln(\\sec^2 \\theta) \\cdot \\theta}{\\tan \\theta \\sec^2 \\theta} \\cdot \\sec^2 \\theta \\, d\\theta = \\int_0^{\\frac{\\pi}{2}} \\frac{2 \\theta \\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{2 \\theta \\ln(\\sec \\theta)}{\\tan \\theta} \\, d\\theta = \\int_0^{\\frac{\\pi}{2}}\n2 \\theta \\frac{\\ln(\\frac{1}{\\cos \\theta})}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = \\int_0^{\\frac{\\pi}{2}}\n2 \\theta \\frac{-\\ln(\\cos \\theta)}{\\frac{\\sin \\theta}{\\cos \\theta}} \\, d\\theta = 2\n\\int_0^{\\frac{\\pi}{2}} \\theta \\frac{-\\ln(\\cos \\theta) \\cos \\theta}{\\sin \\theta} \\, d\\theta = -2 \\int_0^{\\frac{\\pi}{2}} \\theta \\cot \\theta \\ln(\\cos \\theta) \\, d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "I = -2 \\int_0^{\\frac{\\pi}{2}} \\theta \\cot \\theta \\ln(\\cos \\theta) \\, d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "\\ln(\\cos \\theta) = -\\sum_{n=1}^\\infty\n\\frac{(2^{2n}-1) |B_{2n}|}{2n (2n)!} (2\\theta)^{2n}, \\quad \\cot \\theta = \\frac{1}{\\theta} - \\sum_{m=1}^\\infty \\frac{2^{2m} |B_{2m}|}{(2m)!} \\theta^{2m-1}"
+        },
+        {
+          "id": "step6",
+          "math": "I = -2 \\int_0^{\\frac{\\pi}{2}} \\theta \\left( \\frac{1}{\\theta} - \\sum_{m=1}^\\infty \\frac{2^{2m} |B_{2m}|}{(2m)!} \\theta^{2m-1} \\right) \\left( -\\sum_{n=1}^\\infty \\frac{(2^{2n}-1) |B_{2n}|}{2n (2n)!} (2\\theta)^{2n} \\right) d\\theta"
+        },
+        {
+          "id": "step7",
+          "math": "I = \\sum_{k=1}^\\infty \\frac{C_k}{(2k+1)^2} \\left( \\frac{\\pi}{2} \\right)^{2k+1} \\quad \\text{for some constants } C_k, \\text{ converging to } 0.754693..."
+        },
+        {
+          "id": "final-answer",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)} \\, \\,dx \\approx 0.754693"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)} \\, \\,dx \\approx 0.754693"
+    }
+  },
+  {
+    "id": "2026-07-27T17-53-04-604Z_solve-extracted-problem_integral-live-ms3iykf8_initial.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-27T17-53-04-604Z_solve-extracted-problem_integral-live-ms3iykf8_initial.json",
+      "sha256": "891450a71390fa7085e569cfd47d1865e762ce4f136ef0ba12ea642d962fc31a",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x=\\tan\\theta, \\quad \\,dx=\\sec^2\\theta\\,d\\theta"
+        },
+        {
+          "id": "step2",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(1+\\tan^2\\theta)\\arctan(\\tan\\theta)}{\\tan\\theta(1+\\tan^2\\theta)} \\sec^2\\theta\\,d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(\\sec^2\\theta) \\cdot \\theta}{\\tan\\theta \\sec^2\\theta} \\sec^2\\theta\\,d\\theta = \\int_0^{\\frac{\\pi}{2}} \\frac{2\\ln(\\sec\\theta) \\theta}{\\tan\\theta} \\,d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "2 \\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\ln(\\sec\\theta)}{\\tan\\theta} \\, d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "2 \\int_0^{\\frac{\\pi}{2}} \\theta \\ln\\left(\\frac{1}{\\cos\\theta}\\right) \\frac{\\cos\\theta}{\\sin\\theta} \\, d\\theta = 2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{-\\ln(\\cos\\theta) \\cos\\theta}{\\sin\\theta} \\, d\\theta"
+        },
+        {
+          "id": "step6",
+          "math": "-2 \\int_0^{\\frac{\\pi}{2}} \\theta \\ln(\\cos\\theta) \\frac{\\cos\\theta}{\\sin\\theta} \\, d\\theta"
+        },
+        {
+          "id": "step7",
+          "math": "-2 \\int_0^1 \\theta(u) \\ln(\\cos(\\theta(u))) \\frac{1}{u} \\, du"
+        },
+        {
+          "id": "step8",
+          "math": "-2 \\int_0^1 \\arcsin u \\cdot \\ln(\\sqrt{1-u^2}) \\frac{1}{u} \\, du = - \\int_0^1 \\frac{\\arcsin u \\ln(1-u^2)}{u} \\, du"
+        },
+        {
+          "id": "step9",
+          "math": "I = \\int_0^\\infty\n\\frac{\\ln(1+x^2) \\arctan x}{x(1+x^2)} \\, \\,dx = - \\int_0^1 \\frac{\\arcsin u \\ln(1-u^2)}{u} \\, du"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx=\\frac{\\pi}{2}G"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx=\\frac{\\pi}{2}G"
+    }
+  },
+  {
+    "id": "2026-07-27T17-53-22-010Z_solve-extracted-problem_integral-live-ms3iykf8_repair.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-27T17-53-22-010Z_solve-extracted-problem_integral-live-ms3iykf8_repair.json",
+      "sha256": "104e489bc8d5c051779c71c64c190bbfa71959a5fd1fb1852630b754bd4ef467",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x=\\tan\\theta, \\quad \\,dx=\\sec^2\\theta\\,d\\theta"
+        },
+        {
+          "id": "step2",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(1+\\tan^2\\theta)\\arctan(\\tan\\theta)}{\\tan\\theta(1+\\tan^2\\theta)} \\sec^2\\theta\\,d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{\\ln(\\sec^2\\theta) \\cdot \\theta}{\\tan\\theta \\sec^2\\theta} \\sec^2\\theta\\,d\\theta = \\int_0^{\\frac{\\pi}{2}} \\frac{2\\ln(\\sec\\theta) \\theta}{\\tan\\theta} \\,d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "2 \\int_0^{\\frac{\\pi}{2}} \\frac{\\theta \\ln(\\sec\\theta)}{\\tan\\theta} \\, d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "2 \\int_0^{\\frac{\\pi}{2}} \\theta \\ln\\left(\\frac{1}{\\cos\\theta}\\right) \\frac{\\cos\\theta}{\\sin\\theta} \\, d\\theta = 2 \\int_0^{\\frac{\\pi}{2}} \\theta \\frac{-\\ln(\\cos\\theta) \\cos\\theta}{\\sin\\theta} \\, d\\theta"
+        },
+        {
+          "id": "step6",
+          "math": "-2 \\int_0^{\\frac{\\pi}{2}} \\theta \\ln(\\cos\\theta) \\frac{\\cos\\theta}{\\sin\\theta} \\, d\\theta"
+        },
+        {
+          "id": "step7",
+          "math": "-2 \\int_0^1 \\theta(u) \\ln(\\cos(\\theta(u))) \\frac{1}{u} \\, du"
+        },
+        {
+          "id": "step8",
+          "math": "-2 \\int_0^1 \\arcsin u \\cdot \\ln(\\sqrt{1-u^2}) \\frac{1}{u} \\, du = - \\int_0^1 \\frac{\\arcsin u \\ln(1-u^2)}{u} \\, du"
+        },
+        {
+          "id": "step9",
+          "math": "I = \\int_0^\\infty\n\\frac{\\ln(1+x^2) \\arctan x}{x(1+x^2)} \\, \\,dx = - \\int_0^1\n\\frac{\\arcsin u \\ln(1-u^2)}{u} \\, du = \\frac{\\pi}{2} \\, G"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx=\\frac{\\pi}{2}G"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx=\\frac{\\pi}{2}G"
+    }
+  },
+  {
+    "id": "2026-07-27T17-53-30-811Z_solve-extracted-problem_integral-live-ms3iykf8_escalation.json",
+    "origin": "stored_provider_diagnostic",
+    "provenance": {
+      "path": "logs/failed-solves/2026-07-27T17-53-30-811Z_solve-extracted-problem_integral-live-ms3iykf8_escalation.json",
+      "sha256": "20f90975dc5a8092e17aa710938db57310601683ed18d279620a3b713e105700",
+      "stage": "sanitizedNormalizedSolutionJson"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "step1",
+          "math": "x = \\tan \\theta, \\quad \\,dx = \\sec^2 \\theta \\, d\\theta, \\quad x \\in [0,\\infty) \\implies \\theta \\in [0,\\frac{\\pi}{2})"
+        },
+        {
+          "id": "step2",
+          "math": "\\ln(1+x^2) = \\ln(1+\\tan^2\\theta) = \\ln(\\sec^2\\theta) = 2\\ln(\\sec\\theta) \\\\ \\arctan x = \\arctan(\\tan\\theta) = \\theta \\\\ x = \\tan\\theta \\\\ 1+x^2 = 1+\\tan^2\\theta = \\sec^2\\theta \\\\ \\,dx = \\sec^2\\theta\\,d\\theta"
+        },
+        {
+          "id": "step3",
+          "math": "\\int_0^{\\frac{\\pi}{2}} \\frac{2\\ln(\\sec\\theta)\\cdot\\theta}{\\tan\\theta\\sec^2\\theta} \\sec^2\\theta\\,d\\theta = 2\\int_0^{\\frac{\\pi}{2}} \\frac{\\theta\\ln(\\sec\\theta)}{\\tan\\theta}\\,d\\theta"
+        },
+        {
+          "id": "step4",
+          "math": "2\\int_0^{\\frac{\\pi}{2}} \\theta \\ln(\\sec\\theta) \\frac{\\cos\\theta}{\\sin\\theta}\\,d\\theta = 2\\int_0^{\\frac{\\pi}{2}} -\\theta \\ln(\\cos\\theta) \\frac{\\cos\\theta}{\\sin\\theta}\\,d\\theta"
+        },
+        {
+          "id": "step5",
+          "math": "u = \\sin\\theta, \\quad du = \\cos\\theta\\,d\\theta, \\quad \\theta = \\arcsin u, \\quad \\cos\\theta = \\sqrt{1-u^2} \\\\ \\Rightarrow -2\\int_0^1 \\arcsin u \\ln(\\sqrt{1-u^2}) \\frac{1}{u}\\,du"
+        },
+        {
+          "id": "step6",
+          "math": "\\ln(\\sqrt{1-u^2}) = \\frac{1}{2}\\ln(1-u^2) \\\\ \\Rightarrow -\\int_0^1 \\frac{\\arcsin u \\ln(1-u^2)}{u}\\,du"
+        },
+        {
+          "id": "step7",
+          "math": "I = -\\int_0^1 \\frac{\\arcsin u \\ln(1-u^2)}{u}\\,du \\approx 0"
+        },
+        {
+          "id": "final-answer",
+          "math": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx = 0"
+        }
+      ],
+      "finalAnswerLatex": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx = 0"
+    }
+  },
+  {
+    "id": "live-replay-0",
+    "origin": "reconstructed_live_excerpt",
+    "provenance": {
+      "path": "tests/fixtures/validation/live-symbol-provenance-replay.json"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "terra-s1",
+          "math": "\\mathcal I\\quad\\text{denotes the given integral}"
+        },
+        {
+          "id": "terra-s2",
+          "math": "a,b>0,\\quad a\\ne b,\\qquad a+b>0"
+        },
+        {
+          "id": "terra-s3",
+          "math": "\\operatorname{Li}_2(z):=\\sum_{n=1}^{\\infty}\\frac{z^n}{n^2}=-\\int_0^z\\frac{\\ln(1-u)}{u}\\,du,\\qquad 0\\le z\\le1"
+        },
+        {
+          "id": "terra-s4",
+          "math": "\\mathcal I=\\frac{\\pi}{2}\\ln^2 2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2"
+    }
+  },
+  {
+    "id": "live-replay-1",
+    "origin": "reconstructed_live_excerpt",
+    "provenance": {
+      "path": "tests/fixtures/validation/live-symbol-provenance-replay.json"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "sol-s1",
+          "math": "\\mathcal I\\quad\\text{denotes the given integral}"
+        },
+        {
+          "id": "sol-s2",
+          "math": "\\operatorname{Li}_2(z):=\\sum_{n=1}^{\\infty}\\frac{z^n}{n^2}=-\\int_0^z\\frac{\\ln(1-u)}{u}\\,du,\\qquad 0\\le z\\le1"
+        },
+        {
+          "id": "sol-s3",
+          "math": "\\frac{d}{du}\\left(\\operatorname{Li}_2(u)+\\operatorname{Li}_2(1-u)+\\ln u\\ln(1-u)\\right)=0,\\qquad \\lim_{u\\to0^+}\\left(\\operatorname{Li}_2(u)+\\operatorname{Li}_2(1-u)+\\ln u\\ln(1-u)\\right)=\\frac{\\pi^2}{6}"
+        },
+        {
+          "id": "sol-s4",
+          "math": "y^2=\\frac{\\pi^2}{3}+4\\sum_{n=1}^{\\infty}\\frac{(-1)^n\\cos(ny)}{n^2},\\qquad -\\pi\\le y\\le\\pi"
+        },
+        {
+          "id": "sol-s5",
+          "math": "\\mathcal I=\\frac{\\pi}{2}\\ln^2 2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2"
+    }
+  },
+  {
+    "id": "initialSolve",
+    "origin": "reconstructed_live_excerpt",
+    "provenance": {
+      "path": "tests/fixtures/orchestration/terra-differential-quality-repair.json"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "substitute",
+          "latex": "x=\\tan t,\\quad t=\\arctan x,\\quad dx=\\sec^2 t\\,dt"
+        },
+        {
+          "id": "dilog-differential",
+          "latex": "d\\!\\left[\\operatorname{Li}_2(\\sin^2 t)\\right]"
+        },
+        {
+          "id": "final",
+          "latex": "I=\\frac{\\pi}{2}\\ln^2 2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2"
+    }
+  },
+  {
+    "id": "repairTriggerSolve",
+    "origin": "existing_synthetic_control",
+    "provenance": {
+      "path": "tests/fixtures/orchestration/terra-differential-quality-repair.json"
+    },
+    "problem": "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx",
+    "candidate": {
+      "steps": [
+        {
+          "id": "substitute",
+          "latex": "x=\\tan t,\\quad t=\\arctan x,\\quad dx=\\sec^2 t\\,dt"
+        },
+        {
+          "id": "free-d-control",
+          "latex": "d[x+1]"
+        },
+        {
+          "id": "final",
+          "latex": "I=\\frac{\\pi}{2}\\ln^2 2"
+        }
+      ],
+      "finalAnswerLatex": "\\frac{\\pi}{2}\\ln^2 2"
+    }
+  }
+]

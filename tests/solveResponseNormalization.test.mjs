@@ -172,6 +172,78 @@ describe("solve response normalization", () => {
     assert.equal(merged.sessions[0].problem.steps.length, 2);
   });
 
+  it("keeps a dirty in-flight session when sessions:list falls back to an empty result", () => {
+    const pendingSession = {
+      id: "pending-typed-session",
+      dirty: true,
+      messages: [{ role: "user", text: "solve x+1=2" }],
+      problem: { expression: "", steps: [] },
+      steps: [],
+    };
+
+    const merged = mergeSessionListPreservingActiveSolution([pendingSession], pendingSession.id, []);
+
+    assert.equal(merged.preservedActive, true);
+    assert.equal(merged.activeSessionId, pendingSession.id);
+    assert.equal(merged.sessions[0], pendingSession);
+  });
+
+  it("keeps an explicit operation owner while merging a delayed remote session list", () => {
+    const pendingSession = {
+      id: "pending-image-session",
+      dirty: false,
+      messages: [],
+      problem: { expression: "", steps: [] },
+      steps: [],
+    };
+    const remoteSession = {
+      id: "remote-session",
+      problem: { expression: "y=2", steps },
+      steps,
+    };
+
+    const merged = mergeSessionListPreservingActiveSolution(
+      [pendingSession],
+      pendingSession.id,
+      [remoteSession],
+      { protectedSessionIds: [pendingSession.id] },
+    );
+
+    assert.equal(merged.preservedActive, true);
+    assert.equal(merged.preservedPending, true);
+    assert.equal(merged.activeSessionId, pendingSession.id);
+    assert.equal(merged.sessions[0], pendingSession);
+    assert.equal(merged.sessions[1], remoteSession);
+  });
+
+  it("does not replace newer dirty chat with a delayed restored snapshot of the same session", () => {
+    const liveSession = {
+      id: "same-session",
+      dirty: true,
+      messages: [{ role: "user", text: "why?" }],
+      pinnedWindows: [{ id: "pin", chatHistory: [{ role: "user", text: "why?" }] }],
+      problem: { expression: "x+1=2", steps },
+      steps,
+    };
+    const restoredSession = {
+      id: "same-session",
+      dirty: false,
+      messages: [],
+      pinnedWindows: [{ id: "pin", chatHistory: [] }],
+      problem: { expression: "x+1=2", steps },
+      steps,
+    };
+
+    const merged = mergeSessionListPreservingActiveSolution(
+      [liveSession],
+      liveSession.id,
+      [restoredSession],
+    );
+
+    assert.equal(merged.sessions[0], liveSession);
+    assert.deepEqual(merged.sessions[0].pinnedWindows[0].chatHistory, [{ role: "user", text: "why?" }]);
+  });
+
   it("does not autosave a blank dirty session, preventing repeated sessions:create loops", () => {
     const blankSession = {
       id: "blank",
@@ -220,6 +292,53 @@ describe("solve response normalization", () => {
     assert.equal(normalized.steps.length, 0);
     assert.equal(status.type, "error");
     assert.notEqual(status.label, "Explanation ready");
+  });
+
+  it("retains empty step positions as visible boundary errors", () => {
+    const normalized = normalizeSolveResponse({
+      title: "Malformed steps",
+      steps: [{}, { id: "heading-only", label: "Intermediate step" }],
+    }, { endpoint: "/api/explain" });
+    assert.equal(normalized.steps.length, 2);
+    assert.deepEqual(normalized.steps.map((step) => step.renderBoundaryError), [
+      { type: "accepted_empty", field: "steps[0]", index: 0 },
+      { type: "accepted_empty", field: "steps[1]", index: 1 },
+    ]);
+    assert.ok(normalized.steps.every((step) => /empty or malformed/u.test(step.summary)));
+  });
+
+  it("retains malformed middle positions without closing the solution gap", () => {
+    const normalized = normalizeSolveResponse({
+      steps: [null, "", { id: "valid", math: "x=1" }],
+      finalAnswerLatex: "x=1",
+    }, { endpoint: "/api/explain" });
+
+    assert.equal(normalized.steps.length, 3);
+    assert.equal(normalized.steps[0].renderBoundaryError.index, 0);
+    assert.equal(normalized.steps[1].renderBoundaryError.index, 1);
+    assert.deepEqual(normalized.steps[2], { id: "valid", math: "x=1" });
+  });
+
+  it("does not let an unusable outer step array mask valid nested solution steps", () => {
+    const normalized = normalizeSolveResponse({
+      steps: [{}],
+      explanation: { steps },
+    }, { endpoint: "/api/explain" });
+
+    assert.deepEqual(normalized.steps, steps);
+  });
+
+  it("preserves duplicate provider ids without inventing client suffixes", () => {
+    const normalized = normalizeSolveResponse({
+      requestId: "req-duplicate",
+      steps: [
+        { id: "same", math: "x=1" },
+        { id: "same", math: "x=2" },
+      ],
+    }, { endpoint: "/api/explain" });
+
+    assert.deepEqual(normalized.steps.map((step) => step.id), ["same", "same"]);
+    assert.equal(normalized.metadata.requestId, "req-duplicate");
   });
 
   it("commits typed solve steps to the currently active render session if request session was replaced", () => {
@@ -371,7 +490,8 @@ describe("solve response normalization", () => {
       problemLatex: canonicalProblem.canonicalLatex,
       canonicalProblem,
       extraction: { confidence: 92 },
-      solveDecision: "direct",
+      solveDecision: "confirmed",
+      reviewAction: { kind: "confirmed_unchanged", canonicalInputHash: canonicalProblem.hash },
     });
     const committed = commitReviewedProblemToSessions({
       sessions: [{ id: "s1", problem: {}, problems: [], steps: [] }],
@@ -407,7 +527,8 @@ describe("solve response normalization", () => {
       problemLatex: canonicalProblem.canonicalLatex,
       canonicalProblem,
       extraction: { confidence: 92 },
-      solveDecision: "direct",
+      solveDecision: "confirmed",
+      reviewAction: { kind: "confirmed_unchanged", canonicalInputHash: canonicalProblem.hash },
     });
     const firstPending = commitReviewedProblemToSessions({
       sessions: [{ id: "s1", problem: {}, problems: [], steps: [] }],

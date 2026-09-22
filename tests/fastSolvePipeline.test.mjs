@@ -3,15 +3,63 @@ import { describe, it } from "node:test";
 import katex from "katex";
 import {
   assertCompactSolveResponse,
+  assertImageSolveResponse,
   convertFastSolveToMathExplanation,
   convertImageSolveToMathExplanation,
 } from "../server/mathExplanationSchema.js";
 import { normalizeDisplayText, renderMathLatex } from "../src/lib/mathAnnotator.js";
 import { createLocalRuleExplanation } from "../server/localRules.js";
+import { inspectSolveCandidateStructure } from "../server/solveCandidateStructure.js";
 
 const REGRESSION_INTEGRAL = "\\int_0^\\infty \\frac{\\ln(1+x^2)\\arctan x}{x(1+x^2)}\\,dx";
 
 describe("fast solve pipeline", () => {
+  it("rejects an emptied image step at its original position instead of filtering it out", () => {
+    assert.throws(() => assertImageSolveResponse({
+      title: "Image boundary",
+      extractedProblemLatex: "x=1",
+      extractedProblemText: "Solve x equals one.",
+      steps: [
+        { title: "Empty layout", equationLatex: String.raw`\displaystyle`, explanation: "Layout only.", tokens: [] },
+        { title: "Visible result", equationLatex: "x=1", explanation: "Visible.", tokens: [] },
+      ],
+      finalAnswerLatex: "x=1",
+      numericCheck: "",
+    }), (error) => error.code === "AI_RESPONSE_INVALID"
+      && error.solutionIssues?.includes("steps[0].latex:empty")
+      && error.solutionDiagnostics?.some((diagnostic) => (
+        diagnostic.type === "provider_empty"
+        && diagnostic.field === "steps[0].latex"
+        && diagnostic.index === 0
+      )));
+  });
+
+  it("attributes a visible source-to-empty destination loss to the original step index", () => {
+    const inspection = inspectSolveCandidateStructure({
+      steps: [{ latex: "1" }, { latex: "" }],
+      finalAnswerLatex: "1",
+    }, {
+      stage: "normalization",
+      sourceSteps: [{ equationLatex: "1" }, { equationLatex: "x" }],
+      strictParse: false,
+    });
+
+    assert.equal(inspection.usable, false);
+    assert.ok(inspection.issues.includes("normalization_emptied_step:steps[1].latex"));
+    assert.deepEqual(
+      inspection.diagnostics.find((diagnostic) => diagnostic.type === "normalization_emptied"),
+      {
+        type: "normalization_emptied",
+        field: "steps[1].latex",
+        index: 1,
+        sourceField: "steps[1].equationLatex",
+        sourcePresent: true,
+        sourceVisible: true,
+        destinationVisible: false,
+      },
+    );
+  });
+
   it("does not turn incidental integral powers into a derivative rule candidate", () => {
     assert.equal(createLocalRuleExplanation(REGRESSION_INTEGRAL), null);
     assert.ok(createLocalRuleExplanation("Differentiate x^2"));
@@ -53,6 +101,30 @@ I&:=\int_0^1x\,dx\\
     assert.equal(explanation.steps[0].math, aligned);
     assert.equal(explanation.steps[0].lines.length, 1);
     assert.equal(explanation.steps[0].lines[0].latex, aligned);
+  });
+
+  it("keeps a coefficient expression in one render source when a physical line splits nabla from its operand", () => {
+    const coefficient = String.raw`B_* =
+(1+\alpha|\nabla u_*|^4)I + 4\alpha|\nabla
+u_*|^2 \nabla u_*\otimes\nabla u_*`;
+    const explanation = convertFastSolveToMathExplanation({
+      title: "Linearized coefficient",
+      problemLatex: "B_*",
+      steps: [
+        { id: "s1", heading: "Linearize", latex: coefficient, reasoning: "Differentiate the flux.", anchors: [] },
+        { id: "s2", heading: "Final Answer", latex: "B_*", reasoning: "State the coefficient.", anchors: [] },
+      ],
+      finalAnswerLatex: "B_*",
+      numericCheck: "",
+    });
+
+    assert.equal(explanation.steps[0].lines.length, 1);
+    assert.equal(explanation.steps[0].lines[0].latex, coefficient);
+    assert.match(explanation.steps[0].lines[0].latex, /\\nabla\nu_\*/u);
+    assert.doesNotThrow(() => katex.renderToString(explanation.steps[0].lines[0].latex, {
+      throwOnError: true,
+      strict: "ignore",
+    }));
   });
 
   it("keeps spaced evaluation delimiters intact through solve normalization", () => {

@@ -1436,8 +1436,9 @@ test("one typed submission produces one initial solve request despite rapid dupl
   });
 
   await page.goto("/?mockAuth=1");
-  await page.getByPlaceholder(/Type a calculus problem/i).fill("Inspect 3x + 45 = 67.");
-  const explainButton = page.getByRole("button", { name: /Explain/i });
+  await page.getByTestId("primary-composer-activate").click();
+  await page.getByPlaceholder("Describe assumptions, boundary conditions, or what should be found…").fill("Inspect 3x + 45 = 67.");
+  const explainButton = page.getByTestId("primary-composer-solve");
   await explainButton.click();
   await page.keyboard.press("Enter");
   await explainButton.click({ force: true, timeout: 150 }).catch(() => {});
@@ -1861,6 +1862,82 @@ test("malformed solver math does not render as raw LaTeX text", async ({ page })
   await expect(failed.locator("xpath=ancestor::article[1]")).toHaveAttribute("data-step-id", "malformed-step");
 });
 
+test("blank render output stays visible and correlated without dropping whitespace positions", async ({ page }) => {
+  await page.route("**/api/explain", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        requestId: "render-empty-request",
+        title: "Rendered empty fixture",
+        problem: "Rendered empty fixture",
+        expression: "x=1",
+        steps: [
+          {
+            id: "layout-only-step",
+            label: "Layout-only step",
+            math: "\\displaystyle",
+            summary: "The renderer should expose a visible fallback.",
+            chunks: [{ id: "space", display: "   ", latex: "   ", text: "   " }],
+            lines: [{ id: "space-line", kind: "math", text: "   ", latex: "   ", tokens: [] }],
+          },
+          {
+            id: "spacing-step",
+            label: "Spacing step",
+            math: "\\hspace{1em}",
+            summary: "Spacing contains no painted glyph.",
+            chunks: [],
+            lines: [],
+          },
+          {
+            id: "smash-step",
+            label: "Smash step",
+            math: "\\smash{x}",
+            summary: "Smash changes layout but keeps its glyph visible.",
+            chunks: [],
+            lines: [],
+          },
+          {
+            id: "rule-step",
+            label: "Rule step",
+            math: "\\rule{1em}{1em}",
+            summary: "A painted rule is visible without text.",
+            chunks: [],
+            lines: [],
+          },
+          {
+            id: "valid-fallback-step",
+            label: "Valid fallback",
+            math: "x=1",
+            chunks: [{}],
+            lines: [{ latex: "   ", text: "   ", tokens: [] }],
+          },
+          null,
+        ],
+        finalAnswerLatex: "x=1",
+        usage: { kind: "explanation", aggregateKind: "ai", tier: "test", used: 1, remaining: 99, limit: 100 },
+      }),
+    });
+  });
+
+  await page.goto("/?mockAuth=1");
+  await submitCurrentComposer(page, "Rendered empty fixture.");
+
+  await expect(page.locator(".omni-solution-flow article")).toHaveCount(6);
+  const emptyOutputs = page.locator("[data-math-render-outcome='rendered_empty']");
+  await expect(emptyOutputs).toHaveCount(1);
+  await expect(page.getByText("Equation could not be rendered.")).toHaveCount(2);
+  await expect(page.locator("article[data-step-id='layout-only-step'] [data-math-render-outcome='render_input_empty']")).toBeVisible();
+  await expect(page.locator("article[data-step-id='spacing-step'] [data-math-render-outcome='rendered_empty']")).toBeVisible();
+  await expect(page.locator("article[data-step-id='layout-only-step']")).toHaveAttribute("data-step-index", "0");
+  await expect(page.locator("article[data-step-id='spacing-step']")).toHaveAttribute("data-step-index", "1");
+  await expect(page.locator("article[data-step-id='smash-step'] [data-math-render-outcome='rendered']")).toBeVisible();
+  await expect(page.locator("article[data-step-id='rule-step'] [data-math-render-outcome='rendered']")).toBeVisible();
+  await expect(page.locator("article[data-step-id='valid-fallback-step'] .katex-html")).toContainText("x=1");
+  await expect(page.locator("article[data-step-index='5']")).toHaveAttribute("data-step-boundary-error", "accepted_empty");
+  await expect(page.getByText("This solution step was empty or malformed and could not be rendered.").first()).toBeVisible();
+  await expect(page.locator(".omni-solution-flow")).toHaveAttribute("data-solve-request-id", "render-empty-request");
+});
 
 test("semantic geometry covers composite KaTeX leaves without whole-step fallback", async ({ page }) => {
   const lazyRequests = [];
@@ -5124,8 +5201,7 @@ test("typed solve status only becomes ready when rendered solution steps exist",
   await page.goto("/?mockAuth=1");
 
   const solveAndAssert = async (input, expectedStepText) => {
-    await page.getByRole("textbox").fill(input);
-    await page.getByRole("button", { name: /Explain|Send/i }).click();
+    await submitCurrentComposer(page, input);
     await expect(page.getByText(/Explanation ready/i)).toBeVisible();
     await expect(page.getByText(expectedStepText)).toBeVisible();
     await expect(page.getByText(/Enter a problem or upload an image/i)).not.toBeVisible();

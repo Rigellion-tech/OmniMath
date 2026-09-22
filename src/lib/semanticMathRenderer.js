@@ -6,6 +6,7 @@ const HIDDEN_SYNTAX_LATEX = new Set(["^", "_"]);
 const HIDDEN_ROLES = new Set(["delimiter", "evaluationBar"]);
 const GROUP_ANNOTATION_ROLES = new Set([
   "argument",
+  "absoluteValue",
   "base",
   "bound",
   "denominator",
@@ -20,7 +21,10 @@ const GROUP_ANNOTATION_ROLES = new Set([
   "integral",
   "lowerBound",
   "numerator",
+  "operatorHead",
   "operand",
+  "parenthesized",
+  "delimited",
   "power",
   "radicand",
   "root",

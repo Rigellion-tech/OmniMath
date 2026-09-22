@@ -100,7 +100,16 @@ function parsedSlots(tree, source) {
 export function getTexSourceAtoms(source) {
   try {
     return parsedSlots(engine.__parse(source, { ...options, trust: false }), source)
-      .filter((slot) => slot.mode === "math" && ["mathord", "textord", "atom"].includes(slot.type));
+      .filter((slot) => slot.mode === "math" && ["mathord", "textord", "atom"].includes(slot.type))
+      .map((slot) => {
+        // KaTeX source locations sometimes attach the whitespace following a
+        // control word to the painted atom (for example `\\nabla u`).  The
+        // whitespace has no glyph and must not prevent an otherwise exact
+        // semantic owner from being created inside the enclosing expression.
+        const trailingWhitespace = source.slice(slot.start, slot.end).match(/\s+$/u)?.[0].length || 0;
+        return trailingWhitespace > 0 ? { ...slot, end: slot.end - trailingWhitespace } : slot;
+      })
+      .filter((slot) => slot.end > slot.start);
   } catch {
     return [];
   }

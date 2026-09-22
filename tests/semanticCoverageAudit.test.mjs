@@ -64,7 +64,7 @@ describe("semantic coverage invariant", () => {
     const audit = auditSemanticCoverage({ tree: missingSuffix });
     assert.equal(audit.sourceAtomCoverageComplete, false);
     assert.ok(audit.sourceAtomGaps.some((gap) => gap.latex === "z"));
-    assert.ok(audit.sourceAtomGaps.every((gap) => gap.failureReason === "visible-source-atom-without-semantic-leaf"));
+    assert.ok(audit.sourceAtomGaps.every((gap) => gap.failureReason === "visible-source-atom-without-semantic-node"));
   });
   it("serializes safe leaves and explicitly reports layout-sensitive leaves in each notation class", () => {
     for (const [fixtureIndex, latex] of NOTATION_FIXTURES.entries()) {
@@ -72,7 +72,7 @@ describe("semantic coverage invariant", () => {
       const interactiveLeaves = tree.flatNodes.filter((node) => (
         classifySemanticNodeInteraction(node, tree.displayLatex).interactive
       ));
-      const measuredTargets = interactiveLeaves.filter((node) => serialization.annotatedNodeIds.includes(node.id)).map((node) => ({
+      const measuredTargets = tree.flatNodes.filter((node) => serialization.annotatedNodeIds.includes(node.id)).map((node) => ({
         ...node,
         rects: [{ left: 0, top: 0, right: 8, bottom: 12, width: 8, height: 12 }],
       }));
@@ -85,7 +85,10 @@ describe("semantic coverage invariant", () => {
         reachableTargets: measuredTargets,
       });
 
-      assert.equal(audit.complete, audit.silentMissingNodes.length === 0);
+      assert.equal(
+        audit.complete,
+        audit.silentMissingNodes.length === 0 && audit.sourceAtoms.every((atom) => atom.firstFailingLayer === 0)
+      );
       for (const missing of audit.silentMissingNodes) {
         assert.match(missing.failureReason, /^(?:tex-layout-changed|tex-parse-structure-changed|katex-rejected-wrapper-boundary)$/,
           `${latex}: unexpected annotation loss for ${missing.semanticId}`);
@@ -136,5 +139,33 @@ describe("semantic coverage invariant", () => {
     assert.equal(audit.complete, false);
     assert.equal(audit.silentMissingNodes.length, 1);
     assert.equal(audit.silentMissingNodes[0].failureReason, "not-measured");
+  });
+
+  it("covers every visible atom in the nonlinear variational PDE fixture through an exact or compact semantic owner", () => {
+    const fixtures = [
+      String.raw`-\nabla\cdot((1+\alpha|\nabla u_*|^4)\nabla u_*)+\beta u_*-\lambda|u_*|^{q-2}u_*=0`,
+      String.raw`B_*=(1+\alpha|\nabla u_*|^4)I+4\alpha|\nabla u_*|^2\nabla u_*\otimes\nabla u_*`,
+      String.raw`L_*v=-\nabla\cdot(B_*\nabla v)+[\beta-\lambda(q-1)|u_*|^{q-2}]v`,
+      String.raw`J''[u_*](v,v)`,
+      String.raw`\inf_{0\ne v\in H_0^1(\Omega)}\frac{J''[u_*](v,v)}{\int_\Omega v^2\,dx}`,
+    ];
+
+    for (const [index, latex] of fixtures.entries()) {
+      const { tree, serialization, domHtml } = renderFixture(latex, `variational-${index}`);
+      const measuredTargets = tree.flatNodes
+        .filter((node) => serialization.annotatedNodeIds.includes(node.id))
+        .map((node) => ({ ...node, rects: [{ left: 0, top: 0, right: 8, bottom: 12, width: 8, height: 12 }] }));
+      const audit = auditSemanticCoverage({
+        tree,
+        serialization,
+        domHtml,
+        measuredTargets,
+        geometryAcceptedTargets: measuredTargets,
+        reachableTargets: measuredTargets,
+      });
+
+      assert.equal(audit.complete, true, `${latex}: ${JSON.stringify(audit.sourceAtoms.filter((atom) => atom.firstFailingLayer), null, 2)}`);
+      assert.equal(audit.sourceAtoms.every((atom) => atom.semanticId && atom.firstFailingLayer === 0), true, latex);
+    }
   });
 });

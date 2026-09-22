@@ -512,6 +512,66 @@ function paintedRectsForElements(root, elements = [], containerRect = null) {
   }));
 }
 
+const GROUP_OWNED_VISIBLE_SYNTAX = /^[()[\]{}|‖⌈⌉⌊⌋⟨⟩,;:]+$/u;
+
+function directlyOwnedSyntaxPrimitiveRects(elements = [], containerRect = null) {
+  if (typeof document === "undefined" || typeof NodeFilter === "undefined") return [];
+  const rects = [];
+  for (const owner of [...new Set(safeList(elements).filter(Boolean))]) {
+    const ownerSemanticId = owner.getAttribute?.("data-semantic-id") || "";
+    if (!ownerSemanticId) continue;
+    // KaTeX may render delimiters and punctuation as empty structural spans
+    // (mopen/mclose/mpunct) rather than text nodes. They are still visible
+    // primitives, and when their nearest semantic wrapper is this group they
+    // belong to the group for exact delimiter hit testing.
+    const ownerRole = owner.getAttribute?.("data-semantic-role") || "";
+    const primitiveSelector = ownerRole === "operatorHead"
+      ? ".mopen, .mclose, .mpunct, .mop"
+      : ".mopen, .mclose, .mpunct";
+    for (const primitive of queryElements(owner, primitiveSelector)) {
+      const nearestSemanticOwner = primitive.closest?.("[data-semantic-id]");
+      if (nearestSemanticOwner?.getAttribute?.("data-semantic-id") !== ownerSemanticId) continue;
+      const hasForeignSemanticDescendant = queryElements(primitive, "[data-semantic-id]")
+        .some((descendant) => descendant.getAttribute?.("data-semantic-id") !== ownerSemanticId);
+      if (hasForeignSemanticDescendant) continue;
+      const text = String(primitive.textContent || "").replace(/\s+/gu, "").trim();
+      if (ownerRole === "operatorHead" && primitive.classList?.contains("mop")) {
+        if (!/^(?:∫|∬|∭|∮|sum|prod|lim|inf|sup|min|max|\u221e)$/iu.test(text)) continue;
+      } else if (!GROUP_OWNED_VISIBLE_SYNTAX.test(text)) {
+        // KaTeX can put a closing delimiter and a following script in one
+        // structural mclose container. That container is not an atomic
+        // delimiter and must not let the parent group claim the child glyph.
+        continue;
+      }
+      const primitiveRects = getElementRects(primitive)
+        .filter((rect) => !containerRect || rectIntersects(rect, containerRect));
+      rects.push(...primitiveRects);
+    }
+    const walker = document.createTreeWalker(owner, NodeFilter.SHOW_TEXT);
+    let current = walker.nextNode();
+    while (current) {
+      const raw = String(current.textContent || "").trim();
+      const nearestSemanticOwner = current.parentElement?.closest?.("[data-semantic-id]");
+      if (
+        raw
+        && GROUP_OWNED_VISIBLE_SYNTAX.test(raw)
+        && nearestSemanticOwner?.getAttribute?.("data-semantic-id") === ownerSemanticId
+      ) {
+        const range = document.createRange();
+        try {
+          range.selectNodeContents(current);
+          rects.push(...getElementRects(range));
+        } finally {
+          range.detach?.();
+        }
+      }
+      current = walker.nextNode();
+    }
+  }
+  return preserveSemanticRectFragments(rects)
+    .filter((rect) => !containerRect || rectIntersects(rect, containerRect));
+}
+
 function visibleKatexPrimitiveRectsInElement(root, scopeElement) {
   if (!root || !scopeElement) return [];
   const rootRect = normalizeSemanticRect(root.getBoundingClientRect());
@@ -930,7 +990,8 @@ function shouldPreferChildClusterGeometry(target = {}, currentRects = [], childC
 function shouldPreserveOwnPaintedPrimitiveGeometry(target = {}) {
   const role = target.role || target.kind || target.type || "";
   const type = target.type || target.kind || "";
-  return ["upperBound", "lowerBound", "bound"].includes(role)
+  return safeList(target.ownedPrimitiveRects).some((rect) => rectArea(rect) > 0)
+    || ["upperBound", "lowerBound", "bound"].includes(role)
     || ["fraction", "power"].includes(type);
 }
 
@@ -1040,8 +1101,14 @@ function refineAggregateGeometryFromChildren({
   for (const target of targets) {
     if (!target?.id || isLeafSemanticTarget(target)) continue;
     const descendantRects = collectDescendantPaintedRects(target, measuredById, semanticNodeById);
+    const ownPrimitiveRects = safeList(target.ownedPrimitiveRects)
+      .map(normalizeSemanticRect)
+      .filter(Boolean)
+      .filter((rect) => rectArea(rect) > 0);
     const childRects = uniqueSemanticRects([
-      ...(shouldPreserveOwnPaintedPrimitiveGeometry(target) ? primaryPaintedRects(target) : []),
+      ...(ownPrimitiveRects.length > 0
+        ? ownPrimitiveRects
+        : shouldPreserveOwnPaintedPrimitiveGeometry(target) ? primaryPaintedRects(target) : []),
       ...descendantRects,
     ]);
     const childClusters = clusterSemanticRects(childRects, medianHeight || 18);
@@ -1065,6 +1132,7 @@ function refineAggregateGeometryFromChildren({
 }
 
 const INTERNAL_GAP_OWNER_ROLES = new Set([
+  "absoluteValue",
   "integral",
   "integral-expression",
   "integralExpression",
@@ -1081,6 +1149,9 @@ const INTERNAL_GAP_OWNER_ROLES = new Set([
   "differential",
   "group",
   "groupedExpression",
+  "parenthesized",
+  "delimited",
+  "operatorHead",
   "small-group",
   "smallGroup",
 ]);
@@ -1397,8 +1468,14 @@ function measureAnnotatedSemanticTargets({
       .filter(Boolean)
       .filter((rect) => !containerRect || rectIntersects(rect, containerRect));
     const rawPaintedRects = paintedRectsForElements(katexRoot, elements, containerRect);
-    const clusteredPaintedRects = clusterSemanticRects(rawPaintedRects, leafMedianHeight || 18);
     const leaf = isLeafSemanticTarget(semanticTarget);
+    const ownedPrimitiveRects = leaf
+      ? []
+      : directlyOwnedSyntaxPrimitiveRects(directElements, containerRect);
+    const clusteredPaintedRects = clusterSemanticRects([
+      ...rawPaintedRects,
+      ...ownedPrimitiveRects,
+    ], leafMedianHeight || 18);
     const leafRects = normalizeDeterministicLeafRects(filterLeafRects(rawRects, semanticTarget, {
           medianLeafHeight: leafMedianHeight,
           containerRect,
@@ -1434,6 +1511,7 @@ function measureAnnotatedSemanticTargets({
       chosenDomKey: directElements.length > 0 ? node.id : `${node.id}:semantic-fallback`,
       clientRectCount: rawRects.length,
       annotatedDomNodeCount: annotatedDomCount,
+      ownedPrimitiveRects,
     };
     const measuredWithGeometry = applySemanticGeometryMetadata(measured, rects, paintedRects, {
       rectSource: measured.rectSource,
@@ -5586,13 +5664,33 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     if (!node) return undefined;
 
     const handleDocumentMove = (event) => {
+      // Every semantic MathChunk registers this document listener. Only the
+      // chunk that currently owns a resolved target may translate a document
+      // move into a global hover leave; otherwise sibling chunks race the
+      // active owner and clear its debounced explanation request.
+      const ownsActiveHover = lastResolvedHoverIdRef.current !== null
+        || activeChunkId === safeChunk.id
+        || semanticNodeById.has(activeChunkId);
+      if (!ownsActiveHover) return;
       const target = event.target;
       const isOverToken = typeof Node !== "undefined" && target instanceof Node && node.contains(target);
       const floatingElement = typeof Element !== "undefined" && target instanceof Element
         ? target.closest(".omni-floating-window, .omni-quick-tooltip")
         : null;
       if (isOverToken) return;
-      if (floatingElement) return;
+      if (floatingElement) {
+        // The quick tooltip is intentionally pointer-interactive so users can
+        // move into it without dismissing the explanation. It can also overlap
+        // a neighboring semantic atom. Browser hit testing then targets the
+        // portal instead of this math chunk even though the cached atom
+        // geometry still contains the pointer. Preserve tooltip ownership when
+        // it covers empty space, but route the move through the exact semantic
+        // resolver when it covers one of this chunk's measured targets.
+        if (resolvePointerToken(event)) {
+          handleAnnotatedMoveRef.current?.(event);
+        }
+        return;
+      }
       lastResolvedHoverIdRef.current = null;
       handleChunkLeave(event);
     };
@@ -5601,7 +5699,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     return () => {
       document.removeEventListener("mousemove", handleDocumentMove, true);
     };
-  }, [handleChunkLeave, hasInteractiveTargets]);
+  }, [activeChunkId, handleChunkLeave, hasInteractiveTargets, resolvePointerToken, safeChunk.id, semanticNodeById]);
 
   const logReadinessSnapshot = useCallback((phase) => {
     if (!DEBUG_MATH_HOVER_DIAGNOSTICS) return;

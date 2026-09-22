@@ -1307,7 +1307,7 @@ describe("semanticHitboxes", () => {
     }).target.id, "minus");
   });
 
-  it("resolveSemanticTarget prefers a differential aggregate over its child d by default", () => {
+  it("resolveSemanticTarget prefers the exact differential operator d over its aggregate", () => {
     const differential = {
       id: "dtheta",
       role: "differential",
@@ -1336,7 +1336,7 @@ describe("semanticHitboxes", () => {
     assert.equal(resolveSemanticTarget({
       pointer: { x: 15, y: 16 },
       candidates: [differential, d],
-    }).target.id, "dtheta");
+    }).target.id, "d");
   });
 
   it("keeps the variable leaf reachable inside a compound differential", () => {
@@ -1370,7 +1370,7 @@ describe("semanticHitboxes", () => {
     assert.equal(resolveSemanticTarget({ pointer: { x: 28, y: 18 }, candidates: [differential, theta] }).target.id, theta.id);
   });
 
-  it("selects differential targets only inside glyph-tight bounds", () => {
+  it("selects exact differential children only inside glyph-tight bounds", () => {
     const dt = {
       id: "dt",
       role: "differential",
@@ -1393,11 +1393,43 @@ describe("semanticHitboxes", () => {
       paintedRects: [rect(220, 20, 18, 16)],
       rects: [rect(220, 20, 18, 16)],
     };
+    const dtD = {
+      id: "dt-d",
+      parentId: "dt",
+      role: "differentialOperator",
+      type: "operator",
+      depth: 4,
+      rectSource: "semantic-dom",
+      rects: [rect(180, 20, 9, 16)],
+    };
+    const dtT = {
+      id: "dt-t",
+      parentId: "dt",
+      role: "variable",
+      type: "symbol",
+      depth: 4,
+      rectSource: "semantic-dom",
+      rects: [rect(189, 20, 8, 16)],
+    };
+    const dxD = {
+      ...dtD,
+      id: "dx-d",
+      parentId: "dx",
+      rects: [rect(220, 20, 9, 16)],
+    };
+    const dxX = {
+      ...dtT,
+      id: "dx-x",
+      parentId: "dx",
+      rects: [rect(229, 20, 9, 16)],
+    };
 
-    assert.equal(chooseSemanticHit([dt], 186, 28).id, "dt");
-    assert.equal(chooseSemanticHit([dx], 228, 28).id, "dx");
-    assert.equal(chooseSemanticHit([dt], 174, 28), null);
-    assert.equal(chooseSemanticHit([dt], 202, 28), null);
+    assert.equal(chooseSemanticHit([dt, dtD, dtT], 186, 28).id, "dt-d");
+    assert.equal(chooseSemanticHit([dt, dtD, dtT], 193, 28).id, "dt-t");
+    assert.equal(chooseSemanticHit([dx, dxD, dxX], 225, 28).id, "dx-d");
+    assert.equal(chooseSemanticHit([dx, dxD, dxX], 233, 28).id, "dx-x");
+    assert.equal(chooseSemanticHit([dt, dtD, dtT], 174, 28), null);
+    assert.equal(chooseSemanticHit([dt, dtD, dtT], 202, 28), null);
   });
 
   it("omits oversized differential aggregate geometry when no glyph-tight rect is available", () => {
@@ -1938,9 +1970,7 @@ describe("semanticHitboxes", () => {
     const sourceLatex = "\\tan t+\\arctan x+\\ln(\\cos t)+\\cot t+\\int_0^{\\pi/2}f(t)\\,dt";
     const tree = buildSemanticTree({ stepId: "hover-coverage", displayLatex: sourceLatex, enabled: true });
     const recognized = flattenSemanticTreeForTargets(tree);
-    const descriptors = recognized.filter((target) => (
-      !target.childIds?.length && isHoverEligibleTarget(target)
-    ));
+    const descriptors = recognized.filter((target) => isHoverEligibleTarget(target));
     const registered = dedupeSemanticTargetsById(descriptors.map((target, index) => ({
       ...target,
       rects: [rect(index * 12, 10, 9, 16)],
@@ -1956,7 +1986,7 @@ describe("semanticHitboxes", () => {
     });
     const descriptorLatex = descriptors.map((target) => target.latex);
 
-    for (const expected of ["\\tan", "\\arctan", "\\ln", "\\cos", "\\cot", "\\int", "0", "\\pi", "2"]) {
+    for (const expected of ["\\tan", "\\arctan", "\\ln", "\\cos", "\\cot", "\\int_0^{\\pi/2}", "0", "\\pi", "2"]) {
       assert.ok(descriptorLatex.includes(expected), `missing descriptor ${expected}: ${descriptorLatex.join(" ")}`);
     }
     assert.equal(audit.descriptorCount, descriptors.length);

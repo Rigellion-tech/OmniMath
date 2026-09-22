@@ -1935,8 +1935,8 @@ test("semantic geometry covers composite KaTeX leaves without whole-step fallbac
   const coverage = await page.evaluate(() => {
     const expectedByStep = {
       "Geometry quadratic": ["3", "x", "2", "5", "-451", "-", "=", "0"],
-      "Geometry integral": ["\\int", "0", "1", "\\ln", "\\cos", "x", "2", "dx"],
-      "Full structural integral": ["\\int", "0", "\\infty", "\\ln", "\\arctan", "x", "2"],
+      "Geometry integral": ["\\int_0^1", "0", "1", "\\ln", "\\cos", "x", "2", "dx"],
+      "Full structural integral": ["\\int_0^\\infty", "0", "\\infty", "\\ln", "\\arctan", "x", "2"],
       "Geometry functions": ["\\ln", "\\cos", "\\cot", "\\arctan", "x"],
       "Geometry nested fractions": ["1", "2", "\\sqrt", "9", "4", "16", "25"],
       "Geometry equality chain": ["x", "2", "1", "=", "-1"],
@@ -1959,7 +1959,7 @@ test("semantic geometry covers composite KaTeX leaves without whole-step fallbac
             rect,
           };
         });
-      const targets = [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+      const targets = [...(step?.querySelectorAll(".math-semantic-hitbox[data-token-id]") || [])]
         .map((node) => {
           const rect = node.getBoundingClientRect();
           return {
@@ -2206,7 +2206,7 @@ test("nested integral and signed exponent targets preserve semantic identity", a
     const step = [...document.querySelectorAll(".step-card")]
       .find((card) => card.textContent?.includes(stepLabel));
     const stepRect = step?.getBoundingClientRect();
-    const matches = [...(step?.querySelectorAll("[data-inspectable='math-subtoken']") || [])]
+    const matches = [...(step?.querySelectorAll(".math-semantic-hitbox[data-token-id]") || [])]
       .filter((node) => (
         node.getAttribute("data-token-latex") === latex
         && (!role || node.getAttribute("data-token-role") === role)
@@ -2250,7 +2250,7 @@ test("nested integral and signed exponent targets preserve semantic identity", a
   };
 
   const integralChecks = [
-    ["\\int", "integralSymbol", 0],
+    ["\\int_0^\\infty", "operatorHead", 0],
     ["0", "lowerBound", 0],
     ["\\infty", "upperBound", 0],
     ["\\ln", "functionName", 0],
@@ -2382,14 +2382,24 @@ test("pointer trajectories replace stale identities across nested semantic struc
     }, stepLabel);
   };
 
-  const target = (targets, { latex, role = null, kind = null, region = null, occurrence = 0, smallestHeight = false }) => {
+  const target = (targets, {
+    latex,
+    role = null,
+    kind = null,
+    region = null,
+    occurrence = 0,
+    smallestHeight = false,
+    largestHeight = false,
+  }) => {
     const matches = targets.filter((candidate) => (
       candidate.latex === latex
       && (!role || candidate.role === role)
       && (!kind || candidate.kind === kind)
       && (!region || candidate.region === region)
     )).sort((left, right) => (
-      smallestHeight
+      largestHeight
+        ? right.rect.height - left.rect.height || left.rect.left - right.rect.left
+        : smallestHeight
         ? left.rect.height - right.rect.height || right.rect.width - left.rect.width
         : left.rect.top - right.rect.top || left.rect.left - right.rect.left
     ));
@@ -2461,17 +2471,24 @@ test("pointer trajectories replace stale identities across nested semantic struc
   await assertResolvedPoint(radicalX);
 
   const integralTargets = await targetsForStep("Integral bound transition");
-  const integralSymbol = target(integralTargets, { latex: "\\int", role: "integralSymbol", kind: "leaf" });
+  const integralSymbol = target(integralTargets, {
+    latex: "\\int_0^{-2}",
+    role: "operatorHead",
+    kind: "group",
+    largestHeight: true,
+  });
   const integralLower = target(integralTargets, { latex: "0", role: "lowerBound", kind: "leaf" });
   const signedUpper = target(integralTargets, { latex: "-2", role: "upperBound", kind: "leaf" });
   const integrandFunction = target(integralTargets, { latex: "f", role: "functionName", kind: "leaf" });
-  const integralDifferential = target(integralTargets, { latex: "d\\theta", role: "differential", kind: "group" });
+  const integralDifferentialD = target(integralTargets, { latex: "d", role: "differentialOperator", kind: "leaf" });
+  const integralDifferentialTheta = target(integralTargets, { latex: "\\theta", role: "variable", kind: "leaf" });
   await assertResolvedPoint(integralSymbol);
   await assertResolvedPoint(integralLower);
   await assertResolvedPoint(signedUpper, pointIn(signedUpper, 0.15), { latex: "-2", role: "upperBound" });
   await assertResolvedPoint(signedUpper, pointIn(signedUpper, 0.85), { latex: "-2", role: "upperBound" });
   await assertResolvedPoint(integrandFunction);
-  await assertResolvedPoint(integralDifferential);
+  await assertResolvedPoint(integralDifferentialD);
+  await assertResolvedPoint(integralDifferentialTheta);
 
   const signedTargets = await targetsForStep("Signed exponent transition");
   const signedBase = target(signedTargets, { latex: "x", role: "base", kind: "leaf" });
@@ -2519,16 +2536,12 @@ test("pointer trajectories replace stale identities across nested semantic struc
   await assertResolvedPoint(denominatorC);
 
   const differentialTargets = await targetsForStep("Differential transition");
-  const differentialGroupFragments = differentialTargets
-    .filter((candidate) => candidate.latex === "d\\theta" && candidate.role === "differential" && candidate.kind === "group")
-    .sort((left, right) => left.rect.left - right.rect.left);
-  expect(differentialGroupFragments.length).toBeGreaterThanOrEqual(2);
-  const differentialGroup = differentialGroupFragments[0];
+  const differentialD = target(differentialTargets, { latex: "d", role: "differentialOperator", kind: "leaf" });
   const differentialTheta = target(differentialTargets, { latex: "\\theta", role: "variable", kind: "leaf" });
   const neighboringFunction = target(differentialTargets, { latex: "f", role: "functionName", kind: "leaf" });
-  await assertResolvedPoint(differentialGroup);
+  await assertResolvedPoint(differentialD);
   await assertResolvedPoint(differentialTheta);
-  await assertResolvedPoint(differentialGroup);
+  await assertResolvedPoint(differentialD);
   await assertResolvedPoint(neighboringFunction);
 
   const nestedTargets = await targetsForStep("Nested bound torture");
@@ -2791,7 +2804,7 @@ test("complex integral upper-bound hover reaches visible nested bound ink", asyn
       { label: "nested-numerator", point: pointFromRect(numerator?.rects?.[0]), sourceRect: numerator?.rects?.[0] || null },
       { label: "nested-denominator", point: pointFromRect(denominator?.rects?.[0]), sourceRect: denominator?.rects?.[0] || null },
       { label: "left-visible-edge", point: pointFromRect(upperFractionLine, 0.04, 0.5), sourceRect: roundRect(upperFractionLine) },
-      { label: "right-visible-edge", point: pointFromRect(upperFractionLine, 0.96, 0.5), sourceRect: roundRect(upperFractionLine) },
+      { label: "right-visible-edge", point: pointFromRect(upperFractionLine, 0.99, 0.5), sourceRect: roundRect(upperFractionLine) },
     ].filter((item) => item.point);
 
     return {
@@ -3150,7 +3163,7 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
     { label: "step-6-signed-coefficient", stepLabel: "Step 6 right side", latex: "-2", occurrence: 0 },
     { label: "step-8-lhs-ln-cos", stepLabel: "Step 8 logarithmic identity", latex: "\\ln", occurrence: 0 },
     { label: "step-8-rhs-theta", stepLabel: "Step 8 logarithmic identity", latex: "\\theta", occurrence: 1 },
-    { label: "step-8-dtheta", stepLabel: "Step 8 logarithmic identity", latex: "d\\theta", occurrence: 0 },
+    { label: "step-8-differential-d", stepLabel: "Step 8 logarithmic identity", latex: "d", role: "differentialOperator", occurrence: 0 },
     { label: "step-9-left-expression", stepLabel: "Step 9 differential expression", latex: "\\ln", occurrence: 0 },
     { label: "final-numerator-plus", stepLabel: "Final answer", latex: "+", occurrence: 0 },
     { label: "final-denominator-plus", stepLabel: "Final answer", latex: "+", occurrence: 1 },
@@ -3324,9 +3337,9 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
     geometry: ["precise_leaf"],
     withinTargetBox: true,
   });
-  assertResolved("step-8-dtheta", {
-    expectedLatex: "d\\theta",
-    geometry: ["fragmented_group"],
+  assertResolved("step-8-differential-d", {
+    expectedLatex: "d",
+    geometry: ["precise_leaf"],
     withinTargetBox: true,
   });
   assertResolved("step-9-left-expression", {
@@ -4214,8 +4227,8 @@ test("fraction result hit-testing exposes leaves and pins fraction only through 
     "4"
   );
   await hoverSemanticTarget(
-    page.locator("[data-inspectable='math-subtoken'][data-token-latex='d\\\\theta']").first(),
-    "d\\theta"
+    page.locator("[data-inspectable='math-subtoken'][data-token-role='differentialOperator'][data-token-latex='d']").first(),
+    "d"
   );
 
   const threeBox = await three.boundingBox();

@@ -89,6 +89,42 @@ function assertImaginaryRootTree(displayLatex) {
 }
 
 describe("math semantic tree", () => {
+  it("keeps dense variational operators, decorated symbols, scripts, and tensor products occurrence-specific", () => {
+    const latex = String.raw`B_*=(1+\alpha|\nabla u_*|^4)I+4\alpha|\nabla u_*|^2\nabla u_*\otimes\nabla u_*`;
+    const tree = semanticTree(latex, "variational-dense");
+    const leaves = tree.linearLeaves.map((id) => tree.nodeMap[id]);
+
+    assert.ok(leaves.some((node) => node.latex === "B_*"));
+    assert.equal(leaves.filter((node) => node.latex === String.raw`\nabla`).length, 4);
+    assert.equal(leaves.filter((node) => node.latex === "u_*").length, 4);
+    assert.ok(leaves.some((node) => node.latex === String.raw`\otimes` && node.role === "operator"));
+    assert.ok(leaves.some((node) => node.latex === "4" && node.role === "exponent"));
+    assert.ok(leaves.some((node) => node.latex === "2" && node.role === "exponent"));
+    assert.equal(tree.flatNodes.filter((node) => node.type === "absoluteValue").length, 2);
+  });
+
+  it("keeps prime decorations and grouped functional arguments as compact semantic units", () => {
+    const tree = semanticTree(String.raw`J''[u_*](v,v)`, "variational-second-variation");
+    const leaves = tree.linearLeaves.map((id) => tree.nodeMap[id]);
+    const primeSymbol = leaves.find((node) => node.latex === "J''");
+    const argument = tree.flatNodes.find((node) => node.type === "parenthesized" && node.latex === "(v,v)");
+
+    assertSourceText(tree, primeSymbol, "J''");
+    assert.ok(argument?.id);
+    assertSourceText(tree, argument, "(v,v)");
+  });
+
+  it("models infimum and integral heads separately from their full Rayleigh expressions", () => {
+    const latex = String.raw`\inf_{0\ne v\in H_0^1(\Omega)}\frac{J''[u_*](v,v)}{\int_\Omega v^2\,dx}`;
+    const tree = semanticTree(latex, "variational-rayleigh");
+    const heads = tree.flatNodes.filter((node) => node.role === "operatorHead");
+
+    assert.ok(heads.some((node) => node.latex.startsWith(String.raw`\inf_`)));
+    assert.ok(heads.some((node) => node.latex.startsWith(String.raw`\int_`)));
+    assert.ok(heads.every((node) => node.sourceRange.end - node.sourceRange.start < latex.length / 2));
+    assert.ok(tree.flatNodes.some((node) => node.role === "bound" && node.latex.includes(String.raw`H_0^1`)));
+  });
+
   it("keeps both variational integrals and the equation suffix in ranged semantic leaves", () => {
     const equations = [
       String.raw`J'[u](v)=\int_{\Omega}\left[-\nabla\cdot\left((1+\alpha|\nabla u|^2)\nabla u\right)+\beta u-\lambda|u|^{p-2}u\right]v\,dx+\int_{\partial\Omega}(1+\alpha|\nabla u|^2)\frac{\partial u}{\partial n}v\,dS`,

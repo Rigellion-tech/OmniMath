@@ -297,6 +297,7 @@ const HOVER_PENALIZED_ROLES = new Set([
 ]);
 
 export const AGGREGATE_HOVER_ROLES = new Set([
+  "absoluteValue",
   "integral",
   "integral-expression",
   "integralExpression",
@@ -315,6 +316,9 @@ export const AGGREGATE_HOVER_ROLES = new Set([
   "denominator",
   "group",
   "groupedExpression",
+  "parenthesized",
+  "delimited",
+  "operatorHead",
   "small-group",
   "smallGroup",
 ]);
@@ -366,6 +370,15 @@ export function isHoverEligibleTarget(target = {}) {
   if (!target) return false;
   const role = target.role || target.kind || target.type || "";
   const type = target.type || target.kind || "";
+  // Delimiter leaves are parser bookkeeping for the visible delimiter owned
+  // by their enclosing group. They intentionally have no annotation wrapper;
+  // making a fallback leaf independently selectable would steal the exact
+  // primitive from the group's semantic identity.
+  if (
+    role === "delimiter"
+    || role === "evaluationBar"
+    || ["integralSymbol", "summationOperator", "productOperator", "limitOperator", "extremumOperator"].includes(role)
+  ) return false;
   if (type === "number") return true;
   if (isAggregateHoverTarget(target)) return true;
   if ((target.childIds?.length || target.children?.length) && !isCompactRadicalParent(target) && !isCompactPowerParent(target)) return false;
@@ -1053,8 +1066,7 @@ export function resolveSemanticTarget({
     const preciseDeterministicHits = deterministicHits
       .filter((hit) => !isImpreciseLeafOverlayHit(hit, deterministicHits));
     const deterministicLeafHits = preciseDeterministicHits.filter(({ target }) => (
-      (isLeafSemanticTarget(target) && isHoverEligibleTarget(target))
-      || isDifferentialHoverTarget(target)
+      isLeafSemanticTarget(target) && isHoverEligibleTarget(target)
     ));
     const deterministicPaintedLeafHits = deterministicLeafHits.filter((hit) => hit.paintedExact);
     const deterministicOwnedPrimitiveHits = preciseDeterministicHits.filter((hit) => (
@@ -1134,8 +1146,7 @@ export function resolveSemanticTarget({
     .filter((hit) => !isImpreciseLeafOverlayHit(hit, allHits));
   const leafHits = allHits
     .filter(({ target }) => (
-      (isLeafSemanticTarget(target) && isHoverEligibleTarget(target))
-      || isDifferentialHoverTarget(target)
+      isLeafSemanticTarget(target) && isHoverEligibleTarget(target)
     ))
     .filter((hit) => preciseAllHits.includes(hit))
     .sort(sortHits);

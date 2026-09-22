@@ -7,9 +7,17 @@ const KATEX_INTERNAL = /** @type {{ __parse: (latex: string, options?: object) =
 );
 
 const FUNCTION_COMMANDS = new Set(["sin", "cos", "tan", "sec", "csc", "cot", "ln", "log", "exp", "arcsin", "arccos", "arctan"]);
-const GREEK_COMMANDS = new Set(["theta", "phi", "rho", "pi", "alpha", "beta", "gamma", "delta", "lambda", "mu", "sigma", "omega"]);
+const GREEK_COMMANDS = new Set([
+  "alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta", "theta", "vartheta",
+  "iota", "kappa", "varkappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "varpi", "rho",
+  "varrho", "sigma", "varsigma", "tau", "upsilon", "phi", "varphi", "chi", "psi", "omega",
+  "Gamma", "Delta", "Theta", "Lambda", "Xi", "Pi", "Sigma", "Upsilon", "Phi", "Psi", "Omega",
+]);
 const CONSTANT_COMMANDS = new Set(["pi", "infty"]);
-const OPERATOR_COMMANDS = new Set(["cdot", "times", "nabla", "to", "Rightarrow", "leftarrow", "rightarrow"]);
+const OPERATOR_COMMANDS = new Set([
+  "cdot", "times", "otimes", "circ", "bullet", "nabla", "partial",
+  "to", "mapsto", "Rightarrow", "leftarrow", "rightarrow", "leftrightarrow",
+]);
 const PRESENTATION_COMMANDS = new Set(["mathbf", "mathrm", "mathit", "mathcal", "mathbb", "mathsf", "mathtt", "boldsymbol", "vec", "hat", "bar", "tilde", "overline"]);
 const SPACING_COMMANDS = ["\\qquad", "\\quad", "\\,", "\\!", "\\:", "\\;"];
 const NUMBER_LITERAL_SOURCE = "-?\\d+(?:\\.\\d+)?";
@@ -380,9 +388,32 @@ function readScriptsAfter(text = "", startIndex = 0) {
   return { scripts, endIndex: index };
 }
 
+function readPrimeSuffixEnd(text = "", startIndex = 0) {
+  let index = startIndex;
+  while (text[index] === "'") index += 1;
+  return index;
+}
+
 function readAtomicFactorEnd(text = "", startIndex = 0) {
   const source = String(text || "");
   if (startIndex >= source.length) return -1;
+  if (source[startIndex] === "|") {
+    let braceDepth = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    for (let index = startIndex + 1; index < source.length; index += 1) {
+      const char = source[index];
+      if (char === "{") braceDepth += 1;
+      else if (char === "}") braceDepth -= 1;
+      else if (char === "(") parenDepth += 1;
+      else if (char === ")") parenDepth -= 1;
+      else if (char === "[") bracketDepth += 1;
+      else if (char === "]") bracketDepth -= 1;
+      if (char !== "|" || braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0) continue;
+      const scriptInfo = readScriptsAfter(source, index + 1);
+      return scriptInfo.endIndex;
+    }
+  }
   const sizedDelimited = readSizedDelimited(source, startIndex);
   if (sizedDelimited) {
     return readScriptsAfter(source, sizedDelimited.end).endIndex;
@@ -400,6 +431,7 @@ function readAtomicFactorEnd(text = "", startIndex = 0) {
     endIndex = startIndex + (command || number || symbol || "").length;
   }
   if (endIndex <= startIndex) return -1;
+  endIndex = readPrimeSuffixEnd(source, endIndex);
   const scriptInfo = readScriptsAfter(source, endIndex);
   return scriptInfo.endIndex;
 }
@@ -429,10 +461,15 @@ function trailingNameToken(text = "") {
 
 function readLeadingFunctionCall(text = "") {
   const name = readNameToken(text, 0);
-  if (!name || !isLikelyFunctionName(name)) return null;
+  if (!name) return null;
   const scriptInfo = readScriptsAfter(text, name.length);
   const argument = readDelimited(text, scriptInfo.endIndex);
   if (!argument) return null;
+  const bareName = nameTokenDisplayName(name);
+  if (!isLikelyFunctionName(name)
+    && !GREEK_COMMANDS.has(bareName)
+    && !/^\\operatorname/u.test(name)) return null;
+  if (OPERATOR_COMMANDS.has(bareName) || CONSTANT_COMMANDS.has(bareName) || PRESENTATION_COMMANDS.has(bareName)) return null;
   return {
     name,
     nameStart: 0,
@@ -668,6 +705,27 @@ function splitImplicitProduct(text) {
     return [left, right];
   };
 
+  // A coefficient or symbol immediately followed by an absolute-value factor
+  // has no textual separator (`\\alpha|z|^4`). Split that boundary before
+  // whitespace inside the absolute value can be mistaken for a product break.
+  const leadingAtomEnd = readAtomicFactorEnd(compact, 0);
+  if (leadingAtomEnd === compact.length) return null;
+  if (compact[0] === "|" && leadingAtomEnd > 0) {
+    const split = splitAt(0, leadingAtomEnd, leadingAtomEnd);
+    if (split) return split;
+  }
+  if (leadingAtomEnd > 0 && compact[leadingAtomEnd] === "|") {
+    const split = splitAt(0, leadingAtomEnd, leadingAtomEnd);
+    if (split) return split;
+  }
+  if (leadingAtomEnd > 0) {
+    const callable = readLeadingFunctionCall(compact) || readLeadingFunctionFactor(compact);
+    if (!callable || callable.end <= leadingAtomEnd) {
+      const split = splitAt(0, leadingAtomEnd, leadingAtomEnd);
+      if (split) return split;
+    }
+  }
+
   let braceDepth = 0;
   let parenDepth = 0;
   let bracketDepth = 0;
@@ -752,6 +810,32 @@ function splitImplicitProduct(text) {
   if (firstAtomEnd > 0 && firstAtomEnd < compact.length) {
     const split = splitAt(0, firstAtomEnd, firstAtomEnd);
     if (split) return split;
+  }
+  return null;
+}
+
+const EXPLICIT_PRODUCT_OPERATORS = ["\\otimes", "\\cdot", "\\times", "\\circ", "\\bullet"];
+
+function splitExplicitProduct(text = "") {
+  const source = String(text || "");
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") braceDepth += 1;
+    else if (char === "}") braceDepth -= 1;
+    else if (char === "(") parenDepth += 1;
+    else if (char === ")") parenDepth -= 1;
+    else if (char === "[") bracketDepth += 1;
+    else if (char === "]") bracketDepth -= 1;
+    if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0) continue;
+    const operator = EXPLICIT_PRODUCT_OPERATORS.find((candidate) => source.startsWith(candidate, index));
+    if (!operator || index === 0 || index + operator.length >= source.length) continue;
+    const left = trimSourcePart({ value: source.slice(0, index), start: 0 });
+    const right = trimSourcePart({ value: source.slice(index + operator.length), start: index + operator.length });
+    if (!left.value || !right.value || !hasBalancedGroups(left.value) || !hasBalancedGroups(right.value)) continue;
+    return { left, operator, operatorIndex: index, right };
   }
   return null;
 }
@@ -1043,6 +1127,37 @@ function parseDelimitedExpression(builder, text, parentId, depth, start, role) {
   const openNode = builder.createNode({ type: "operator", role: "delimiter", latex: open, parentId: node.id, depth: depth + 1, start, end: start + 1 });
   const closeNode = builder.createNode({ type: "operator", role: "delimiter", latex: close, parentId: node.id, depth: depth + 1, start: start + text.length - 1, end: start + text.length });
   node.childIds = [openNode.id, inner?.id, closeNode.id].filter(Boolean);
+  return node;
+}
+
+function parseAbsoluteValueExpression(builder, text, parentId, depth, start, role) {
+  if (!text.startsWith("|") || !text.endsWith("|") || text.length < 3) return null;
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 1; index < text.length - 1; index += 1) {
+    const char = text[index];
+    if (char === "{") braceDepth += 1;
+    else if (char === "}") braceDepth -= 1;
+    else if (char === "(") parenDepth += 1;
+    else if (char === ")") parenDepth -= 1;
+    else if (char === "[") bracketDepth += 1;
+    else if (char === "]") bracketDepth -= 1;
+    if (char === "|" && braceDepth === 0 && parenDepth === 0 && bracketDepth === 0) return null;
+  }
+  const node = builder.createNode({
+    type: "absoluteValue",
+    role: role === "expression" || role === "term" || role === "factor" || role === "base" ? "absoluteValue" : role,
+    latex: text,
+    parentId,
+    depth,
+    start,
+    end: start + text.length,
+  });
+  const open = builder.createNode({ type: "operator", role: "delimiter", latex: "|", parentId: node.id, depth: depth + 1, start, end: start + 1 });
+  const inner = parseExpression(builder, text.slice(1, -1), node.id, depth + 1, start + 1, "argument");
+  const close = builder.createNode({ type: "operator", role: "delimiter", latex: "|", parentId: node.id, depth: depth + 1, start: start + text.length - 1, end: start + text.length });
+  node.childIds = [open.id, inner?.id, close.id].filter(Boolean);
   return node;
 }
 
@@ -1396,29 +1511,52 @@ function parseDerivative(builder, text, parentId, depth, start, role) {
 }
 
 function parseLargeOperator(builder, text, parentId, depth, start, role) {
-  const operator = text.match(/^(?:\\(?:sum|prod|lim)|lim)(?![A-Za-z])/)?.[0];
+  const operator = text.match(/^(?:\\(?:sum|prod|lim|inf|sup|min|max)|lim)(?![A-Za-z])/)?.[0];
   if (!operator) return null;
   const { scripts, endIndex } = readScriptsAfter(text, operator.length);
   const body = text.slice(endIndex);
   const operatorName = operator.slice(1);
-  const type = operatorName === "sum" ? "summation" : operatorName === "prod" ? "productNotation" : "limit";
+  const type = operatorName === "sum"
+    ? "summation"
+    : operatorName === "prod"
+      ? "productNotation"
+      : ["inf", "sup", "min", "max"].includes(operatorName)
+        ? "extremum"
+        : "limit";
   const nodeRole = role === "expression" || role === "term" ? type : role;
   const node = builder.createNode({ type, role: nodeRole, latex: text, parentId, depth, start, end: start + text.length });
-  const childIds = [builder.createNode({
-    type: "operator",
-    role: operatorName === "sum" ? "summationOperator" : operatorName === "prod" ? "productOperator" : "limitOperator",
-    latex: operator,
+  const operatorHead = builder.createNode({
+    type: "operatorHead",
+    role: "operatorHead",
+    latex: text.slice(0, endIndex),
     parentId: node.id,
     depth: depth + 1,
+    start,
+    end: start + endIndex,
+  });
+  const headChildIds = [builder.createNode({
+    type: "operator",
+    role: operatorName === "sum"
+      ? "summationOperator"
+      : operatorName === "prod"
+        ? "productOperator"
+        : ["inf", "sup", "min", "max"].includes(operatorName)
+          ? "extremumOperator"
+          : "limitOperator",
+    latex: operator,
+    parentId: operatorHead.id,
+    depth: depth + 2,
     start,
     end: start + operator.length,
   }).id];
   for (const script of scripts) {
-    const scriptRole = operatorName === "lim"
+    const scriptRole = ["lim", "inf", "sup", "min", "max"].includes(operatorName)
       ? "bound"
       : script.marker === "_" ? "lowerBound" : "upperBound";
-    childIds.push(parseExpression(builder, script.value, node.id, depth + 1, start + script.start, scriptRole)?.id);
+    headChildIds.push(parseExpression(builder, script.value, operatorHead.id, depth + 2, start + script.start, scriptRole)?.id);
   }
+  operatorHead.childIds = headChildIds.filter(Boolean);
+  const childIds = [operatorHead.id];
   if (body) {
     const bodyRole = operatorName === "sum" ? "summand" : operatorName === "prod" ? "productBody" : "argument";
     const bodyNode = parseExpression(
@@ -1453,29 +1591,41 @@ function parseIntegralExpression(builder, text, parentId, depth, start, role) {
     const coefficient = parseExpression(builder, integralHead.leading, node.id, depth + 1, start, "coefficient");
     if (coefficient) childIds.push(coefficient.id);
   }
-  childIds.push(builder.createNode({
+  const headStart = start + integralHead.operatorIndex;
+  const operatorHead = builder.createNode({
+    type: "operatorHead",
+    role: "operatorHead",
+    latex: text.slice(integralHead.operatorIndex, integralHead.endIndex),
+    parentId: node.id,
+    depth: depth + 1,
+    start: headStart,
+    end: start + integralHead.endIndex,
+  });
+  const headChildIds = [builder.createNode({
     type: "operator",
     role: "integralSymbol",
     latex: integralHead.operator,
-    parentId: node.id,
-    depth: depth + 1,
-    start: start + integralHead.operatorIndex,
-    end: start + integralHead.operatorIndex + integralHead.operator.length,
-  }).id);
+    parentId: operatorHead.id,
+    depth: depth + 2,
+    start: headStart,
+    end: headStart + integralHead.operator.length,
+  }).id];
   for (const script of integralHead.scripts) {
     const bound = parseExpression(
       builder,
       script.latex,
-      node.id,
-      depth + 1,
+      operatorHead.id,
+      depth + 2,
       start + integralHead.operatorIndex + script.start,
       script.role
     );
     if (bound) {
       bound.role = script.role;
-      childIds.push(bound.id);
+      headChildIds.push(bound.id);
     }
   }
+  operatorHead.childIds = headChildIds;
+  childIds.push(operatorHead.id);
   const integrandStart = start + integralHead.endIndex;
   const integrandNode = integrand
     ? parseExpression(builder, integrand, node.id, depth + 1, integrandStart, "integrand")
@@ -1683,6 +1833,9 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
   const delimited = parseDelimitedExpression(builder, text, parentId, depth, start, role);
   if (delimited) return delimited;
 
+  const absoluteValue = parseAbsoluteValueExpression(builder, text, parentId, depth, start, role);
+  if (absoluteValue) return absoluteValue;
+
   const derivative = parseDerivative(builder, text, parentId, depth, start, role);
   if (derivative) return derivative;
 
@@ -1855,6 +2008,32 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
     return node;
   }
 
+  const explicitProduct = splitExplicitProduct(text);
+  if (explicitProduct) {
+    const node = builder.createNode({
+      type: "product",
+      role: role === "expression" ? "term" : role,
+      latex: text,
+      parentId,
+      depth,
+      start,
+      end: start + text.length,
+    });
+    const left = parseExpression(builder, explicitProduct.left.value, node.id, depth + 1, start + explicitProduct.left.start, "factor");
+    const operator = builder.createNode({
+      type: "operator",
+      role: "operator",
+      latex: explicitProduct.operator,
+      parentId: node.id,
+      depth: depth + 1,
+      start: start + explicitProduct.operatorIndex,
+      end: start + explicitProduct.operatorIndex + explicitProduct.operator.length,
+    });
+    const right = parseExpression(builder, explicitProduct.right.value, node.id, depth + 1, start + explicitProduct.right.start, "factor");
+    node.childIds = [left?.id, operator.id, right?.id].filter(Boolean);
+    return node;
+  }
+
   const functionCall = parseGenericFunctionCall(builder, text, parentId, depth, start, role);
   if (functionCall) return functionCall;
 
@@ -1874,6 +2053,9 @@ function parseExpression(builder, latex, parentId = null, depth = 0, start = 0, 
     return node;
   }
 
+  // Implicit-product splitting above understands complete scripted factors,
+  // including absolute values. Once no product boundary remains, parse the
+  // base and its script descendants as one semantic construct.
   const scripted = parseScriptedExpression(builder, text, parentId, depth, start, role);
   if (scripted) return scripted;
 
@@ -1953,6 +2135,10 @@ function refineOpaqueTexLeaves(builder, source) {
     counts.set(key, (counts.get(key) || 0) + 1);
   }
   for (const parent of opaque) {
+    // Prime decorations are painted as a superscript attached to their base,
+    // but KaTeX exposes only the base source slot. Keep the decorated symbol
+    // as one exact semantic leaf instead of silently discarding the primes.
+    if (parent.latex.includes("'")) continue;
     const children = atoms.filter((atom) => atom.start >= parent.start && atom.end <= parent.end
       && (atom.start > parent.start || atom.end < parent.end)
       && counts.get(`${atom.start}:${atom.end}`) === 1);

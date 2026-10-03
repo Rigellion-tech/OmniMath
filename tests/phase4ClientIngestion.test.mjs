@@ -36,6 +36,7 @@ function ingestion(overrides = {}) {
 
 describe("Phase 4 client image ingestion lifecycle", () => {
   it("distinguishes a solve timeout from transport unavailability after extraction succeeded", () => {
+    assert.match(imageSolveFailureMessage({ code: "AI_SOLVE_TIMEOUT" }), /solving timed out/);
     assert.match(imageSolveFailureMessage({ code: "AI_REQUEST_TIMEOUT" }), /solving timed out/);
     assert.match(imageSolveFailureMessage({ code: "AI_SERVICE_UNAVAILABLE" }), /service is unavailable/);
     assert.doesNotMatch(imageSolveFailureMessage({ code: "AI_SERVICE_UNAVAILABLE" }), /timed out/);

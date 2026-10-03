@@ -60,6 +60,7 @@ export function createSolveBudget({
   const controller = new AbortController();
   const providerAttempts = [];
   let disposed = false;
+  let activeRecoveryDeadlineAt = null;
 
   const abortWith = (reason) => {
     if (!controller.signal.aborted) controller.abort(reason);
@@ -82,11 +83,21 @@ export function createSolveBudget({
   deadlineTimer?.unref?.();
 
   function remainingMs({ recovery = false } = {}) {
-    const stageDeadlineAt = recovery ? recoveryDeadlineAt : primaryDeadlineAt;
-    return Math.max(0, Math.floor(stageDeadlineAt - now()));
+    const stageDeadlineAt = recovery
+      ? activeRecoveryDeadlineAt || Math.min(recoveryDeadlineAt, now() + recoveryReserve)
+      : primaryDeadlineAt;
+    const remaining = Math.max(0, Math.floor(stageDeadlineAt - now()));
+    return remaining;
+  }
+
+  function canonicalRemainingMs() {
+    return Math.max(0, Math.floor(resolvedDeadlineAt - now()));
   }
 
   function attemptBudget({ configuredTimeoutMs, recovery = false } = {}) {
+    if (recovery && activeRecoveryDeadlineAt === null) {
+      activeRecoveryDeadlineAt = Math.min(recoveryDeadlineAt, now() + recoveryReserve);
+    }
     const configured = positiveMs(configuredTimeoutMs, 1);
     const remaining = remainingMs({ recovery });
     const effectiveTimeoutMs = Math.max(0, Math.min(configured, remaining));
@@ -97,7 +108,7 @@ export function createSolveBudget({
       configuredTimeoutMs: configured,
       effectiveTimeoutMs,
       remainingMs: remaining,
-      deadlineAt: recovery ? recoveryDeadlineAt : primaryDeadlineAt,
+      deadlineAt: recovery ? activeRecoveryDeadlineAt : primaryDeadlineAt,
       timeoutSource: "provider_attempt_timeout",
       budgetLimitReason: stageLimited ? stageSource : null,
       recovery,
@@ -176,6 +187,7 @@ export function createSolveBudget({
     providerAttempts,
     attemptBudget,
     remainingMs,
+    canonicalRemainingMs,
     canStartRecovery,
     throwIfExpired,
     recordProviderDispatch,

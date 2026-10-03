@@ -18,10 +18,12 @@ import {
   commitReviewedProblemToSessions,
   createGeneratedProblemState,
   createPendingReviewedProblemState,
+  createPendingTypedProblemState,
   emptyGenerationStatus,
   enforceStatusMatchesRenderedSolution,
   getActiveRenderedProblem,
 } from "@/lib/solutionState";
+import { getFinalSolveTimeoutStatus } from "@/lib/generationStatus";
 import {
   createUserSession,
   deleteUserSession,
@@ -1106,6 +1108,7 @@ export default function Home() {
     usage,
     solutionIssues = [],
     retryable = false,
+    submittedProblem = null,
     operationContext = null,
   }) => {
     const operationDecision = operationContext
@@ -1121,7 +1124,23 @@ export default function Home() {
       return;
     }
     const targetSessionId = operationDecision.targetSessionId;
+    const isSolveTimeout = code === "AI_SOLVE_TIMEOUT";
     const progressive = progressiveBySessionRef.current[targetSessionId];
+    const hasPublishedProgress = (progressive?.completedSteps?.length || 0) > 0;
+    if (isSolveTimeout && source === "text" && submittedProblem?.canonicalProblem && !hasPublishedProgress) {
+      const pendingProblem = createPendingTypedProblemState(submittedProblem);
+      const commitResult = commitGeneratedProblemToSessions({
+        sessions: sessionsRef.current,
+        activeSessionId: targetSessionId,
+        requestSessionId: targetSessionId,
+        problemData: pendingProblem,
+        strictTarget: true,
+      });
+      if (commitResult.wrote) {
+        sessionsRef.current = commitResult.sessions;
+        setSessions(commitResult.sessions);
+      }
+    }
     if (progressive && !["complete", "failed", "cancelled"].includes(progressive.status)) {
       const failureEvent = {
         ...solveIdentity(operationContext, targetSessionId),
@@ -1153,7 +1172,9 @@ export default function Home() {
     const isQualityInvalid = code === "AI_SOLUTION_QUALITY_INVALID";
     const showBackendMessage = isServerError && import.meta.env.DEV && message;
     const qualityHints = qualityFailureHints(solutionIssues);
-    const nextStatus = {
+    const nextStatus = isSolveTimeout ? {
+      ...getFinalSolveTimeoutStatus({ source, code, retryable }),
+    } : {
       type: "error",
       label: isQualityInvalid
         ? "Mathematical validation failed"

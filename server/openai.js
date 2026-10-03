@@ -1033,6 +1033,7 @@ function logOpenAiRequestDeadline({
     budgetLimitReason,
     effectiveAttemptTimeoutMs,
     transportAttempt,
+    solveBudgetStage: debugContext.solveBudgetStage === "recovery" ? "recovery" : "primary",
     requestId: debugContext.requestId || null,
     logicalImageIngestionRequestId: debugContext.logicalImageIngestionRequestId
       || debugContext.ingestionRequestId

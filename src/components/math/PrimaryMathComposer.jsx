@@ -232,7 +232,19 @@ function PrimaryComposerSession({
     } catch (error) {
       if (activeRequestRef.current !== request || canApplyOperation?.(operationContext) === false || error?.name === "AbortError") return;
       console.error("Problem generation failed:", error);
-      onGenerationError?.({ source: "text", message: error.message, status: error.status, code: error.body?.code, usage: error.body?.usage, operationContext });
+      const canonicalProblem = {
+        ...createCanonicalProblemPayload({ ...source, source: "typed" }),
+        composerSourceMode: source.sourceMode,
+      };
+      onGenerationError?.({
+        source: "text",
+        message: error.message,
+        status: error.status,
+        code: error.body?.code,
+        usage: error.body?.usage,
+        submittedProblem: { ...source, canonicalProblem },
+        operationContext,
+      });
       setHistory(history, { operationContext, targetSessionId: requestSessionId });
     } finally {
       if (activeRequestRef.current === request) {

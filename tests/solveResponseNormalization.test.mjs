@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { normalizeSolveResponse } from "../src/api/mathClient.js";
-import { getGeneratedProblemStatus } from "../src/lib/generationStatus.js";
+import { getFinalSolveTimeoutStatus, getGeneratedProblemStatus } from "../src/lib/generationStatus.js";
+import { createCanonicalProblemPayload } from "../src/lib/canonicalProblem.js";
 import {
   getSolutionSteps,
   hasPersistableSessionContent,
@@ -14,6 +15,7 @@ import {
   commitReviewedProblemToSessions,
   createGeneratedProblemState,
   createPendingReviewedProblemState,
+  createPendingTypedProblemState,
   emptyGenerationStatus,
   enforceStatusMatchesRenderedSolution,
   getActiveRenderedProblem,
@@ -25,6 +27,54 @@ const steps = [
 ];
 
 describe("solve response normalization", () => {
+  it("preserves a timed-out typed submission and clears stale solution steps", () => {
+    const source = {
+      canonicalText: "Find the extremal\n\n\\int_0^1 (y')^2\\,dx",
+      canonicalLatex: "\\int_0^1 (y')^2\\,dx",
+      displayText: "Find the extremal",
+      sourceMode: "raw",
+    };
+    const pendingProblem = createPendingTypedProblemState({
+      ...source,
+      canonicalProblem: {
+        ...createCanonicalProblemPayload({ ...source, source: "typed" }),
+        composerSourceMode: source.sourceMode,
+      },
+    });
+    const committed = commitGeneratedProblemToSessions({
+      sessions: [{
+        id: "typed-timeout",
+        problem: { expression: "x=1", steps },
+        problems: [],
+        steps,
+      }],
+      activeSessionId: "typed-timeout",
+      requestSessionId: "typed-timeout",
+      problemData: pendingProblem,
+    });
+
+    assert.equal(committed.wrote, true);
+    assert.equal(committed.committedSession.problem.canonicalProblem.canonicalText, source.canonicalText);
+    assert.equal(committed.committedSession.problem.canonicalProblem.canonicalLatex, source.canonicalLatex);
+    assert.equal(committed.committedSession.problem.canonicalProblem.composerSourceMode, "raw");
+    assert.equal(committed.committedSession.problem.originalProblem, source.canonicalText);
+    assert.equal(committed.committedSession.problem.pendingSolve, true);
+    assert.deepEqual(getSolutionSteps(committed.committedSession), []);
+  });
+
+  it("uses an explicit final solve-timeout status for typed and reviewed-image failures", () => {
+    const typed = getFinalSolveTimeoutStatus({ source: "text", retryable: true });
+    const reviewedImage = getFinalSolveTimeoutStatus({ source: "image-solve" });
+
+    assert.equal(typed.type, "error");
+    assert.equal(typed.label, "Solve timed out");
+    assert.equal(typed.code, "AI_SOLVE_TIMEOUT");
+    assert.equal(typed.retryable, true);
+    assert.match(typed.detail, /problem has been preserved/i);
+    assert.match(reviewedImage.detail, /reviewed problem has been preserved/i);
+    assert.match(reviewedImage.meta, /reviewed extraction/i);
+  });
+
   it("renders and reports eight steps from the current solve response", () => {
     const eightSteps = Array.from({ length: 8 }, (_, index) => ({
       id: `s${index + 1}`,

@@ -88,16 +88,78 @@ describe("ordinary structured-output recovery", () => {
     });
   });
 
-  it("does not use semantic recovery for timeout or transport failures", () => {
-    for (const [error, classification] of [
-      [{ responseFailureType: "request_timeout" }, "request_timeout"],
-      [{ code: "AI_SERVICE_UNAVAILABLE" }, "transport_or_provider_failure"],
-    ]) {
-      const result = decide(error);
-      assert.equal(result.classification, classification);
-      assert.equal(result.action, "fail");
-      assert.equal(result.reason, classification);
-    }
+  it("retries one owned provider-attempt timeout when recovery is eligible", () => {
+    const result = decide({
+      code: "AI_SOLVE_TIMEOUT",
+      responseFailureType: "request_timeout",
+      timeoutSource: "provider_attempt_timeout",
+      timeoutScope: "model_request",
+    }, { recoveryEligible: true });
+
+    assert.deepEqual(result, {
+      action: "retry",
+      reason: "provider_attempt_timeout_recovery",
+      classification: "request_timeout",
+    });
+  });
+
+  it("keeps unowned timeout and transport failures terminal", () => {
+    const timeout = decide({ responseFailureType: "request_timeout" }, { recoveryEligible: true });
+    assert.equal(timeout.action, "fail");
+    assert.equal(timeout.reason, "unowned_request_timeout");
+
+    const transport = decide({ code: "AI_SERVICE_UNAVAILABLE" });
+    assert.equal(transport.classification, "transport_or_provider_failure");
+    assert.equal(transport.action, "fail");
+    assert.equal(transport.reason, "transport_or_provider_failure");
+  });
+
+  it("does not recover a provider timeout after cancellation or canonical expiry", () => {
+    const cancelled = decide({
+      name: "AbortError",
+      timeoutSource: "upstream_abort",
+      timeoutScope: "upstream",
+    }, { recoveryEligible: true });
+    assert.equal(cancelled.classification, "client_cancellation");
+    assert.equal(cancelled.reason, "client_cancellation");
+
+    const expired = decide({
+      code: "AI_SOLVE_TIMEOUT",
+      responseFailureType: "interactive_deadline_exceeded",
+      timeoutSource: "total_solve_deadline",
+      timeoutScope: "total_solve",
+    }, { recoveryEligible: true, canonicalDeadlineRemaining: false });
+    assert.equal(expired.classification, "total_solve_deadline");
+    assert.equal(expired.reason, "total_solve_deadline");
+  });
+
+  it("does not recursively retry a final recovery timeout", () => {
+    const result = decide({
+      code: "AI_SOLVE_TIMEOUT",
+      responseFailureType: "request_timeout",
+      timeoutSource: "provider_attempt_timeout",
+      timeoutScope: "model_request",
+    }, { recoveryEligible: true, routeAttemptCount: ORDINARY_MAX_ROUTE_ATTEMPTS });
+    assert.equal(result.action, "fail");
+    assert.equal(result.reason, "recovery_attempt_limit");
+  });
+
+  it("requires timeout recovery eligibility, available recovery budget, and no usable candidate", () => {
+    const error = {
+      code: "AI_SOLVE_TIMEOUT",
+      responseFailureType: "request_timeout",
+      timeoutSource: "provider_attempt_timeout",
+      timeoutScope: "model_request",
+    };
+    assert.equal(decide(error).reason, "recovery_not_eligible");
+    assert.equal(decide(error, {
+      recoveryEligible: true,
+      recoveryBudgetRemaining: false,
+    }).reason, "insufficient_recovery_budget");
+    assert.equal(decide(error, {
+      recoveryEligible: true,
+      usableCandidateExists: true,
+    }).reason, "usable_candidate_exists");
   });
 
   it("suppresses escalation when the effective escalation config is identical", () => {

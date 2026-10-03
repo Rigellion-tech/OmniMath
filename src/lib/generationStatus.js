@@ -32,3 +32,17 @@ export function getGeneratedProblemStatus(data = {}, problemData = {}) {
     meta: data.runtimeNotice || "",
   };
 }
+
+export function getFinalSolveTimeoutStatus({ source = "text", code = "AI_SOLVE_TIMEOUT", retryable = false } = {}) {
+  const reviewedImage = source === "image-solve";
+  return {
+    type: "error",
+    label: "Solve timed out",
+    detail: reviewedImage
+      ? "The solver reached its time limit before producing a usable solution. Your reviewed problem has been preserved so you can retry."
+      : "The solver reached its time limit before producing a usable solution. Your problem has been preserved so you can retry.",
+    meta: reviewedImage ? "Retry solve from the reviewed extraction." : "",
+    code,
+    retryable,
+  };
+}

@@ -52,6 +52,37 @@ export function createGeneratedProblemState(normalizedData = {}) {
   };
 }
 
+/** @param {{ canonicalText?: string, canonicalLatex?: string, displayText?: string, sourceMode?: string, canonicalProblem?: any }} source */
+export function createPendingTypedProblemState(source = {}) {
+  const canonicalText = String(source.canonicalText || source.canonicalProblem?.canonicalText || "").trim();
+  const canonicalLatex = String(source.canonicalLatex || source.canonicalProblem?.canonicalLatex || "").trim();
+  const sourceMode = source.sourceMode === "raw" ? "raw" : "visual";
+  const canonicalProblem = {
+    ...(source.canonicalProblem || {}),
+    canonicalText,
+    canonicalLatex,
+    source: "typed",
+    composerSourceMode: sourceMode,
+  };
+
+  return withNormalizedSolutionSteps({
+    title: titleFromProblem({
+      canonicalProblem,
+      originalProblem: canonicalText,
+      problem: canonicalText,
+      problemLatex: canonicalLatex,
+    }, "Math Problem"),
+    expression: canonicalLatex || canonicalText,
+    originalProblem: canonicalText,
+    problem: canonicalText,
+    problemText: canonicalText,
+    problemLatex: canonicalLatex,
+    canonicalProblem,
+    pendingSolve: true,
+    steps: [],
+  });
+}
+
 /**
  * @param {{
  *   sessions?: any[],

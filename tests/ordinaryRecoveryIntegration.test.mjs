@@ -55,6 +55,18 @@ function validSolveOutput(problem) {
   });
 }
 
+function providerAttemptTimeout(budgetLimitReason) {
+  return Object.assign(new Error("The model attempt did not complete in time."), {
+    statusCode: 504,
+    code: "AI_SOLVE_TIMEOUT",
+    responseFailureType: "request_timeout",
+    timeoutScope: "model_request",
+    timeoutSource: "provider_attempt_timeout",
+    budgetLimitReason,
+    publicMessage: "The AI model did not complete this attempt in time. Please try again.",
+  });
+}
+
 function recorder() {
   return {
     statusCode: null,
@@ -73,7 +85,9 @@ function recorder() {
   };
 }
 
-async function solve(label, problem = `Solve 3x+7=25. Case ${label}.`, requestLabel = label) {
+async function solve(label, problem = `Solve 3x+7=25. Case ${label}.`, requestLabel = label, {
+  signal = null,
+} = {}) {
   const req = {
     method: "POST",
     url: "/api/explain",
@@ -81,6 +95,7 @@ async function solve(label, problem = `Solve 3x+7=25. Case ${label}.`, requestLa
     socket: { remoteAddress: `127.12.0.${Math.floor(Math.random() * 200) + 1}` },
     body: { problem, reference: label, debugRequestId: `ordinary-recovery-${requestLabel}` },
   };
+  if (signal) req.signal = signal;
   const res = recorder();
   await handleExplainRequest(req, res);
   return { problem, res };
@@ -103,6 +118,8 @@ before(async () => {
     MONTHLY_AI_LIMIT: "1000",
     DAILY_TOKEN_LIMIT: "10000000",
     MONTHLY_TOKEN_LIMIT: "100000000",
+    DAILY_SPEND_LIMIT_USD: "1000",
+    MONTHLY_SPEND_LIMIT_USD: "10000",
   });
   delete process.env.CLERK_SECRET_KEY;
   delete process.env.CLERK_JWT_KEY;
@@ -317,20 +334,62 @@ test("a repeated supported contradiction stops and retains the earlier candidate
 });
 
 
-test("a dispatched hard manual solve returns a typed timeout with unreconciled usage", async () => {
+test("a primary-stage timeout dispatches one recovery attempt with the reserved budget", async () => {
   const previous = process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS;
-  process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS = "250";
+  process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS = "90000";
+  let calls = 0;
+  globalThis.fetch = async (_url, options) => {
+    calls += 1;
+    if (calls === 2) return providerResponse({ outputText: validSolveOutput("3x+7=25") });
+    throw providerAttemptTimeout("primary_stage_budget");
+  };
+  try {
+    const { res } = await solve("hard-timeout-recovered", "Solve the partial differential equation with these boundary conditions. Case recovered.");
+    const body = res.json();
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(body.finalAnswerLatex, "x=6");
+    assert.equal(calls, 2);
+    assert.equal(body.usage.settlement.providerCalls, 2);
+    assert.equal(body.usage.settlement.usageStatus, "partially_observed");
+    assert.equal(body.usage.settlement.costStatus, "unreconciled");
+    assert.equal(body.usage.settlement.actualInputTokens, null);
+    assert.equal(body.usage.settlement.actualOutputTokens, null);
+    assert.equal(body.usage.settlement.actualTotalTokens, null);
+    assert.equal(body.usage.settlement.observedInputTokens, 10);
+    assert.equal(body.usage.settlement.observedOutputTokens, 20);
+    assert.equal(body.usage.settlement.observedTotalTokens, 30);
+    assert.deepEqual(body.usage.settlement.providerAttempts.map((attempt) => attempt.routeAttemptIndex), [1, 2]);
+    assert.deepEqual(body.usage.settlement.providerAttempts.map((attempt) => attempt.usageStatus),
+      ["unknown_unreconciled", "observed"]);
+
+    const requestId = "ordinary-recovery-hard-timeout-recovered";
+    const timeouts = logs.filter(([marker, details]) => marker === "[omnimath:openai-timeout]"
+      && details?.requestId === requestId).map(([, details]) => details);
+    assert.equal(timeouts.length, 2);
+    assert.equal(timeouts[0].solveBudgetStage, "primary");
+    assert.equal(timeouts[1].solveBudgetStage, "recovery");
+    assert.ok(timeouts[1].allocatedAttemptBudgetMs <= 22_500);
+    const dispatches = logs.filter(([marker, details]) => marker === "[omnimath:provider-dispatch]"
+      && details?.requestId === requestId).map(([, details]) => details);
+    assert.deepEqual(dispatches.map((attempt) => attempt.routeAttemptId),
+      [`${requestId}:route:1`, `${requestId}:route:2`]);
+    assert.equal(dispatches[0].model, dispatches[1].model);
+  } finally {
+    if (previous === undefined) delete process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS;
+    else process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS = previous;
+  }
+});
+
+test("a timed-out recovery returns one final typed timeout with both dispatches", async () => {
+  const previous = process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS;
+  process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS = "90000";
   let calls = 0;
   let dispatchedSignal;
   globalThis.fetch = async (_url, options) => {
     calls += 1;
     dispatchedSignal = options.signal;
-    return new Promise((_resolve, reject) => {
-      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
-    });
+    throw providerAttemptTimeout(calls === 1 ? "primary_stage_budget" : "recovery_stage_budget");
   };
-  // Keep Node alive while AbortSignal's unref'd timers drive this mocked fetch.
-  const keepAlive = setTimeout(() => {}, 2000);
   try {
     const { res } = await solve("hard-timeout", "Solve the partial differential equation with these boundary conditions. Case hard-timeout.");
     const body = res.json();
@@ -340,30 +399,115 @@ test("a dispatched hard manual solve returns a typed timeout with unreconciled u
     assert.equal(body.timeoutSource, "provider_attempt_timeout");
     assert.match(body.message, /time|budget/i);
     assert.equal(body.requestId, "ordinary-recovery-hard-timeout");
-    assert.equal(calls, 1);
-    assert.equal(dispatchedSignal.aborted, true);
+    assert.equal(calls, 2);
+    assert.equal(dispatchedSignal.aborted, false);
     const settlement = body.usage.settlement;
-    assert.equal(settlement.providerCalls, 1);
+    assert.equal(settlement.providerCalls, 2);
     assert.equal(settlement.providerDispatched, true);
     assert.equal(settlement.settlementReason, "failure");
-    assert.equal(settlement.usageStatus, "unknown_due_to_abort");
+    assert.equal(settlement.usageStatus, "unknown_unreconciled");
     assert.equal(settlement.costStatus, "unreconciled");
     assert.equal(settlement.actualInputTokens, null);
     assert.equal(settlement.actualOutputTokens, null);
     assert.equal(settlement.actualCostMicros, null);
     assert.equal(settlement.releasedTokens, 0);
-    assert.equal(settlement.providerAttempts.length, 1);
-    const dispatch = settlement.providerAttempts[0];
-    assert.equal(dispatch.requestId, body.requestId);
-    assert.ok(dispatch.model);
-    assert.ok(dispatch.dispatchAt);
-    assert.ok(dispatch.abortAt);
-    assert.equal(dispatch.timeoutSource, body.timeoutSource);
+    assert.equal(settlement.providerAttempts.length, 2);
+    assert.deepEqual(settlement.providerAttempts.map((attempt) => attempt.routeAttemptIndex), [1, 2]);
+    for (const dispatch of settlement.providerAttempts) {
+      assert.equal(dispatch.requestId, body.requestId);
+      assert.ok(dispatch.model);
+      assert.ok(dispatch.dispatchAt);
+      assert.equal(dispatch.abortAt, null);
+      assert.equal(dispatch.timeoutSource, body.timeoutSource);
+    }
+    const failures = logs.filter(([marker, details]) => marker === "[omnimath:solve-recovery]"
+      && details?.requestId === body.requestId && details?.event === "attempt_failed")
+      .map(([, details]) => details);
+    assert.equal(failures.length, 2);
+    assert.equal(failures[1].recoveryDecision, "fail");
+    assert.equal(failures[1].recoveryReason, "recovery_attempt_limit");
   } finally {
-    clearTimeout(keepAlive);
     if (previous === undefined) delete process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS;
     else process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS = previous;
   }
+});
+
+test("an unusable recovery response preserves the originating typed timeout", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) throw providerAttemptTimeout("primary_stage_budget");
+    return providerResponse({ outputText: '{"title":}' });
+  };
+
+  const { res } = await solve(
+    "timeout-then-malformed",
+    "Solve the partial differential equation. Case timeout-then-malformed.",
+  );
+  const body = res.json();
+  assert.equal(calls, 2);
+  assert.equal(res.statusCode, 504, res.body);
+  assert.equal(body.code, "AI_SOLVE_TIMEOUT");
+  assert.equal(body.failureClassification, "request_timeout");
+  assert.equal(body.usage.settlement.providerCalls, 2);
+  const failures = logs.filter(([marker, details]) => marker === "[omnimath:solve-recovery]"
+    && details?.requestId === "ordinary-recovery-timeout-then-malformed"
+    && details?.event === "attempt_failed").map(([, details]) => details);
+  assert.equal(failures.length, 2);
+  assert.equal(failures[1].recoveryDecision, "fail");
+  assert.equal(failures[1].recoveryReason, "recovery_attempt_limit");
+});
+
+test("canonical deadline exhaustion is terminal without a recovery dispatch", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    throw Object.assign(new Error("The solve reached its total time limit."), {
+      statusCode: 504,
+      code: "AI_SOLVE_TIMEOUT",
+      responseFailureType: "interactive_deadline_exceeded",
+      timeoutScope: "total_solve",
+      timeoutSource: "total_solve_deadline",
+      publicMessage: "The explanation did not complete before the solve deadline. Please try again.",
+    });
+  };
+
+  const { res } = await solve("canonical-timeout", "Solve the partial differential equation. Case canonical-timeout.");
+  assert.equal(res.statusCode, 504, res.body);
+  assert.equal(res.json().timeoutSource, "total_solve_deadline");
+  assert.equal(calls, 1);
+  const failure = logs.filter(([marker, details]) => marker === "[omnimath:solve-recovery]"
+    && details?.requestId === "ordinary-recovery-canonical-timeout"
+    && details?.event === "attempt_failed").map(([, details]) => details).at(-1);
+  assert.equal(failure.recoveryDecision, "fail");
+  assert.equal(failure.recoveryReason, "total_solve_deadline");
+  assert.equal(failure.nextRouteAttemptId, null);
+});
+
+test("client cancellation is terminal without a recovery dispatch", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  globalThis.fetch = async (_url, options) => {
+    calls += 1;
+    controller.abort(new DOMException("Client disconnected.", "AbortError"));
+    throw options.signal.reason;
+  };
+
+  const { res } = await solve(
+    "client-cancelled",
+    "Solve the partial differential equation. Case client-cancelled.",
+    "client-cancelled",
+    { signal: controller.signal },
+  );
+  assert.equal(calls, 1);
+  assert.ok(res.statusCode >= 400, res.body);
+  const failure = logs.filter(([marker, details]) => marker === "[omnimath:solve-recovery]"
+    && details?.requestId === "ordinary-recovery-client-cancelled"
+    && details?.event === "attempt_failed").map(([, details]) => details).at(-1);
+  assert.equal(failure.classification, "client_cancellation");
+  assert.equal(failure.recoveryDecision, "fail");
+  assert.equal(failure.recoveryReason, "client_cancellation");
+  assert.equal(failure.nextRouteAttemptId, null);
 });
 
 test("insufficient compact/recovery time is explicitly skipped without a dispatch", async () => {
@@ -377,7 +521,7 @@ test("insufficient compact/recovery time is explicitly skipped without a dispatc
   try {
     const { res } = await solve("no-recovery-budget");
     assert.ok(res.statusCode >= 400, res.body);
-    assert.equal(calls, 1);
+    assert.equal(calls, 1, res.body);
     const decision = logs.filter(([marker, details]) => marker === "[omnimath:solve-recovery]"
       && details?.requestId === "ordinary-recovery-no-recovery-budget")
       .map(([, details]) => details).find((entry) => entry.event === "attempt_failed");

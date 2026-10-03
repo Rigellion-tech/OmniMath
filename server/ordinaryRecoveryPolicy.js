@@ -23,6 +23,11 @@ export const ORDINARY_MAX_ROUTE_ATTEMPTS = 2;
 export function classifyOrdinarySolveFailure(error = null) {
   const code = String(error?.code || "");
   const responseFailureType = String(error?.responseFailureType || "");
+  if (error?.timeoutSource === "upstream_abort"
+      || error?.timeoutScope === "upstream"
+      || (error?.name === "AbortError" && code !== "AI_SOLVE_TIMEOUT")) {
+    return "client_cancellation";
+  }
   if (code === "AI_REQUEST_REFUSED" || responseFailureType === "refusal") return "refusal";
   if (responseFailureType === "interactive_deadline_exceeded" || error?.timeoutScope === "total_solve") {
     return "total_solve_deadline";
@@ -42,15 +47,38 @@ export function decideOrdinaryRecovery({
   routeAttemptCount = 1,
   escalationAttempted = false,
   deadlineRemaining = false,
+  canonicalDeadlineRemaining = deadlineRemaining,
+  recoveryBudgetRemaining = deadlineRemaining,
+  recoveryEligible = false,
+  usableCandidateExists = false,
   initialConfig = null,
   escalationConfig = null,
 } = {}) {
   const classification = classifyOrdinarySolveFailure(error);
+  if (classification === "client_cancellation") {
+    return { action: "fail", reason: "client_cancellation", classification };
+  }
+  if (classification === "total_solve_deadline" || !canonicalDeadlineRemaining) {
+    return { action: "fail", reason: "total_solve_deadline", classification };
+  }
   if (routeAttemptCount >= ORDINARY_MAX_ROUTE_ATTEMPTS || escalationAttempted) {
     return { action: "fail", reason: "recovery_attempt_limit", classification };
   }
-  if (!deadlineRemaining) {
-    return { action: "fail", reason: "total_solve_deadline", classification };
+  if (usableCandidateExists) {
+    return { action: "fail", reason: "usable_candidate_exists", classification };
+  }
+  if (!recoveryBudgetRemaining) {
+    return { action: "fail", reason: "insufficient_recovery_budget", classification };
+  }
+  if (classification === "request_timeout") {
+    if (!recoveryEligible) {
+      return { action: "fail", reason: "recovery_not_eligible", classification };
+    }
+    if (error?.timeoutSource !== "provider_attempt_timeout"
+        || error?.timeoutScope !== "model_request") {
+      return { action: "fail", reason: "unowned_request_timeout", classification };
+    }
+    return { action: "retry", reason: "provider_attempt_timeout_recovery", classification };
   }
   if (classification !== "structured_output_failure") {
     return { action: "fail", reason: classification, classification };

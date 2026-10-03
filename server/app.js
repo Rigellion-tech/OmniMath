@@ -3269,7 +3269,29 @@ export async function handleExplainRequest(req, res) {
     const prompt = buildMathExplanationPrompt({ problem, history });
     const promptHash = hashDebugText(prompt);
     const solveTimeoutMs = getSolveTotalTimeoutMs();
-    const solveBudget = createSolveBudget({ totalTimeoutMs: solveTimeoutMs });
+    const cancellationRequest = solveContext.originalRequest || req;
+    const cancellationResponse = solveContext.originalResponse || res;
+    const requestAbortController = new AbortController();
+    const abortForClientDisconnect = () => {
+      if (cancellationResponse.writableEnded || requestAbortController.signal.aborted) return;
+      const reason = new DOMException("Client disconnected.", "AbortError");
+      reason.timeoutSource = "upstream_abort";
+      reason.timeoutScope = "upstream";
+      requestAbortController.abort(reason);
+    };
+    const onRequestError = (error) => {
+      if (error?.message === "aborted" || error?.code === "ECONNRESET") abortForClientDisconnect();
+    };
+    const onRequestSignalAbort = () => abortForClientDisconnect();
+    cancellationResponse.on?.("close", abortForClientDisconnect);
+    cancellationRequest.on?.("aborted", abortForClientDisconnect);
+    cancellationRequest.on?.("error", onRequestError);
+    cancellationRequest.signal?.addEventListener?.("abort", onRequestSignalAbort, { once: true });
+    if (cancellationRequest.aborted || cancellationRequest.signal?.aborted) abortForClientDisconnect();
+    const solveBudget = createSolveBudget({
+      totalTimeoutMs: solveTimeoutMs,
+      signal: requestAbortController.signal,
+    });
     const solveDeadlineAt = solveBudget.deadlineAt;
     try {
     const initialRouting = resolveInitialSolveRouting({
@@ -3366,6 +3388,7 @@ export async function handleExplainRequest(req, res) {
         recoveryPurpose: "mathematical_assurance_recovery",
         promptStrategy: "fresh_from_canonical_problem",
       });
+      let selectedRecoveryExecutionConfig = null;
 
       try {
         if (result) {
@@ -3436,19 +3459,32 @@ export async function handleExplainRequest(req, res) {
             } catch (firstError) {
               accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(firstError));
               accumulatedAiCallCount += aiCallCountFrom(firstError);
+              let recoveryPolicyError = solveBudget.signal.aborted
+                ? solveBudget.signal.reason
+                : firstError;
+              if (!solveBudget.signal.aborted && solveBudget.canonicalRemainingMs() <= 0) {
+                try {
+                  solveBudget.throwIfExpired();
+                } catch (deadlineError) {
+                  recoveryPolicyError = deadlineError;
+                  attachAccumulatedAiUsage(recoveryPolicyError, accumulatedAiUsage, accumulatedAiCallCount);
+                }
+              }
               const failureClassification = classifySolveFailure({
-                error: firstError,
+                error: recoveryPolicyError,
                 candidate: null,
               });
               const recoveryDecision = decideOrdinaryRecovery({
-                error: firstError,
+                error: recoveryPolicyError,
                 routeAttemptCount: 1,
                 escalationAttempted: false,
-                deadlineRemaining: solveBudget.canStartRecovery(),
+                canonicalDeadlineRemaining: solveBudget.canonicalRemainingMs() > 0,
+                recoveryBudgetRemaining: solveBudget.canStartRecovery(),
+                recoveryEligible: initialRouting.recoveryEligible,
+                usableCandidateExists: false,
                 initialConfig: initialExecutionConfig,
                 escalationConfig: escalationExecutionConfig,
               });
-              if (!solveBudget.canStartRecovery()) recoveryDecision.reason = "insufficient_recovery_budget";
               await captureSolveQualityFailure({
                 error: firstError,
                 result: null,
@@ -3485,39 +3521,62 @@ export async function handleExplainRequest(req, res) {
                 classification: recoveryDecision.classification,
                 recoveryDecision: recoveryDecision.action,
                 recoveryReason: recoveryDecision.reason,
-                nextRouteAttemptId: recoveryDecision.action === "escalate" ? `${requestId}:route:2` : null,
+                nextRouteAttemptId: ["escalate", "retry"].includes(recoveryDecision.action)
+                  ? `${requestId}:route:2` : null,
                 executionConfig: initialExecutionConfig,
               });
-              if (recoveryDecision.action !== "escalate") {
-                throw firstError;
+              if (!["escalate", "retry"].includes(recoveryDecision.action)) {
+                throw recoveryPolicyError;
               }
-              const escalationPrompt = `${prompt}\n\nStructured-output recovery instruction:\n- This is a fresh solve from the canonical problem.\n- The earlier attempt was unusable because ${recoveryDecision.classification}.\n- Return one complete JSON object matching the requested schema.\n- Do not continue or quote the earlier output.`;
+              const timeoutRecovery = recoveryDecision.action === "retry";
+              const escalationPrompt = timeoutRecovery
+                ? prompt
+                : `${prompt}\n\nStructured-output recovery instruction:\n- This is a fresh solve from the canonical problem.\n- The earlier attempt was unusable because ${recoveryDecision.classification}.\n- Return one complete JSON object matching the requested schema.\n- Do not continue or quote the earlier output.`;
               const escalationPromptHash = hashDebugText(escalationPrompt);
+              const recoveryPurpose = timeoutRecovery
+                ? "provider_attempt_timeout_recovery"
+                : "structured_output_recovery";
+              const recoveryExecutionConfig = timeoutRecovery
+                ? solveExecutionConfig({
+                    modelPath: initialRouting.selectedInitialModelPath,
+                    attemptType: "recovery",
+                    recoveryPurpose,
+                    promptStrategy: "canonical_problem",
+                  })
+                : escalationExecutionConfig;
+              selectedRecoveryExecutionConfig = recoveryExecutionConfig;
               logSolveRecovery("recovery_selected", {
                 requestId,
                 endpoint,
                 priorRouteAttemptId: `${requestId}:route:1`,
                 routeAttemptId: `${requestId}:route:2`,
                 routeAttemptIndex: 2,
-                recoveryPurpose: "structured_output_recovery",
+                recoveryPurpose,
                 recoveryReason: recoveryDecision.reason,
-                expectedImprovement: "higher_reasoning_fresh_prompt_without_reusing_invalid_output",
+                timeoutScope: firstError?.timeoutScope || null,
+                timeoutSource: firstError?.timeoutSource || null,
+                budgetLimitReason: firstError?.budgetLimitReason || null,
+                canonicalRemainingMs: solveBudget.canonicalRemainingMs(),
+                recoveryRemainingMs: solveBudget.remainingMs({ recovery: true }),
+                expectedImprovement: timeoutRecovery
+                  ? "fresh_provider_dispatch_with_reserved_recovery_budget"
+                  : "higher_reasoning_fresh_prompt_without_reusing_invalid_output",
                 promptHash: escalationPromptHash,
-                executionConfig: escalationExecutionConfig,
+                executionConfig: recoveryExecutionConfig,
               });
               try {
                 result = await createMathExplanation({
                   prompt: escalationPrompt,
                   originalProblem: problem,
-                  modelPath: "escalation",
+                  modelPath: timeoutRecovery ? initialRouting.selectedInitialModelPath : "escalation",
                   allowCompactRetry: false,
                   debugContext: {
                   ...imageSolveTelemetry(sourceMetadata),
                     requestId,
                     routeAttemptId: `${requestId}:route:2`,
                     routeAttemptIndex: 2,
-                    recoveryPurpose: "structured_output_recovery",
-                    attemptType: "escalation",
+                    recoveryPurpose,
+                    attemptType: timeoutRecovery ? "recovery" : "escalation",
                     endpoint,
                     inputSource,
                     normalizedProblem: problem,
@@ -3525,7 +3584,9 @@ export async function handleExplainRequest(req, res) {
                     solveDeadlineAt,
                     solveBudget,
                     solveBudgetStage: "recovery",
-                    retryPurpose: "structured-output-recovery",
+                    retryPurpose: timeoutRecovery
+                      ? "provider-attempt-timeout-recovery"
+                      : "structured-output-recovery",
                     initialRouting,
                   },
                   onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
@@ -3537,7 +3598,7 @@ export async function handleExplainRequest(req, res) {
                     problemText: "",
                     canonicalProblem,
                     repairAttempted: false,
-                    freshEscalationAttempted: true,
+                    freshEscalationAttempted: !timeoutRecovery,
                   }),
                 });
                 accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
@@ -3545,20 +3606,48 @@ export async function handleExplainRequest(req, res) {
                 attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
                 result = applyLocalRulesToExplanation(result);
                 acceptStructurallyParsedSolve(result);
-                source = "live AI escalation call";
+                source = timeoutRecovery ? "live AI recovery call" : "live AI escalation call";
               } catch (escalationError) {
                 const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(escalationError));
                 const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(escalationError);
-                attachAccumulatedAiUsage(escalationError, failureUsage, failureCallCount);
+                const finalRecoveryDecision = decideOrdinaryRecovery({
+                  error: escalationError,
+                  routeAttemptCount: 2,
+                  escalationAttempted: !timeoutRecovery,
+                  canonicalDeadlineRemaining: solveBudget.canonicalRemainingMs() > 0,
+                  recoveryBudgetRemaining: solveBudget.canStartRecovery(),
+                  recoveryEligible: initialRouting.recoveryEligible,
+                  usableCandidateExists: false,
+                  initialConfig: initialExecutionConfig,
+                  escalationConfig: escalationExecutionConfig,
+                });
+                const preserveRecoveryError = ["client_cancellation", "total_solve_deadline"]
+                  .includes(finalRecoveryDecision.classification)
+                  || (finalRecoveryDecision.classification === "request_timeout"
+                    && escalationError?.code === "AI_SOLVE_TIMEOUT");
+                const terminalError = timeoutRecovery && !preserveRecoveryError
+                  ? firstError
+                  : escalationError;
+                attachAccumulatedAiUsage(terminalError, failureUsage, failureCallCount);
+                if (terminalError === firstError) {
+                  terminalError.recoveryFailureCode = escalationError?.code || null;
+                  terminalError.recoveryFailureType = escalationError?.responseFailureType || null;
+                  terminalError.recoveryDiagnostics = escalationError?._omniOpenAiDiagnostics || null;
+                }
                 logSolveRecovery("attempt_failed", {
                   requestId,
                   endpoint,
                   routeAttemptId: `${requestId}:route:2`,
                   routeAttemptIndex: 2,
-                  classification: "structured_output_recovery_failed",
+                  classification: finalRecoveryDecision.classification,
                   recoveryDecision: "fail",
-                  recoveryReason: "recovery_attempt_limit",
-                  executionConfig: escalationExecutionConfig,
+                  recoveryReason: finalRecoveryDecision.reason,
+                  timeoutScope: escalationError?.timeoutScope || firstError?.timeoutScope || null,
+                  timeoutSource: escalationError?.timeoutSource || firstError?.timeoutSource || null,
+                  budgetLimitReason: escalationError?.budgetLimitReason || firstError?.budgetLimitReason || null,
+                  canonicalRemainingMs: solveBudget.canonicalRemainingMs(),
+                  recoveryRemainingMs: solveBudget.remainingMs({ recovery: true }),
+                  executionConfig: recoveryExecutionConfig,
                 });
                 await captureSolveQualityFailure({
                   error: escalationError,
@@ -3572,14 +3661,14 @@ export async function handleExplainRequest(req, res) {
                   problemText: "",
                   canonicalProblem,
                   repairAttempted: false,
-                  freshEscalationAttempted: true,
+                  freshEscalationAttempted: !timeoutRecovery,
                 });
-                throw escalationError;
+                throw terminalError;
               }
             }
           }
         }
-        const firstRouteAttemptIndex = source === "live AI escalation call" ? 2 : 1;
+        const firstRouteAttemptIndex = ["live AI escalation call", "live AI recovery call"].includes(source) ? 2 : 1;
         const firstRouteAttemptId = `${requestId}:route:${firstRouteAttemptIndex}`;
         const firstCandidateId = result?._omniOpenAiDiagnostics?.candidateId
           || `${firstRouteAttemptId}:candidate:${source === "local rule" ? "local" : "selected"}`;
@@ -3754,7 +3843,7 @@ export async function handleExplainRequest(req, res) {
           selectedForUi: true,
           executionConfig: acceptedRouteAttemptIndex === 2
             ? result.assurance?.recovery?.routeAttemptId === acceptedRouteAttemptId
-              ? assuranceExecutionConfig : escalationExecutionConfig
+              ? assuranceExecutionConfig : selectedRecoveryExecutionConfig || escalationExecutionConfig
             : initialExecutionConfig,
         });
         attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
@@ -3893,6 +3982,10 @@ export async function handleExplainRequest(req, res) {
     });
     } finally {
       solveBudget.cleanup();
+      cancellationResponse.off?.("close", abortForClientDisconnect);
+      cancellationRequest.off?.("aborted", abortForClientDisconnect);
+      cancellationRequest.off?.("error", onRequestError);
+      cancellationRequest.signal?.removeEventListener?.("abort", onRequestSignalAbort);
     }
   });
 }
@@ -4218,6 +4311,8 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       inputSource: canonicalProblem.source,
       usageKind: "image",
       persistenceSource: "image",
+      originalRequest: req,
+      originalResponse: res,
       sourceMetadata: {
         ingestion: imageSource.ingestion,
         canonicalProblemId: imageSource.canonicalProblemId,

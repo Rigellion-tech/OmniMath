@@ -2,6 +2,8 @@
 
 This change addresses hard manually entered solves timing out without a solution and reporting pre-provider/zero usage despite dispatched provider work. It preserves the canonical 90-second default, model selection, routing, UI, deduplication, and deployment configuration.
 
+The subsequent [provider-timeout recovery phase](provider-timeout-recovery.md) adds bounded recovery for eligible primary provider timeouts. This document records the earlier deadline/accounting checkpoint.
+
 ## Current path traced before implementation
 
 | Layer | File / function / setting | Previous behavior |

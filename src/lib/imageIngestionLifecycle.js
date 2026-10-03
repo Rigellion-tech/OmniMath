@@ -143,7 +143,7 @@ export function assertMatchingIngestionIdentity(expected = {}, received = {}) {
 
 export function imageSolveFailureMessage(error) {
   const code = error?.body?.code || error?.code || "";
-  if (code === "AI_PROVIDER_TIMEOUT" || code === "AI_REQUEST_TIMEOUT") {
+  if (code === "AI_SOLVE_TIMEOUT" || code === "AI_PROVIDER_TIMEOUT" || code === "AI_REQUEST_TIMEOUT") {
     return "Extraction succeeded, but solving timed out. Retry from the reviewed text.";
   }
   if (code === "AI_SERVICE_UNAVAILABLE") {

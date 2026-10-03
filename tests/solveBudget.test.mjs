@@ -75,10 +75,24 @@ describe("canonical solve budget", () => {
     assert.equal(budget.canStartRecovery(), true);
     assert.equal(
       budget.attemptBudget({ configuredTimeoutMs: 120_000, recovery: true }).effectiveTimeoutMs,
-      88_000,
+      22_500,
     );
-    clock.advance(84_000);
+    clock.advance(18_000);
     assert.equal(budget.canStartRecovery(), false);
+    budget.cleanup();
+  });
+
+  it("caps all recovery work to one aggregate reserved stage allocation", () => {
+    const clock = fakeClock();
+    const budget = createSolveBudget({ totalTimeoutMs: 90_000, ...clock });
+
+    const first = budget.attemptBudget({ configuredTimeoutMs: 10_000, recovery: true });
+    assert.equal(first.effectiveTimeoutMs, 10_000);
+    clock.advance(10_000);
+    const second = budget.attemptBudget({ configuredTimeoutMs: 120_000, recovery: true });
+    assert.equal(second.effectiveTimeoutMs, 12_500);
+    clock.advance(12_500);
+    assert.equal(budget.attemptBudget({ configuredTimeoutMs: 1_000, recovery: true }).canStart, false);
     budget.cleanup();
   });
 

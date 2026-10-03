@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
+import { preparePinnedLens } from "@/lib/lensWorkspace";
 import { getConceptById, getConceptForChunk, getConceptsForStep, getRelatedConceptIds } from "@/data/conceptGraph";
 import {
   DEFAULT_FLOATING_LENS_SIZE,
@@ -19,12 +20,13 @@ import {
   unionSemanticRects,
 } from "@/lib/semanticHitboxes";
 
+const PinnedLensesContext = createContext(null);
 const HoverSemanticContext = createContext(null);
 const HoverTooltipContext = createContext(null);
 const HoverActionsContext = createContext(null);
 
 // difficultyMode: "beginner" | "intermediate" | "advanced" | "exam" | "intuition" | "professor"
-const DIFFICULTY_MAX_LEVEL = { beginner: 1, intermediate: 2, advanced: 3, exam: 1, intuition: 2, professor: 3 };
+const DIFFICULTY_MAX_LEVEL = { concise: 1, standard: 2, detailed: 3, beginner: 1, intermediate: 2, advanced: 3, exam: 1, intuition: 2, professor: 3 };
 const WINDOW_SIZE = DEFAULT_FLOATING_LENS_SIZE;
 const HOVER_DELAY_MS = 125;
 const HOVER_CLEAR_DELAY_MS = 140;
@@ -147,7 +149,14 @@ function getEventAnchor(event) {
 function getEventPosition(event, index = 0, size = WINDOW_SIZE) {
   const anchor = event?.anchorRect ? { rect: event.anchorRect } : getEventAnchor(event);
   if (anchor.rect) {
-    return getTooltipPositionFromRect(anchor.rect, { index, size });
+    const position = getTooltipPositionFromRect(anchor.rect, { index, size });
+    if (typeof document === "undefined") return position;
+    const workspaceRect = document.querySelector("[data-math-workspace]")?.getBoundingClientRect?.();
+    if (!workspaceRect) return position;
+    const padding = 12;
+    const minX = Math.max(padding, workspaceRect.left + padding);
+    const maxX = Math.max(minX, Math.min(window.innerWidth, workspaceRect.right) - size.width - padding);
+    return { ...position, x: Math.min(maxX, Math.max(minX, position.x)) };
   }
 
   const baseX = event?.clientX ?? (typeof window !== "undefined" ? window.innerWidth / 2 : 240);
@@ -158,6 +167,69 @@ function getEventPosition(event, index = 0, size = WINDOW_SIZE) {
   const x = canOpenRight ? baseX + 20 + offset : baseX - size.width - 18 - offset;
   const y = canOpenBelow ? baseY + 18 + offset : baseY - Math.min(size.height, 180) - 18 - offset;
   return clampPosition(x, y, size);
+}
+
+function getWindowPlacement(pinned, position, anchorRect) {
+  return pinned
+    ? {
+        placementMode: "stacked",
+        coordinateSpace: "canvas-v1",
+        canvasAnchorY: Math.max(12, (anchorRect?.top || position.y) - (document.querySelector("[data-lens-canvas]")?.getBoundingClientRect().top || 0)),
+        collapsed: false,
+        transientSpawnPosition: anchorRect ? { x: position.x, y: position.y } : null,
+      }
+    : { x: position.x, y: position.y, anchor: anchorRect };
+}
+
+function stripPinnedSemanticGeometry(selection) {
+  if (!selection || typeof selection !== "object") return selection || null;
+  const sanitized = { ...selection };
+  delete sanitized.rect;
+  delete sanitized.rects;
+  delete sanitized.anchorRect;
+  delete sanitized.selectionRect;
+  delete sanitized.dragStartPoint;
+  delete sanitized.dragCurrentPoint;
+  delete sanitized.transientSpawnPosition;
+  return sanitized;
+}
+
+function stripPinnedTokenGeometry(token) {
+  if (!token || typeof token !== "object") return token;
+  const sanitized = { ...token };
+  delete sanitized.rect;
+  delete sanitized.rects;
+  delete sanitized.anchorRect;
+  delete sanitized.selectionRect;
+  delete sanitized.visualSelectionKey;
+  delete sanitized.element;
+  delete sanitized.sourceElement;
+  return sanitized;
+}
+
+function stripPinnedWindowGeometry(window) {
+  if (!window || typeof window !== "object") return window;
+  const sanitized = { ...window };
+  delete sanitized.anchor;
+  delete sanitized.anchorRect;
+  delete sanitized.selectionRect;
+  delete sanitized.dragStartPoint;
+  delete sanitized.dragCurrentPoint;
+  delete sanitized.transientSpawnPosition;
+  if (Array.isArray(sanitized.selectedTokens)) {
+    sanitized.selectedTokens = sanitized.selectedTokens.map(stripPinnedTokenGeometry);
+  }
+  sanitized.semanticSelection = stripPinnedSemanticGeometry(sanitized.semanticSelection);
+  sanitized.selectedSemanticRange = stripPinnedSemanticGeometry(sanitized.selectedSemanticRange);
+  if (sanitized.context && typeof sanitized.context === "object") {
+    sanitized.context = {
+      ...sanitized.context,
+      semanticSelection: stripPinnedSemanticGeometry(sanitized.context.semanticSelection),
+      selectedSemanticRange: stripPinnedSemanticGeometry(sanitized.context.selectedSemanticRange),
+      normalizedSelectionNode: stripPinnedTokenGeometry(sanitized.context.normalizedSelectionNode),
+    };
+  }
+  return sanitized;
 }
 
 function sameRect(left = null, right = null) {
@@ -191,7 +263,7 @@ function emptySelectionState() {
 function getHoverDelay(settings) {
   const configured = Number(settings?.interaction?.hoverDelay);
   if (!Number.isFinite(configured)) return HOVER_DELAY_MS;
-  return Math.max(100, Math.min(150, configured));
+  return Math.max(120, Math.min(900, configured));
 }
 
 function countActiveTimers(timerRefs = {}) {
@@ -253,15 +325,13 @@ function createChunkWindow(chunk, stepId, event, pinned, index, defaultDepth = "
     chunkId: chunk.id,
   });
 
-  return {
+  const window = {
     id: `chunk-${chunk.id}-${Date.now()}-${index}`,
     referenceId: chunk.id,
     referenceType: "token",
     conceptId: concept?.id || null,
     stepId,
-    x: position.x,
-    y: position.y,
-    anchor: anchor.rect,
+    ...getWindowPlacement(pinned, position, anchor.rect),
     pinned,
     depth: defaultDepth,
     title,
@@ -283,6 +353,9 @@ function createChunkWindow(chunk, stepId, event, pinned, index, defaultDepth = "
       professor: userFacingText(concept?.lensContent?.professor, deep),
     },
   };
+  if (!pinned) return window;
+  const sanitized = stripPinnedWindowGeometry(window);
+  return { ...sanitized, transientSpawnPosition: window.transientSpawnPosition };
 }
 
 function createSelectionWindow(selection, event, pinned, index, defaultDepth = "intermediate") {
@@ -306,16 +379,14 @@ function createSelectionWindow(selection, event, pinned, index, defaultDepth = "
     context: selection.context || null,
   });
 
-  return {
+  const window = {
     id: `selection-${selection.stepId}-${Date.now()}-${index}`,
     referenceId: selection.id,
     referenceType: "selection",
     conceptId: null,
     stepId: selection.stepId,
     stepTitle: selection.stepTitle,
-    x: position.x,
-    y: position.y,
-    anchor: anchor.rect,
+    ...getWindowPlacement(pinned, position, anchor.rect),
     pinned,
     depth: defaultDepth,
     title: "Selected region",
@@ -340,6 +411,9 @@ function createSelectionWindow(selection, event, pinned, index, defaultDepth = "
       professor: selection.tokens.map((token) => token.deep || token.medium || token.short).filter(Boolean).join(" "),
     },
   };
+  if (!pinned) return window;
+  const sanitized = stripPinnedWindowGeometry(window);
+  return { ...sanitized, transientSpawnPosition: window.transientSpawnPosition };
 }
 
 function createStepWindow(step, event, pinned, index, defaultDepth = "intermediate") {
@@ -364,9 +438,7 @@ function createStepWindow(step, event, pinned, index, defaultDepth = "intermedia
     conceptId: primaryConcept?.id || null,
     conceptIds: stepConcepts.map((concept) => concept.id),
     stepId: step.id,
-    x: position.x,
-    y: position.y,
-    anchor: anchor.rect,
+    ...getWindowPlacement(pinned, position, anchor.rect),
     pinned,
     depth: defaultDepth,
     title: userFacingTooltipTitle({
@@ -405,9 +477,7 @@ function createConceptWindow(conceptId, event, pinned, index, defaultDepth = "in
     referenceId: conceptId,
     referenceType: "concept",
     conceptId,
-    x: position.x,
-    y: position.y,
-    anchor: anchor.rect,
+    ...getWindowPlacement(pinned, position, anchor.rect),
     pinned,
     depth: defaultDepth,
     title: userFacingTooltipTitle({
@@ -462,7 +532,20 @@ function tokenIdFromEventTarget(event) {
 }
 
 export function HoverProvider({ children, initialWindows = [], onWindowsChange, settings, problem, sessionId = "" }) {
-  const normalizedInitialWindows = initialWindows.map((window) => ({ ...window, pinned: true }));
+  const normalizedInitialWindows = initialWindows.map((window) => {
+    const normalized = {
+      ...window,
+      pinned: true,
+      placementMode: window.placementMode === "manual" ? "manual" : "stacked",
+      collapsed: Boolean(window.collapsed),
+    };
+    delete normalized.anchor;
+    if (normalized.placementMode !== "manual") {
+      delete normalized.x;
+      delete normalized.y;
+    }
+    return stripPinnedWindowGeometry(normalized);
+  });
   const [activeChunkId, setActiveChunkId] = useState(null);
   const [activeChunkData, setActiveChunkData] = useState(null);
   const [explanationLevel, setExplanationLevel] = useState(0);
@@ -473,7 +556,34 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   const [selectedConceptId, setSelectedConceptId] = useState(null);
   const [difficultyMode, setDifficultyMode] = useState(settings?.learning?.explanationDepth || "intermediate");
   const [hoverLens, setHoverLens] = useState(null);
-  const [pinnedLenses, setPinnedLenses] = useState(normalizedInitialWindows);
+  const problemRef = useRef(problem);
+  problemRef.current = problem;
+  const [pinnedLenses, setPinnedLensesRaw] = useState(() => normalizedInitialWindows.map((item) => preparePinnedLens(item, problem)));
+  const setPinnedLenses = useCallback((updater) => setPinnedLensesRaw((previous) => {
+    const next = typeof updater === "function" ? updater(previous) : updater;
+    return next === previous ? previous : next.map((item) => preparePinnedLens(item, problemRef.current));
+  }), []);
+  const [selectedLensId, setSelectedLensId] = useState(() => normalizedInitialWindows.find((item) => item.inspectorSelected)?.id || normalizedInitialWindows.at(-1)?.id || null);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const collapseInspector = useCallback(() => setInspectorOpen(false), []);
+  const pinnedLensesRef = useRef(pinnedLenses);
+  pinnedLensesRef.current = pinnedLenses;
+  const knownLensIdsRef = useRef(new Set(pinnedLenses.map((item) => item.id)));
+  const selectLens = useCallback((id) => {
+    setSelectedLensId(id);
+    setInspectorOpen(true);
+    setPinnedLensesRaw((previous) => previous.map((item) => item.inspectorSelected === (item.id === id) ? item : { ...item, inspectorSelected: item.id === id }));
+  }, []);
+  const focusPinnedReference = useCallback((type, id, stepId = null) => {
+    const existing = pinnedLensesRef.current.find((item) => samePinnedReference(item, type, id, stepId));
+    if (existing) selectLens(existing.id);
+  }, [selectLens]);
+  useEffect(() => {
+    const added = pinnedLenses.filter((item) => !knownLensIdsRef.current.has(item.id));
+    knownLensIdsRef.current = new Set(pinnedLenses.map((item) => item.id));
+    if (added.length) selectLens(added.find((item) => item.inspectorSelected)?.id || added.at(-1).id);
+    else if (!pinnedLenses.some((item) => item.id === selectedLensId)) setSelectedLensId(pinnedLenses.at(-1)?.id || null);
+  }, [pinnedLenses, selectedLensId, selectLens]);
   const [selectionState, setSelectionState] = useState(emptySelectionState);
   const previousSessionIdRef = useRef(sessionId);
   const skipWindowPersistenceRef = useRef(false);
@@ -542,7 +652,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
       skipWindowPersistenceRef.current = false;
       return;
     }
-    onWindowsChange?.(pinnedLenses, sessionId);
+    onWindowsChange?.(pinnedLenses.map(stripPinnedWindowGeometry), sessionId);
   }, [pinnedLenses, onWindowsChange, sessionId]);
 
   useEffect(() => {
@@ -1418,6 +1528,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
         ? buildGeometrySelection(stepId, selectionState.selectionRect, selectionState.fallbackToken)
         : buildSelection(stepId, selectionState.selectionStartTokenId, selectionState.selectionEndTokenId));
       if (selection) {
+        focusPinnedReference("selection", selection.id, stepId);
         clearActiveHover("selection-pinned");
         logSemanticSelection(settings, "selection-pinned", {
           stepId,
@@ -1435,6 +1546,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
         return;
       }
     }
+    focusPinnedReference("token", chunk.id, stepId);
     clearActiveHover("token-pinned");
     const context = getStepContext(stepId);
     const semanticIdentity = createSemanticIdentity({ ...chunk, stepId, context });
@@ -1517,6 +1629,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   }, [cancelHoverClear, scheduleActiveHoverClear]);
 
   const addPinnedStepLens = useCallback((step, event) => {
+    focusPinnedReference("step", step.id, step.id);
     clearActiveHover("step-pinned");
     setPinnedLenses((prev) => (
       prev.some((window) => samePinnedReference(window, "step", step.id, step.id))
@@ -1570,6 +1683,7 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
   }, [cancelHoverClear, scheduleActiveHoverClear]);
 
   const addPinnedConceptLens = useCallback((conceptId, event) => {
+    focusPinnedReference("concept", conceptId);
     clearActiveHover("concept-pinned");
     setPinnedLenses((prev) => (
       prev.some((window) => samePinnedReference(window, "concept", conceptId))
@@ -1648,8 +1762,8 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     }));
   }, []);
 
-  const moveExplanationWindow = useCallback((id, x, y, size = WINDOW_SIZE) => {
-    const position = clampPosition(x, y, size, 0);
+  const moveExplanationWindow = useCallback((id, x, y) => {
+    const position = { x: Math.max(12, x), y: Math.max(12, y) };
     setPinnedLenses((prev) => {
       let changed = false;
       const next = prev.map((window) => {
@@ -1711,18 +1825,18 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     () => (inspectedConceptId ? getRelatedConceptIds(inspectedConceptId) : []),
     [inspectedConceptId]
   );
+  const pinnedMembershipKey = pinnedLenses.map((item) => `${item.id}:${item.referenceId}:${item.referenceType}`).join("|");
   const openReferenceIds = useMemo(
     () => pinnedLenses.map((window) => window.referenceId),
-    [pinnedLenses]
+    [pinnedMembershipKey]
   );
   const pinnedReferenceIds = openReferenceIds;
   const pinnedChunkIds = useMemo(
     () => pinnedLenses
       .filter((window) => window.referenceType === "token")
       .map((window) => window.referenceId),
-    [pinnedLenses]
+    [pinnedMembershipKey]
   );
-  const explanationWindows = pinnedLenses;
 
   const semanticValue = useMemo(() => ({
     activeChunkId,
@@ -1743,8 +1857,6 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     pinnedChunkIds,
     pinnedReferenceIds,
     difficultyMode,
-    pinnedLenses,
-    explanationWindows,
     openReferenceIds,
   }), [
     activeChunkId,
@@ -1752,11 +1864,9 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     activeStepId,
     difficultyMode,
     displayChunkData,
-    explanationWindows,
     inspectedConceptId,
     openReferenceIds,
     pinnedChunkIds,
-    pinnedLenses,
     pinnedReferenceIds,
     relatedConceptIds,
     selectedChunkData,
@@ -1843,16 +1953,27 @@ export function HoverProvider({ children, initialWindows = [], onWindowsChange, 
     updateExplanationWindow,
   ]);
 
+  const lensWorkspaceValue = useMemo(() => ({ lenses: pinnedLenses, selectedLensId, inspectorOpen, selectLens,
+    collapseInspector,
+  }), [pinnedLenses, selectedLensId, inspectorOpen, selectLens, collapseInspector]);
   return (
     <HoverActionsContext.Provider value={actionsValue}>
       <HoverSemanticContext.Provider value={semanticValue}>
         <HoverTooltipContext.Provider value={tooltipValue}>
-          {children}
+          <PinnedLensesContext.Provider value={lensWorkspaceValue}>{children}</PinnedLensesContext.Provider>
         </HoverTooltipContext.Provider>
       </HoverSemanticContext.Provider>
     </HoverActionsContext.Provider>
   );
 }
+
+export function useLensWorkspace() {
+  const context = useContext(PinnedLensesContext);
+  if (!context) throw new Error("useLensWorkspace must be used inside HoverProvider");
+  return context;
+}
+
+export function usePinnedLenses() { return useLensWorkspace().lenses; }
 
 export function useHoverSemanticState() {
   const context = useContext(HoverSemanticContext);
@@ -1876,5 +1997,6 @@ export function useHover() {
   const semantic = useHoverSemanticState();
   const tooltip = useHoverTooltipState();
   const actions = useHoverActions();
-  return { ...semantic, ...tooltip, ...actions };
+  const pinnedLenses = usePinnedLenses();
+  return { ...semantic, ...tooltip, ...actions, pinnedLenses, explanationWindows: pinnedLenses };
 }

@@ -1,5 +1,16 @@
 const LATEX_COMMAND_PATTERN = /\\[a-zA-Z]+|\\[()[\]{}]|[_^{}]|\\,/;
 const GENERIC_TITLE = "Math Problem";
+const GENERIC_LABELS = new Set([
+  "math problem",
+  "equation problem",
+  "integral evaluation",
+  "vector calculus problem",
+  "matrix problem",
+  "series problem",
+  "limit problem",
+  "differentiation",
+  "stokes' theorem problem",
+]);
 
 function sourceText(value) {
   if (!value) return "";
@@ -78,16 +89,54 @@ export function getProblemLabel(problem, fallback = GENERIC_TITLE) {
   return classifyProblem(text || title, fallback);
 }
 
+export function getConciseProblemTitle(problem, fallback = GENERIC_TITLE) {
+  const text = sourceText(problem);
+  const normalized = text.toLowerCase();
+  const suppliedTitle = typeof problem?.title === "string" ? problem.title.trim() : "";
+
+  if (/euler[-\s]?lagrange|variational functional|newton linearization/.test(normalized)) {
+    return /constraint|lagrange multiplier|\blambda\b/.test(normalized)
+      ? "Constrained Euler-Lagrange"
+      : "Euler-Lagrange Derivation";
+  }
+  if (/quasi[-\s]?newton|bfgs|dfp update/.test(normalized)) return "Quasi-Newton Derivation";
+  if (/eigenvalue|eigenvector|characteristic polynomial/.test(normalized)) return "Matrix Eigenvalue Problem";
+  if (/heat equation|diffusion equation/.test(normalized)) return "Heat Equation Boundary";
+  if (/stokes|\nabla\s*\times|∇\s*×|curl|\\oint|∮/.test(normalized)) return "Stokes Surface Integral";
+  if (/triple\s+integral|\\iiint/.test(normalized)) return "Triple Integral";
+
+  if (
+    suppliedTitle
+    && !/^demo\b|^demo problem:/i.test(suppliedTitle)
+    && !GENERIC_LABELS.has(suppliedTitle.toLowerCase())
+    && !hasLatexSyntax(suppliedTitle)
+  ) {
+    return cleanLatexSnippet(suppliedTitle, fallback, 42);
+  }
+
+  if (/improper|\\int[^]*\\infty/.test(normalized)) return "Improper Integral";
+  if (/surface\s+integral|\\iint_s|∬_s/.test(normalized)) return "Surface Integral";
+  if (/matrix|determinant|\\begin\{[bpv]?matrix/.test(normalized)) return "Matrix Problem";
+  if (/\\int|integral/.test(normalized)) return "Integral Evaluation";
+  return cleanLatexSnippet(text || suppliedTitle, fallback, 42);
+}
+
 export function getSessionLabel(session, fallback = GENERIC_TITLE) {
   const title = typeof session?.title === "string" ? session.title.trim() : "";
   const problem = session?.problem || session?.problems?.[0] || null;
 
-  if (problem) return getProblemLabel(problem, fallback);
-
   if (/^demo\b|^demo problem:/i.test(title)) return fallback;
-  if (title && title !== "New math session" && !hasLatexSyntax(title) && title.length <= 48) {
+  if (
+    title
+    && title !== "New math session"
+    && !GENERIC_LABELS.has(title.toLowerCase())
+    && !hasLatexSyntax(title)
+    && title.length <= 48
+  ) {
     return title;
   }
+
+  if (problem) return getConciseProblemTitle(problem, fallback);
 
   return getProblemLabel(title, fallback);
 }

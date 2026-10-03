@@ -15,13 +15,13 @@ export default function StepScrubber({ steps, selectedStepId, onSelect }) {
   return (
     <section className="mb-5 px-1 opacity-70 transition-opacity duration-200 hover:opacity-100">
       <div className="mb-2 flex items-center justify-end">
-        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-300/55">
+        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-neutral-500">
           {selectedIndex + 1}/{steps.length}
         </span>
       </div>
       <div className="relative">
-        <div className="absolute left-3 right-3 top-4 h-px bg-white/[0.1]" />
-        <div className="absolute left-3 top-4 h-px bg-teal-300/55" style={{ width: selectedIndex === 0 ? "0%" : `calc(${progress}% - 1.5rem)` }} />
+        <div className="absolute left-3 right-3 top-4 h-px bg-neutral-200" />
+        <div className="absolute left-3 top-4 h-px bg-neutral-500" style={{ width: selectedIndex === 0 ? "0%" : `calc(${progress}% - 1.5rem)` }} />
         <div className="relative grid gap-2" style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }}>
           {steps.map((step, index) => {
             const active = index === selectedIndex;
@@ -31,23 +31,23 @@ export default function StepScrubber({ steps, selectedStepId, onSelect }) {
                 key={step.id}
                 type="button"
                 onClick={() => onSelect(step.id)}
-                className="group flex min-w-0 flex-col items-center gap-2 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-300/55 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116]"
+                className="group flex min-w-0 flex-col items-center gap-2 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
               >
                 <span
                   className={cn(
                     "relative z-10 flex h-6 w-6 items-center justify-center rounded-full border font-mono text-[10px] font-semibold transition-all duration-200",
                     active
-                      ? "border-teal-200/60 bg-teal-300/14 text-teal-50 shadow-[0_0_18px_rgba(45,212,191,0.18)]"
+                      ? "border-neutral-900 bg-neutral-900 text-white"
                       : complete
-                        ? "border-teal-300/24 bg-teal-300/[0.07] text-teal-100/65"
-                        : "border-white/[0.08] bg-transparent text-slate-500/70 group-hover:border-teal-300/24 group-hover:text-teal-100/75"
+                        ? "border-neutral-400 bg-white text-neutral-600"
+                        : "border-neutral-200 bg-white text-neutral-400 group-hover:border-neutral-400 group-hover:text-neutral-700"
                   )}
                 >
                   {index + 1}
                 </span>
                 <span className={cn(
                   "truncate text-[11px] leading-4 transition-colors",
-                  active ? "text-cyan-50" : "text-slate-400/68 group-hover:text-slate-200/82"
+                  active ? "text-neutral-900" : "text-neutral-500 group-hover:text-neutral-700"
                 )}>
                   {labels[index] || step.label}
                 </span>

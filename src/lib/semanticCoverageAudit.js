@@ -27,9 +27,13 @@ function targetHasGeometry(target = {}) {
 }
 
 const SOURCE_GROUP_OWNER_ROLES = new Set([
-  "absoluteValue", "argument", "bound", "delimited", "differential", "lowerBound",
-  "operatorHead", "parenthesized", "power", "radicand", "root", "upperBound",
+  "absoluteValue", "argument", "bound", "decorated", "delimited", "differential", "function", "lowerBound",
+  "operatorHead", "parenthesized", "power", "radicand", "root", "upperBound", "decoratedAtom", "functionCall",
 ]);
+
+function isSourceGroupOwner(node = {}) {
+  return SOURCE_GROUP_OWNER_ROLES.has(node.role || "") || SOURCE_GROUP_OWNER_ROLES.has(node.type || "");
+}
 
 function rangeFor(value = {}) {
   const start = Number(value?.sourceRange?.start ?? value?.start);
@@ -80,6 +84,7 @@ export function auditSemanticCoverage({
   reachableTargets = null,
   pointerResolutions = null,
   hoverDispatches = null,
+  visiblePrimitives = null,
 } = {}) {
   const canonical = normalizeCanonicalSemanticTree(tree);
   const source = canonical?.displayLatex || "";
@@ -96,6 +101,86 @@ export function auditSemanticCoverage({
   const pointerById = asOutcomeMap(pointerResolutions);
   const dispatchById = asOutcomeMap(hoverDispatches);
 
+  // Browser/layout callers enumerate painted primitives using the production
+  // MathChunk measurement path and pass that evidence here. This audit does
+  // not invent a second resolver: it verifies the owner, geometry, pointer,
+  // and dispatch decisions already produced by the real pipeline.
+  const primitiveEvidence = (visiblePrimitives || []).map((primitive, index) => {
+    const element = primitive?.element || primitive?.node?.parentElement || null;
+    const nearestOwner = primitive?.ownerElement
+      || element?.closest?.("[data-semantic-id]")
+      || null;
+    const nearestOwnerId = nearestOwner?.getAttribute?.("data-semantic-id") || "";
+    const ownerId = nearestOwnerId
+      || primitive?.ownerSemanticId
+      || primitive?.semanticId
+      || "";
+    const expectedSemanticId = primitive?.expectedSemanticId || "";
+    const owner = canonical?.nodeMap?.[ownerId] || null;
+    const rects = primitive?.rects || (primitive?.rect ? [primitive.rect] : []);
+    const geometryUsable = rects.some((rect) => Number(rect?.width) > 0 && Number(rect?.height) > 0);
+    const ownerTarget = measuredById.get(ownerId) || null;
+    const intersects = (left, right) => left && right
+      && Number(left?.width) > 0 && Number(left?.height) > 0
+      && Number(right?.width) > 0 && Number(right?.height) > 0
+      && !(Number(left.right) <= Number(right.left)
+        || Number(left.left) >= Number(right.right)
+        || Number(left.bottom) <= Number(right.top)
+        || Number(left.top) >= Number(right.bottom));
+    const ownerGeometryCovered = primitive?.ownerGeometryCovered ?? Boolean(
+      ownerTarget
+      && acceptedIds.has(ownerId)
+      && rects.some((primitiveRect) => (ownerTarget.rects || []).some((ownerRect) => intersects(primitiveRect, ownerRect)))
+    );
+    const pointer = primitive?.pointerResolution || pointerById.get(ownerId) || null;
+    const resolvedId = pointer?.resolvedSemanticId || pointer?.semanticId || pointer?.id || "";
+    const pointerResolved = primitive?.pointerResolved ?? (pointerResolutions === null ? null : resolvedId === ownerId);
+    const dispatch = primitive?.hoverDispatch || dispatchById.get(ownerId) || null;
+    const dispatchedId = dispatch?.semanticId || dispatch?.id || "";
+    const hoverDispatched = primitive?.hoverDispatched ?? (hoverDispatches === null ? null : dispatchedId === ownerId);
+    let firstFailingLayer = 0;
+    let failureReason = "";
+    if (!ownerId || !owner) {
+      firstFailingLayer = 4;
+      failureReason = "visible-primitive-without-semantic-owner";
+    } else if (expectedSemanticId && ownerId !== expectedSemanticId) {
+      firstFailingLayer = 4;
+      failureReason = "visible-primitive-owned-by-wrong-semantic-occurrence";
+    } else if (primitive?.hasForeignSemanticDescendants && primitive?.attributedWholeContainer) {
+      firstFailingLayer = 4;
+      failureReason = "container-with-foreign-semantic-descendants-attributed-whole";
+    } else if (!geometryUsable) {
+      firstFailingLayer = 5;
+      failureReason = primitive?.rejectionReason || "visible-primitive-without-usable-geometry";
+    } else if (!ownerGeometryCovered) {
+      firstFailingLayer = 5;
+      failureReason = primitive?.rejectionReason || "semantic-owner-geometry-omits-visible-primitive";
+    } else if (pointerResolved === false) {
+      firstFailingLayer = 6;
+      failureReason = primitive?.rejectionReason || "visible-primitive-pointer-selected-wrong-owner";
+    } else if (hoverDispatched === false) {
+      firstFailingLayer = 7;
+      failureReason = "visible-primitive-hover-not-dispatched";
+    }
+    return {
+      primitiveId: primitive?.id || `visible-primitive-${index + 1}`,
+      text: primitive?.text || primitive?.latex || element?.textContent || "",
+      semanticId: ownerId || null,
+      semanticRole: owner?.role || owner?.type || null,
+      semanticSourceRange: rangeFor(owner),
+      expectedSemanticId: expectedSemanticId || null,
+      rects,
+      geometryUsable,
+      ownerGeometryCovered,
+      pointerResolved,
+      hoverDispatched,
+      hasForeignSemanticDescendants: Boolean(primitive?.hasForeignSemanticDescendants),
+      firstFailingLayer,
+      failureReason,
+    };
+  });
+  const orphanVisiblePrimitives = primitiveEvidence.filter((primitive) => primitive.firstFailingLayer > 0);
+
   // Compare KaTeX's visible source atoms with leaf ranges independently of
   // the node pipeline. A parser can omit an entire suffix while every node it
   // did create still passes annotation, geometry, and reachability checks.
@@ -104,7 +189,7 @@ export function auditSemanticCoverage({
       const range = rangeFor(node);
       if (!range || range.start > atom.start || range.end < atom.end) return false;
       const interaction = classifySemanticNodeInteraction(node, source);
-      return interaction.interactive || SOURCE_GROUP_OWNER_ROLES.has(node.role || node.type || "");
+      return interaction.interactive || isSourceGroupOwner(node);
     }).sort((left, right) => {
       const leftRange = rangeFor(left);
       const rightRange = rangeFor(right);
@@ -192,7 +277,7 @@ export function auditSemanticCoverage({
       seen.add(ancestorId);
       const ancestor = canonical?.nodeMap?.[ancestorId];
       const role = ancestor?.role || ancestor?.type || "";
-      if (ancestor && serializedIds.has(ancestor.id) && SOURCE_GROUP_OWNER_ROLES.has(role)) {
+      if (ancestor && serializedIds.has(ancestor.id) && (SOURCE_GROUP_OWNER_ROLES.has(role) || isSourceGroupOwner(ancestor))) {
         representedBy = ancestor;
         break;
       }
@@ -251,6 +336,11 @@ export function auditSemanticCoverage({
     sourceAtomGaps,
     sourceAtoms,
     sourceAtomCoverageComplete: sourceAtomGaps.length === 0,
-    complete: silentMissingNodes.length === 0 && sourceAtoms.every((atom) => atom.firstFailingLayer === 0),
+    visiblePrimitives: primitiveEvidence,
+    orphanVisiblePrimitives,
+    visiblePrimitiveCoverageComplete: orphanVisiblePrimitives.length === 0,
+    complete: silentMissingNodes.length === 0
+      && sourceAtoms.every((atom) => atom.firstFailingLayer === 0)
+      && orphanVisiblePrimitives.length === 0,
   };
 }

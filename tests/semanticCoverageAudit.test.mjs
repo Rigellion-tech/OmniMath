@@ -9,6 +9,10 @@ import {
   serializeSemanticTreeToLatex,
   validateSemanticTreeRanges,
 } from "../src/lib/semanticMathRenderer.js";
+import {
+  generatedDecoratedNotationCorpus,
+  mastersNotationCorpus,
+} from "./fixtures/semanticRenderingCorpus.mjs";
 
 const NOTATION_FIXTURES = [
   String.raw`a+b`,
@@ -49,6 +53,75 @@ function renderFixture(latex, fixtureIndex) {
 }
 
 describe("semantic coverage invariant", () => {
+  it("composes supported bases, scripts, primes, and accents through safe semantic envelopes", () => {
+    for (const [fixtureIndex, fixture] of [...mastersNotationCorpus, ...generatedDecoratedNotationCorpus].entries()) {
+      const { tree, serialization, domHtml } = renderFixture(fixture.latex, `masters-${fixtureIndex}`);
+      const measuredTargets = tree.flatNodes
+        .filter((node) => serialization.annotatedNodeIds.includes(node.id))
+        .map((node) => ({ ...node, rects: [{ left: 0, top: 0, right: 8, bottom: 12, width: 8, height: 12 }] }));
+      const audit = auditSemanticCoverage({
+        tree,
+        serialization,
+        domHtml,
+        measuredTargets,
+        geometryAcceptedTargets: measuredTargets,
+        reachableTargets: measuredTargets,
+      });
+      assert.equal(audit.complete, true,
+        `${fixture.name}: ${JSON.stringify({ atoms: audit.sourceAtoms.filter((atom) => atom.firstFailingLayer), nodes: audit.silentMissingNodes })}`);
+    }
+  });
+
+  it("uses a safe decorated callable-head envelope without weakening rejected partial-base wrappers", () => {
+    for (const latex of [String.raw`\lambda_1(L_*)`, String.raw`\beta_1(A_i)`, String.raw`\mu_k(T^*)`, String.raw`\psi_*''(u)`]) {
+      const { tree, serialization } = renderFixture(latex, `callable-${latex}`);
+      const head = tree.flatNodes.find((node) => node.role === "decorated" && node.parentId === tree.rootId);
+      assert.ok(head, `${latex}: missing decorated callable head`);
+      assert.equal(tree.displayLatex.slice(head.sourceRange.start, head.sourceRange.end), latex.slice(0, latex.indexOf("(")));
+      assert.ok(serialization.annotatedNodeIds.includes(head.id), `${latex}: safe whole head was not annotated`);
+      const base = tree.flatNodes.find((node) => node.parentId === head.id && node.role === "functionName");
+      assert.ok(base, `${latex}: missing function-name child identity`);
+      assert.equal(serialization.annotatedNodeIds.includes(base.id), false, `${latex}: unsafe partial base unexpectedly annotated`);
+      assert.equal(serialization.nodeDiagnostics.find((item) => item.semanticId === base.id)?.reason, "tex-layout-changed");
+    }
+  });
+
+  it("audits visible ink back to its exact owner geometry, pointer result, and dispatch", () => {
+    const { tree, serialization } = renderFixture(String.raw`\lambda_1(L_*)`, 900);
+    const head = tree.flatNodes.find((node) => node.role === "decorated");
+    const rect = { left: 10, top: 10, right: 18, bottom: 22, width: 8, height: 12 };
+    const measured = [{ ...head, rects: [rect] }];
+    const good = auditSemanticCoverage({
+      tree,
+      serialization,
+      measuredTargets: measured,
+      geometryAcceptedTargets: measured,
+      reachableTargets: measured,
+      visiblePrimitives: [{ id: "lambda-ink", text: "λ", ownerSemanticId: head.id, expectedSemanticId: head.id, rects: [rect], pointerResolved: true, hoverDispatched: true }],
+    });
+    assert.equal(good.visiblePrimitiveCoverageComplete, true);
+    assert.equal(good.visiblePrimitives[0].ownerGeometryCovered, true);
+
+    const omitted = auditSemanticCoverage({
+      tree,
+      serialization,
+      measuredTargets: [{ ...head, rects: [{ left: 40, top: 10, right: 48, bottom: 22, width: 8, height: 12 }] }],
+      geometryAcceptedTargets: [head],
+      visiblePrimitives: [{ id: "lambda-ink", ownerSemanticId: head.id, expectedSemanticId: head.id, rects: [rect] }],
+    });
+    assert.equal(omitted.complete, false);
+    assert.equal(omitted.orphanVisiblePrimitives[0].failureReason, "semantic-owner-geometry-omits-visible-primitive");
+
+    const wrongOwner = auditSemanticCoverage({
+      tree,
+      serialization,
+      measuredTargets: measured,
+      geometryAcceptedTargets: measured,
+      visiblePrimitives: [{ id: "lambda-ink", ownerSemanticId: tree.rootId, expectedSemanticId: head.id, rects: [rect], ownerGeometryCovered: true }],
+    });
+    assert.equal(wrongOwner.orphanVisiblePrimitives[0].failureReason, "visible-primitive-owned-by-wrong-semantic-occurrence");
+  });
+
   it("detects source atoms omitted by the parser before annotation or geometry", () => {
     const latex = String.raw`\int x+y\,dx+\int z\,dS`;
     const tree = buildSemanticTree({ stepId: "source-atom-gap", displayLatex: latex, enabled: true });

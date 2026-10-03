@@ -7,6 +7,7 @@ import { it } from "node:test";
 import "./helpers/noExternalNetwork.mjs";
 import { createMathExplanation } from "../server/openai.js";
 import { resolveInitialSolveRouting } from "../server/app.js";
+import { productionClerkOwner, recordExtraction, recordedSolvePayload } from "./helpers/recordedExtraction.mjs";
 
 function providerBody(outputText) {
   return new Response(JSON.stringify({
@@ -118,11 +119,14 @@ it("sends Sol in actual canonical solve and compact provider payloads despite so
   assert.equal(summaryModels.at(-1), "gpt-5.6-sol");
 
   const ocr = recorder();
-  await handleSolveExtractedProblemRequest(req("/api/solve-extracted-problem", {
-    problem: "x+7=9", extraction: { confidence: 91, ocrConfidence: 91, mathIntegrityScore: 91, confidenceTier: "high", issues: [] },
-    solveDecision: "direct",
-    reference: "separate-ocr-cache-entry", debugRequestId: "canonical-ocr-model",
-  }, "127.9.0.2"), ocr);
+  const recorded = await recordExtraction({
+    owner: productionClerkOwner("user_canonical_model_policy", session.jwtKey),
+    problem: "x+7=9",
+    latex: "x+7=9",
+  });
+  await handleSolveExtractedProblemRequest(req("/api/solve-extracted-problem", recordedSolvePayload(recorded, {
+    body: { reference: "separate-ocr-cache-entry", debugRequestId: "canonical-ocr-model" },
+  }), "127.9.0.2"), ocr);
   assert.equal(ocr.statusCode, 200, ocr.body);
   assert.equal(payloads.length, 3);
   assert.equal(payloads.at(-1).model, "gpt-5.6-sol");

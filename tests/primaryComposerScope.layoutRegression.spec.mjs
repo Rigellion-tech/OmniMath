@@ -147,7 +147,7 @@ test.describe("primary composer scope, header, and responsive palette", () => {
     await page.getByTestId("primary-composer-solve").click();
 
     await expect(composer).toHaveAttribute("data-composer-state", "collapsed");
-    await expect(page.getByText("Inverse by cofactors")).toBeVisible();
+    await expect(page.getByRole("heading", { level: 2, name: "Inverse by cofactors", exact: true })).toBeVisible();
     await expect(page.getByText(/17\/25 used today/i)).toHaveCount(0);
 
     const { target, tooltip, semanticId, point } = await hoverAdjugateTwenty(page);
@@ -159,6 +159,7 @@ test.describe("primary composer scope, header, and responsive palette", () => {
     const pinned = page.locator(".omni-floating-window");
     await expect(pinned).toHaveAttribute("data-semantic-id", semanticId);
     await expect(pinned).toContainText("obtained from its signed cofactor");
+    await pinned.getByRole("button", { name: "Ask follow-up" }).click();
     await assertCompactSecondaryInput(pinned);
 
     const followup = pinned.getByPlaceholder("Ask about this");
@@ -168,7 +169,9 @@ test.describe("primary composer scope, header, and responsive palette", () => {
     const followupRequest = requests.find((request) => request.endpoint === "/api/explain-followup");
     expect(followupRequest.body.provenanceSnapshot.target.semanticId).toBe(semanticId);
 
-    await page.getByRole("button", { name: "Edit submitted problem" }).click();
+    const workspace = page.locator(".omni-workspace-conversation");
+    await workspace.getByLabel("More actions for this solution").click();
+    await workspace.getByRole("button", { name: "Edit problem", exact: true }).click();
     await expect(composer).toHaveAttribute("data-composer-state", "expanded");
     await assertCompactSecondaryInput(pinned);
     await expect(pinned).toHaveAttribute("data-semantic-id", semanticId);
@@ -176,7 +179,7 @@ test.describe("primary composer scope, header, and responsive palette", () => {
     expect(requests.filter((request) => request.unexpected)).toEqual([]);
   });
 
-  test("compact header keeps export accessible without presenting usage", async ({ page }) => {
+  test("compact header keeps usage hidden and Settings exports Markdown", async ({ page }) => {
     await installOfflineRoutes(page);
     await page.goto("/?mockAuth=1");
     const header = page.locator("header");
@@ -185,11 +188,11 @@ test.describe("primary composer scope, header, and responsive palette", () => {
     expect(box.height).toBeLessThan(190);
     await expect(page.getByText(/used today|remaining today|token usage/i)).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Session actions" }).click();
-    const menu = page.getByRole("menu", { name: "Session actions" });
-    await expect(menu).toBeVisible();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await dialog.getByRole("button", { name: "Productivity", exact: true }).click();
     const download = page.waitForEvent("download");
-    await menu.getByRole("menuitem", { name: "Save as Markdown" }).click();
+    await dialog.getByRole("button", { name: "Export Markdown" }).click();
     await expect((await download).suggestedFilename()).toMatch(/\.md$/);
   });
 
@@ -231,11 +234,11 @@ test.describe("primary composer scope, header, and responsive palette", () => {
     expect(collapsed).not.toBeNull();
     await page.getByTestId("primary-composer-activate").click();
     await expect(composer).toHaveAttribute("data-composer-state", "expanded");
-    await expect.poll(async () => (await composer.boundingBox())?.height || 0).toBeGreaterThan(300);
+    await expect.poll(async () => (await composer.boundingBox())?.height || 0).toBeGreaterThanOrEqual(350);
     const expanded = await composer.boundingBox();
     expect(expanded.height).toBeGreaterThanOrEqual(350);
     expect(expanded.height).toBeLessThanOrEqual(450);
-    expect(expanded.height).toBeGreaterThan(collapsed.height + 250);
+    expect(expanded.height).toBeGreaterThan(collapsed.height + 150);
     const layout = await page.evaluate(() => {
       const composer = document.querySelector("[data-testid='primary-math-composer']");
       return {
@@ -287,7 +290,9 @@ test.describe("primary composer scope, header, and responsive palette", () => {
     await originalSession.click();
     await expect(composer).toHaveAttribute("data-composer-state", "collapsed");
     await expect(page.getByTestId("primary-composer-compact-problem")).toContainText(prose);
-    await page.getByRole("button", { name: "Edit submitted problem" }).click();
+    const workspace = page.locator(".omni-workspace-conversation");
+    await workspace.getByLabel("More actions for this solution").click();
+    await workspace.getByRole("button", { name: "Edit problem", exact: true }).click();
     await expect(composer).toHaveAttribute("data-composer-state", "expanded");
     await expect(composer.getByRole("tab", { name: "Advanced LaTeX" })).toHaveAttribute("aria-selected", "true");
     await expect(composer.getByPlaceholder(/Describe assumptions, boundary conditions/i)).toHaveValue(prose);

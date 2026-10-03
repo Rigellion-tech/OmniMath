@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
+import { recordExtraction, recordedSolvePayload } from "./helpers/recordedExtraction.mjs";
 
 const stokesProblem = "Let S be the portion of the paraboloid z = 9 - x^2 - y^2 lying above z = 0, oriented upward. Its boundary curve is C. Evaluate ∬_S (∇ × F) · n dS where F(x,y,z)=<yz^2 + e^(x^2) sin(y), x^3 z + ln(1+z^2), xy^2 + z cos(xy)>.";
 
@@ -63,6 +64,11 @@ describe("save auth expiry", () => {
 
     try {
       const { handleSolveExtractedProblemRequest } = await import(`../server/app.js?save-expiry-${Date.now()}`);
+      const extraction = await recordExtraction({
+        problem: stokesProblem,
+        latex: stokesProblem,
+        imageHash: "expired-save-test",
+      });
       const req = {
         method: "POST",
         url: "/api/solve-extracted-problem",
@@ -71,12 +77,7 @@ describe("save auth expiry", () => {
           "content-type": "application/json",
           host: "localhost:8787",
         },
-        body: {
-          problem: stokesProblem,
-          problemText: stokesProblem,
-          extraction: { imageHash: "expired-save-test" },
-          solveDecision: "direct",
-        },
+        body: recordedSolvePayload(extraction),
       };
       const res = createJsonResponseRecorder();
 

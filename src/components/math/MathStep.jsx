@@ -1,10 +1,20 @@
-import React, { useEffect, useMemo } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { ChevronDown } from "lucide-react";
-import MathRenderer, { MathRenderShell, looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
+import MathRenderer, { looksLikeMathExpression, splitLatexRenderBlocks } from "./MathRenderer";
 import MathChunk from "./MathChunk";
 import MathText from "./MathText";
 import { useHoverActions, useHoverSemanticState } from "@/lib/HoverContext";
 import { cn } from "@/lib/utils";
+import { markProgressiveStepInserted } from "@/lib/progressivePresentationDiagnostics";
+
+// Only expose roles supplied by the solution; never classify from equation text.
+const LINE_ROLES = {
+  substitution: "Substitution", expansion: "Expansion", simplification: "Simplification",
+  assumption: "Assumption", condition: "Condition", identity: "Identity",
+  theorem: "Theorem", application: "Application", numerical_evaluation: "Evaluation",
+  intermediate: "Intermediate result", derived_result: "Result", final_answer: "Final result",
+  final: "Final result", warning: "Qualification", qualification: "Qualification",
+};
 
 function lineHasRenderableToken(line) {
   return Array.isArray(line?.tokens)
@@ -79,22 +89,36 @@ function solutionLinesForStep(step) {
   return fallback ? [fallback] : [];
 }
 
+// Each expression owns its overflow. Keeping the semantic chunk inside the
+// scroller lets the existing geometry coordinator translate its painted owners.
+export function MathExpressionScroll({ children, inline = false, className = "" }) {
+  const Tag = inline ? "span" : "div";
+  return (
+    <Tag
+      className={cn("math-render-shell math-render-shell-block omni-expression-scroll", inline && "omni-expression-scroll-inline", className)}
+      tabIndex={0}
+      role="region"
+      aria-label="Mathematical expression; scroll horizontally if needed"
+      data-math-shell="math"
+    >
+      {children}
+    </Tag>
+  );
+}
+
 function MathLineShell({ children }) {
   return (
-    <MathRenderShell className="omni-solution-line omni-math-block font-serif text-[22px] italic leading-[2.35rem] text-cyan-50/92 md:text-[25px] md:leading-[2.75rem]">
+    <MathExpressionScroll className="omni-solution-line omni-math-block font-serif text-[22px] italic leading-[2.35rem] text-neutral-950 md:text-[25px] md:leading-[2.75rem]">
       {children}
-    </MathRenderShell>
+    </MathExpressionScroll>
   );
 }
 
 function MathInlineSegmentShell({ children }) {
   return (
-    <MathRenderShell
-      displayMode={false}
-      className="omni-equation-chain-segment font-serif text-[22px] italic leading-[2.35rem] text-cyan-50/92 md:text-[25px] md:leading-[2.75rem]"
-    >
+    <MathExpressionScroll inline className="omni-equation-chain-segment font-serif text-[22px] italic leading-[2.35rem] text-neutral-950 md:text-[25px] md:leading-[2.75rem]">
       {children}
-    </MathRenderShell>
+    </MathExpressionScroll>
   );
 }
 
@@ -141,7 +165,7 @@ function renderableTokenLatex(token) {
 
 function MathProseLine({ children }) {
   return (
-    <p className="omni-solution-line omni-text-wrap-safe max-w-6xl text-base leading-8 text-slate-300/78">
+    <p className="omni-solution-line omni-text-wrap-safe max-w-6xl text-base leading-8 text-neutral-600">
       {children}
     </p>
   );
@@ -181,7 +205,7 @@ function SplitMathBlocks({ blocks, idBase, stepId, displayMode }) {
               key={`${block.idHint || "separator"}-${blockIndex}`}
               className={cn(
                 "omni-equation-chain-separator font-serif text-lg leading-none md:text-xl",
-                isTextSeparator ? "text-cyan-50/72" : "text-teal-200/65"
+                isTextSeparator ? "text-neutral-600" : "text-neutral-400"
               )}
               aria-hidden={isTextSeparator ? undefined : "true"}
             >
@@ -272,20 +296,18 @@ export function InteractiveMathLine({ line, stepId }) {
 
     return (
       <div
-        className="math-render-shell math-render-shell-block omni-solution-line omni-equation-line flex max-w-full flex-wrap items-baseline gap-x-2.5 gap-y-2 text-[22px] leading-[2.35rem] md:text-[25px] md:leading-[2.75rem]"
+        className="omni-solution-line omni-equation-line flex min-w-0 max-w-full flex-wrap items-baseline gap-x-2.5 gap-y-2 text-[22px] leading-[2.35rem] md:text-[25px] md:leading-[2.75rem]"
         data-line-role={line.role || "other"}
       >
         {showLineText && (
-          <span className="omni-text-wrap-safe min-w-0 text-base leading-8 text-slate-300/74">
+          <span className="omni-text-wrap-safe min-w-0 text-base leading-8 text-neutral-600">
             {line.text}
           </span>
         )}
         {tokens.map((token, tokenIndex) => (
-          <MathChunk
-            key={token.id || `${line.id || stepId}-token-${tokenIndex}`}
-            chunk={token}
-            stepId={stepId}
-          />
+          <MathExpressionScroll inline key={token.id || `${line.id || stepId}-token-${tokenIndex}`}>
+            <MathChunk chunk={token} stepId={stepId} />
+          </MathExpressionScroll>
         ))}
       </div>
     );
@@ -330,7 +352,13 @@ export function InteractiveMathLine({ line, stepId }) {
   return null;
 }
 
-function SolutionStepView({ step, index, requestId, selected, expanded, onSelect, onToggleExpanded, hoverSemantic, hoverActions }) {
+function SolutionStepView({ step, index, requestId, progressive, selected, expanded, onSelect, onToggleExpanded, hoverSemantic, hoverActions }) {
+  const articleRef = useRef(null);
+  useLayoutEffect(() => {
+    if (progressive && articleRef.current) {
+      markProgressiveStepInserted({ requestId, stepId: step.id, element: articleRef.current });
+    }
+  }, [progressive, requestId, step.id]);
   const {
     activeStepId,
     openReferenceIds = [],
@@ -360,6 +388,7 @@ function SolutionStepView({ step, index, requestId, selected, expanded, onSelect
   };
   return (
     <article
+      ref={articleRef}
       data-state={state}
       data-solve-request-id={requestId || undefined}
       data-step-id={step.id || undefined}
@@ -368,22 +397,23 @@ function SolutionStepView({ step, index, requestId, selected, expanded, onSelect
       data-final-answer={isFinalAnswer ? "true" : undefined}
       onMouseLeave={handleStepLeave}
       className={cn(
-        "step-card notebook-step group relative px-4 py-5 transition-colors duration-200 md:px-6 md:py-5",
+        "step-card notebook-step group relative px-3 py-3.5 transition-colors duration-200 md:px-6 md:py-4",
+        progressive && "omni-progressive-step",
         isFinalAnswer && "final-answer-step"
       )}
     >
-      <div className="flex min-w-0 items-start gap-4">
+      <div className="flex min-w-0 items-start gap-3">
         <button
           type="button"
           onClick={handleSelect}
           onKeyDown={handleKeyDown}
           className={cn(
-            "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.035] font-mono text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116]",
+            "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-neutral-200 bg-neutral-50 font-mono text-xs transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white",
             isFinalAnswer
-              ? "border-emerald-300/35 bg-emerald-300/[0.09] text-emerald-50"
+              ? "border-neutral-300 bg-neutral-200 text-neutral-900"
               : selected || isActiveStep || hasWindow
-              ? "border-teal-300/30 bg-teal-300/[0.09] text-teal-50"
-              : "text-slate-500/70 hover:text-teal-100"
+              ? "border-neutral-300 bg-neutral-200 text-neutral-900"
+              : "text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
           )}
           aria-label={`Select step ${index + 1}`}
         >
@@ -395,22 +425,21 @@ function SolutionStepView({ step, index, requestId, selected, expanded, onSelect
             type="button"
             onClick={handleSelect}
             className={cn(
-              "block min-w-0 rounded-sm text-left text-lg font-semibold leading-8 tracking-normal transition-colors hover:text-teal-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071116] md:text-xl",
-              isFinalAnswer ? "text-emerald-50" : "text-cyan-50/94"
+              "block min-w-0 rounded-sm text-left text-base font-semibold leading-7 tracking-normal transition-colors hover:text-neutral-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white md:text-lg",
+              "text-neutral-950"
             )}
           >
             <MathText>{title}</MathText>
           </button>
 
-          <div className="mt-3 grid min-w-0 max-w-full gap-4">
+          <div className="omni-step-lines mt-2 grid min-w-0 max-w-full gap-4">
             {step.renderBoundaryError ? (
               <MathProseLine>This solution step was empty or malformed and could not be rendered.</MathProseLine>
             ) : lines.map((line, lineIndex) => (
-              <InteractiveMathLine
-                key={line.id || `${step.id}-line-${lineIndex}`}
-                line={line}
-                stepId={step.id}
-              />
+              <div key={line.id || `${step.id}-line-${lineIndex}`} className="omni-step-line" data-presentation-role={line.role || step.role || undefined}>
+                {LINE_ROLES[line.role] && <span className="omni-line-label">{LINE_ROLES[line.role]}</span>}
+                <InteractiveMathLine line={line} stepId={step.id} />
+              </div>
             ))}
           </div>
 
@@ -422,7 +451,7 @@ function SolutionStepView({ step, index, requestId, selected, expanded, onSelect
                   event.stopPropagation();
                   onToggleExpanded?.(step.id);
                 }}
-                className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-xs text-slate-400/78 transition-colors hover:text-teal-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45"
+                className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-xs text-neutral-500 transition-colors hover:text-neutral-900 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400"
                 aria-expanded={expanded}
               >
                 <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
@@ -435,10 +464,10 @@ function SolutionStepView({ step, index, requestId, selected, expanded, onSelect
             <div className="mt-3 grid gap-2">
               {step.summary && (
                 <p className={cn(
-                  "omni-text-wrap-safe max-w-6xl border-l pl-4 text-base leading-8",
+                  "omni-text-wrap-safe max-w-6xl border-l pl-3 text-sm leading-6",
                   isFinalAnswer
-                    ? "border-emerald-300/30 text-emerald-50/82"
-                    : "border-teal-300/22 text-slate-300/78"
+                    ? "border-neutral-400 text-neutral-700"
+                    : "border-neutral-300 text-neutral-600"
                 )}>
                   <MathText diagnosticStepIndex={index}>{step.summary}</MathText>
                 </p>
@@ -462,6 +491,7 @@ function sameSolutionStepViewProps(previous, next) {
   return previous.step === next.step
     && previous.index === next.index
     && previous.requestId === next.requestId
+    && previous.progressive === next.progressive
     && previous.selected === next.selected
     && previous.expanded === next.expanded
     && previous.onSelect === next.onSelect

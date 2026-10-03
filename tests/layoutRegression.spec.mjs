@@ -913,7 +913,7 @@ test("Stokes theorem solution stays contained and renderable at browser zoom lev
   await page.goto("/?mockAuth=1");
   await submitCurrentComposer(page, STOKES_PROBLEM);
 
-  await expect(page.getByText("Stokes' theorem setup")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Use Stokes' theorem" })).toBeVisible();
   await expect(page.locator(".omni-solution-line").first()).toBeVisible();
 
   for (const zoom of ZOOM_LEVELS) {
@@ -1669,7 +1669,10 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
   await submitCurrentComposer(page, "Inspect aggregate semantic parsing.");
   await expect(page.getByRole("button", { name: /Aggregate integral/i })).toBeVisible();
 
-  const targetBox = async (stepLabel, role, kind = "group", occurrence = 0) => page.evaluate(({ stepLabel, role, kind, occurrence }) => {
+  const targetBox = async (stepLabel, role, kind = "group", occurrence = 0) => {
+    let resolved = null;
+    await expect.poll(async () => {
+      resolved = await page.evaluate(({ stepLabel, role, kind, occurrence }) => {
     const step = [...document.querySelectorAll(".step-card")]
       .find((card) => card.textContent?.includes(stepLabel));
     const selector = kind === "any"
@@ -1691,7 +1694,11 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
       latex: selected.getAttribute("data-token-latex"),
       semanticId: selected.getAttribute("data-semantic-id"),
     };
-  }, { stepLabel, role, kind, occurrence });
+      }, { stepLabel, role, kind, occurrence });
+      return resolved;
+    }).not.toBeNull();
+    return resolved;
+  };
 
   const groupGapPoint = async (stepLabel, role) => {
     const semanticId = await page.evaluate(({ stepLabel, role }) => {
@@ -1706,7 +1713,7 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
       return group.getAttribute("data-semantic-id");
     }, { stepLabel, role });
     if (!semanticId) return null;
-    await page.waitForTimeout(80);
+    await settleSemanticScroll(page);
     return page.evaluate(({ stepLabel, role, semanticId }) => {
       const step = [...document.querySelectorAll(".step-card")]
         .find((card) => card.textContent?.includes(stepLabel));
@@ -1720,6 +1727,7 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
       return {
         x: groupRect.left + groupRect.width / 2,
         y: groupRect.top + groupRect.height / 2,
+        internalGap: true,
         semanticId,
         latex: group.getAttribute("data-token-latex"),
         role: group.getAttribute("data-token-role"),
@@ -1732,7 +1740,46 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
     await page.mouse.move(4, 4, { steps: 1 });
     await page.waitForTimeout(180);
     const previous = lazyRequests.filter((request) => request.endpoint === "hover").length;
-    await moveSemanticPointer(page, box.x + Math.max(1, box.width * position.x), box.y + Math.max(1, box.height * position.y));
+    await settleSemanticScroll(page);
+    const currentPoint = await page.evaluate(async ({ semanticId, internalGap, position }) => {
+      await document.fonts?.ready;
+      const readPoint = () => {
+        const candidates = [...document.querySelectorAll(".math-semantic-hitbox[data-semantic-id]")]
+          .filter((node) => node.getAttribute("data-semantic-id") === semanticId
+            && (!internalGap || node.getAttribute("data-hitbox-region") === "internal-gap")
+            && node.getAttribute("data-geometry-valid") === "true")
+          .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+          .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+          .sort((left, right) => internalGap
+            ? right.rect.width - left.rect.width || right.rect.height - left.rect.height
+            : (right.rect.width * right.rect.height) - (left.rect.width * left.rect.height));
+        const rect = candidates[0]?.rect;
+        if (!rect) return null;
+        return internalGap
+          ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+          : {
+              x: rect.left + Math.max(1, rect.width * position.x),
+              y: rect.top + Math.max(1, rect.height * position.y),
+            };
+      };
+      let previous = null;
+      let stableFrames = 0;
+      for (let frame = 0; frame < 90; frame += 1) {
+        await new Promise(requestAnimationFrame);
+        const point = readPoint();
+        const scheduler = window.__OMNIMATH_GEOMETRY_SCHEDULER__;
+        stableFrames = point && previous
+          && Math.abs(point.x - previous.x) < 0.25
+          && Math.abs(point.y - previous.y) < 0.25
+          && !scheduler?.pending && !scheduler?.backgroundPending
+          ? stableFrames + 1 : 0;
+        if (stableFrames >= 3) return point;
+        previous = point;
+      }
+      return null;
+    }, { semanticId: box.semanticId, internalGap: Boolean(box.internalGap), position });
+    expect(currentPoint).not.toBeNull();
+    await moveSemanticPointer(page, currentPoint.x, currentPoint.y);
     await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
     await page.waitForTimeout(180);
     const hoverRequests = lazyRequests.filter((request) => request.endpoint === "hover");
@@ -1752,8 +1799,11 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
   };
 
   const fullIntegral = await targetBox("Aggregate integral", "integral", "group");
-  const integralGap = await groupGapPoint("Aggregate integral", "integral");
-  expect(integralGap).not.toBeNull();
+  let integralGap = null;
+  await expect.poll(async () => {
+    integralGap = await groupGapPoint("Aggregate integral", "integral");
+    return integralGap;
+  }).not.toBeNull();
   const fullBody = await hoverAndRead({ ...fullIntegral, ...integralGap, width: 1, height: 1 }, { x: 0, y: 0 });
   expect(fullBody.selectedLatex).toContain("\\int");
   expect(fullBody.selectedNode?.role).toBe("integral");
@@ -1781,8 +1831,11 @@ test("aggregate semantic hover and quick tooltip stay stable at viewport edges",
   expect(exponentBody.selectedNode?.role).toBe("exponent");
 
   const denominator = await targetBox("Grouped power expression", "denominator", "group");
-  const denominatorGap = await groupGapPoint("Grouped power expression", "denominator");
-  expect(denominatorGap).not.toBeNull();
+  let denominatorGap = null;
+  await expect.poll(async () => {
+    denominatorGap = await groupGapPoint("Grouped power expression", "denominator");
+    return denominatorGap;
+  }).not.toBeNull();
   const denominatorBody = await hoverAndRead({ ...denominator, ...denominatorGap, width: 1, height: 1 }, { x: 0, y: 0 });
   expect(denominatorBody.selectedNode?.role).toBe("denominator");
   expect(denominatorBody.selectedNode?.aggregate).toBe(true);
@@ -2009,7 +2062,8 @@ test("semantic geometry covers composite KaTeX leaves without whole-step fallbac
   await submitCurrentComposer(page, "Inspect composite geometry.");
   await expect(page.getByRole("button", { name: /Geometry integral/i })).toBeVisible();
 
-  const coverage = await page.evaluate(() => {
+  await expect.poll(async () => {
+    const coverage = await page.evaluate(() => {
     const expectedByStep = {
       "Geometry quadratic": ["3", "x", "2", "5", "-451", "-", "=", "0"],
       "Geometry integral": ["\\int_0^1", "0", "1", "\\ln", "\\cos", "x", "2", "dx"],
@@ -2067,10 +2121,10 @@ test("semantic geometry covers composite KaTeX leaves without whole-step fallbac
     for (const character of ["l", "n", "c", "o", "s", "t", "a", "r"]) {
       if (functionLeaves.includes(character)) failures.push(`function split into character ${character}`);
     }
-    return { failures, stepSummaries };
-  });
-
-  expect(coverage.failures).toEqual([]);
+      return { failures, stepSummaries };
+    });
+    return coverage.failures;
+  }).toEqual([]);
 
   const tokenBox = async (stepLabel, latex, role = null, occurrence = 0) => page.evaluate(({ stepLabel, latex, role, occurrence }) => {
     const step = [...document.querySelectorAll(".step-card")]
@@ -2167,6 +2221,15 @@ test("semantic identity stays stable from function hitbox through tooltip, API, 
   await page.goto("/?mockAuth=1");
   await submitCurrentComposer(page, "Audit repeated function identity.");
   await expect(page.getByRole("button", { name: /Identity functions/i })).toBeVisible();
+
+  const step = page.locator(".step-card").filter({ hasText: "Identity functions" });
+  await expect.poll(() => step.locator(".math-semantic-hitbox[data-target-kind='leaf']").evaluateAll((nodes) =>
+    nodes.filter((node) => (
+      node.getAttribute("data-token-latex") === "\\tan"
+      && node.getAttribute("data-geometry-valid") === "true"
+      && Boolean(node.getAttribute("data-semantic-id"))
+    )).length,
+  )).toBeGreaterThanOrEqual(2);
 
   const audit = await page.evaluate(() => {
     const step = [...document.querySelectorAll(".step-card")]
@@ -2278,6 +2341,13 @@ test("nested integral and signed exponent targets preserve semantic identity", a
   await page.goto("/?mockAuth=1");
   await submitCurrentComposer(page, "Inspect nested math selection.");
   await expect(page.getByRole("button", { name: /Canonical nested integral/i })).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  await expect.poll(() => page.evaluate(() => {
+    const scheduler = window.__OMNIMATH_GEOMETRY_SCHEDULER__;
+    return document.fonts.status === "loaded"
+      && scheduler?.pending === 0
+      && scheduler?.backgroundPending === 0;
+  })).toBe(true);
 
   const tokenBox = async (stepLabel, latex, role = null, occurrence = 0) => page.evaluate(({ stepLabel, latex, role, occurrence }) => {
     const step = [...document.querySelectorAll(".step-card")]
@@ -2309,6 +2379,15 @@ test("nested integral and signed exponent targets preserve semantic identity", a
     };
   }, { stepLabel, latex, role, occurrence });
 
+  const readyTokenBox = async (stepLabel, latex, role = null, occurrence = 0) => {
+    let box = null;
+    await expect.poll(async () => {
+      box = await tokenBox(stepLabel, latex, role, occurrence);
+      return box;
+    }).not.toBeNull();
+    return box;
+  };
+
   const hoverBox = async (box, expectedLatex) => {
     expect(box).not.toBeNull();
     const previousHoverCount = requests.filter((request) => request.endpoint === "hover").length;
@@ -2316,9 +2395,12 @@ test("nested integral and signed exponent targets preserve semantic identity", a
     await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
     await expect.poll(() => {
       const hoverRequests = requests.filter((request) => request.endpoint === "hover");
-      return hoverRequests.length > previousHoverCount ? hoverRequests.at(-1)?.body : null;
+      return hoverRequests.slice(previousHoverCount)
+        .find((request) => request.body?.semanticId === box.semanticId)?.body || null;
     }).not.toBeNull();
-    const body = requests.filter((request) => request.endpoint === "hover").at(-1)?.body;
+    const body = requests.filter((request) => request.endpoint === "hover")
+      .slice(previousHoverCount)
+      .find((request) => request.body?.semanticId === box.semanticId)?.body;
     expect(body.selectedLatex).toBe(expectedLatex);
     expect(body.semanticId).toBe(box.semanticId);
     expect(body.targetId).toBe(box.semanticId);
@@ -2338,7 +2420,7 @@ test("nested integral and signed exponent targets preserve semantic identity", a
     ["2", "exponent", 1],
   ];
   for (const [latex, role, occurrence] of integralChecks) {
-    const box = await tokenBox("Canonical nested integral", latex, role, occurrence);
+    const box = await readyTokenBox("Canonical nested integral", latex, role, occurrence);
     expect(box).not.toBeNull();
     expect(box.width).toBeGreaterThan(0);
     expect(box.height).toBeGreaterThan(0);
@@ -2346,11 +2428,12 @@ test("nested integral and signed exponent targets preserve semantic identity", a
     expect(box.sourceRange).toMatch(/^\d+:\d+$/);
   }
 
-  const signedOne = await tokenBox("Signed exponent product", "-1", "constant", 0);
-  const fractionSec = await tokenBox("Signed exponent product", "\\sec", "functionName", 1);
+  let signedOne = await readyTokenBox("Signed exponent product", "-1", "constant", 0);
+  const fractionSec = await readyTokenBox("Signed exponent product", "\\sec", "functionName", 1);
   expect(signedOne).not.toBeNull();
   expect(fractionSec).not.toBeNull();
   expect(signedOne.semanticId).not.toBe(fractionSec.semanticId);
+  signedOne = await readyTokenBox("Signed exponent product", "-1", "constant", 0);
   const hoverBody = await hoverBox(signedOne, "-1");
   expect(hoverBody.selectedLatex).not.toContain("\\frac");
   await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-semantic-id", signedOne.semanticId);
@@ -2373,7 +2456,7 @@ test("nested integral and signed exponent targets preserve semantic identity", a
     ["+", "operator", 0],
     ["31451545", "rightSide", 0],
   ]) {
-    const box = await tokenBox("Polynomial compatibility", latex, role, occurrence);
+    const box = await readyTokenBox("Polynomial compatibility", latex, role, occurrence);
     await hoverBox(box, latex);
   }
 });
@@ -3087,6 +3170,13 @@ test("complex improper integral semantic hover regression", async ({ page }) => 
   await page.goto("/?mockAuth=1");
   await submitCurrentComposer(page, "Investigate complex improper integral hover behavior.");
   await expect(page.getByRole("button", { name: /Step 1 tangent substitution/i })).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  await expect.poll(() => page.evaluate(() => {
+    const chunks = [...document.querySelectorAll(".step-card [data-math-chunk-owner]")];
+    return chunks.length > 0 && chunks.every((chunk) => (
+      chunk.querySelector(".math-semantic-hitbox[data-geometry-valid='true']")
+    ));
+  })).toBe(true);
 
   const findTargetBox = async ({ stepLabel, latex = null, role = null, kind = null, occurrence = 0, contains = false }) => page.evaluate((options) => {
     const step = [...document.querySelectorAll(".step-card")]
@@ -4590,10 +4680,19 @@ test("long vector-field equations scroll inside math containers without page ove
 
   await expect(page.getByRole("button", { name: /Apply Stokes['’] theorem/i })).toBeVisible();
   await expect(page.getByRole("button", { name: /Final answer/i })).toBeVisible();
-  await expect(page.locator(".step-card")).toHaveCount(4);
+  // Formatting-only comparison must preserve both supplied result forms rather
+  // than silently assume the trigonometric denominator equals 10.
+  await expect(page.locator(".step-card[data-step-id^='long-step-']")).toHaveCount(4);
+  await expect(page.locator(".step-card")).toHaveCount(5);
+  const declaredResult = page.locator(".step-card[data-step-id='omni-final-result-summary']");
+  await expect(declaredResult).toContainText("Final Answer");
+  await expect(declaredResult.locator(".katex-mathml annotation").first()).toContainText("}{10}");
+  await expect.poll(async () => (await page.locator(".step-card[data-step-id='long-step-4'] .katex-mathml annotation").allTextContents()).join(" "))
+    .toContain("1+9\\cos^2(t)+9\\sin^2(t)");
+  await expect(page.getByRole("heading", { level: 2, name: /Stokes/i })).toHaveCount(1);
   const summaryCard = page.locator(".omni-problem-summary-card");
   await expect(summaryCard).toBeVisible();
-  await expect(summaryCard).toContainText(/Stokes/i);
+  await expect(summaryCard).not.toContainText(/Stokes/i);
   await expect(summaryCard).not.toContainText(/y\^2z\+e\^\{x\^2\}\\sin\(yz\)/);
 
   const collapsedPreview = await summaryCard.evaluate((node) => {
@@ -4685,7 +4784,8 @@ test("long vector-field equations scroll inside math containers without page ove
   expect(layout.minMathFontSize).toBeGreaterThanOrEqual(20);
   expect(layout.stepRects.every((rect) => rect.width > 0 && rect.height >= 104 && rect.height <= 420)).toBe(true);
   expect(layout.finalAnswer?.visible).toBe(true);
-  expect(`${layout.finalAnswer?.boxShadow || ""} ${layout.finalAnswer?.background || ""}`).toMatch(/emerald|rgba|linear-gradient/i);
+  expect(layout.finalAnswer?.boxShadow || "").toMatch(/inset/i);
+  expect(`${layout.finalAnswer?.boxShadow || ""} ${layout.finalAnswer?.background || ""}`).not.toMatch(/emerald|linear-gradient/i);
   expect(layout.summaryCard?.width).toBeGreaterThanOrEqual(1000);
   expect(layout.summaryCard?.height).toBeGreaterThan(240);
   expect(layout.summaryCard?.escapesViewport).toBe(false);
@@ -4823,6 +4923,116 @@ test("bare trig applications keep command boundaries through client annotation a
   expect(renderedLatex).toContain("\\sin t");
   expect(renderedLatex).toContain("\\tan t");
   expect(renderedLatex).not.toMatch(/\\(?:sint|tant)\b/u);
+});
+
+test("sidebar reflow remeasures complex semantic hover geometry without changing identity", async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 900 });
+  const hoverRequests = [];
+  await installLongLatexApiFixtures(page);
+  await page.unroute("**/api/explain-token");
+  await page.route("**/api/explain-token", async (route) => {
+    const body = route.request().postDataJSON();
+    hoverRequests.push(body);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(createLazyExplanationResponse()),
+    });
+  });
+
+  await page.goto("/?mockAuth=1");
+  await submitCurrentComposer(page, LONG_STOKES_PROBLEM);
+  const step = page.locator(".step-card", { has: page.getByRole("button", { name: /Substitute parametric variables/i }) });
+  await expect(step).toBeVisible();
+  const workspace = page.locator("[data-math-workspace]");
+  const sidebar = page.getByTestId("session-sidebar");
+  const collapse = page.getByTestId("sidebar-collapse");
+  const expand = page.getByTestId("sidebar-expand");
+  const mathScroller = step.locator(".math-render-shell-block").first();
+  await expect.poll(() => mathScroller.evaluate((node) => node.scrollWidth > node.clientWidth + 20)).toBe(true);
+
+  const target = step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\cos']").first();
+  await expect(target).toBeVisible();
+  const semanticId = await target.getAttribute("data-semantic-id");
+  expect(semanticId).toBeTruthy();
+
+  const assertFreshHover = async () => {
+    const currentTarget = step.locator(`[data-inspectable='math-subtoken'][data-semantic-id="${semanticId}"]`).first();
+    await expect(currentTarget).toBeVisible();
+    const box = await currentTarget.boundingBox();
+    expect(box).not.toBeNull();
+    await moveSemanticPointer(page, box.x + box.width / 2, box.y + box.height / 2);
+    await expect(page.locator(".omni-quick-tooltip")).toBeVisible();
+    await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", semanticId);
+    await expect.poll(() => hoverRequests.at(-1)?.semanticId).toBe(semanticId);
+    return {
+      box,
+      revision: Number(await currentTarget.getAttribute("data-measurement-revision")),
+    };
+  };
+
+  const expandedWorkspaceWidth = await workspace.evaluate((node) => node.getBoundingClientRect().width);
+  await expect(sidebar).toHaveAttribute("data-sidebar-state", "expanded");
+  let previousMeasurementRevision = (await assertFreshHover()).revision;
+
+  await collapse.click();
+  await expect(sidebar).toHaveAttribute("data-sidebar-state", "collapsed");
+  await expect(expand).toBeVisible();
+  await expect.poll(() => workspace.evaluate((node) => node.getBoundingClientRect().width))
+    .toBeGreaterThan(expandedWorkspaceWidth + 100);
+  await expect(page.locator(".omni-quick-tooltip")).toHaveCount(0);
+  const collapsedMeasurement = await assertFreshHover();
+  expect(collapsedMeasurement.revision).toBeGreaterThan(previousMeasurementRevision);
+  previousMeasurementRevision = collapsedMeasurement.revision;
+
+  // Exercise the right side of a nested, horizontally scrollable expression after reflow.
+  const maxScroll = await mathScroller.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth;
+    node.dispatchEvent(new Event("scroll"));
+    return node.scrollLeft;
+  });
+  expect(maxScroll).toBeGreaterThan(10);
+  const rightTarget = step.locator("[data-inspectable='math-subtoken'][data-token-latex='\\\\arctan']").first();
+  await expect(rightTarget).toBeVisible();
+  const rightId = await rightTarget.getAttribute("data-semantic-id");
+  const rightBox = await rightTarget.boundingBox();
+  expect(rightBox).not.toBeNull();
+  await moveSemanticPointer(page, rightBox.x + rightBox.width / 2, rightBox.y + rightBox.height / 2);
+  await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", rightId);
+
+  let collapsedWorkspaceWidth = null;
+  for (const state of ["expanded", "collapsed", "expanded"]) {
+    if (state === "expanded") await expand.click();
+    else await collapse.click();
+    await expect(sidebar).toHaveAttribute("data-sidebar-state", state);
+    if (state === "expanded") {
+      await expect.poll(() => workspace.evaluate((node) => node.getBoundingClientRect().width))
+        .toBe(expandedWorkspaceWidth);
+    } else if (collapsedWorkspaceWidth === null) {
+      await expect.poll(() => workspace.evaluate((node) => node.getBoundingClientRect().width))
+        .toBeGreaterThan(expandedWorkspaceWidth + 100);
+      collapsedWorkspaceWidth = await workspace.evaluate((node) => node.getBoundingClientRect().width);
+    } else {
+      await expect.poll(() => workspace.evaluate((node) => node.getBoundingClientRect().width))
+        .toBe(collapsedWorkspaceWidth);
+    }
+    const measurement = await assertFreshHover();
+    expect(measurement.revision).toBeGreaterThan(previousMeasurementRevision);
+    previousMeasurementRevision = measurement.revision;
+  }
+
+  await collapse.click();
+  await expect(sidebar).toHaveAttribute("data-sidebar-state", "collapsed");
+  await page.reload();
+  await expect(page.getByTestId("sidebar-expand")).toBeVisible();
+  await submitCurrentComposer(page, LONG_STOKES_PROBLEM);
+  const reloadedStep = page.locator(".step-card", { has: page.getByRole("button", { name: /Substitute parametric variables/i }) });
+  const reloadedTarget = reloadedStep.locator(`[data-inspectable='math-subtoken'][data-semantic-id="${semanticId}"]`).first();
+  await expect(reloadedTarget).toBeVisible();
+  const reloadBox = await reloadedTarget.boundingBox();
+  expect(reloadBox).not.toBeNull();
+  await moveSemanticPointer(page, reloadBox.x + reloadBox.width / 2, reloadBox.y + reloadBox.height / 2);
+  await expect(page.locator(".omni-quick-tooltip")).toHaveAttribute("data-tooltip-semantic-id", semanticId);
 });
 
 test("semantic hitboxes remain interactive across internal horizontal scrolling", async ({ page }) => {
@@ -5077,6 +5287,17 @@ test("low-confidence image review can continue with canonical extracted text", a
 
   let solveRequestBody = null;
   await page.route("**/api/extract-image-problem", async (route) => {
+    const multipart = route.request().postDataBuffer().toString("utf8");
+    const field = (name) => multipart.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r\\n]+)`))?.[1] || "";
+    const ingestion = {
+      ingestionRequestId: field("ingestionRequestId"),
+      uploadId: field("uploadId"),
+      ingestionScopeId: field("ingestionScopeId"),
+      uploadRevision: Number(field("uploadRevision")),
+      extractionId: "layout-low-confidence-extraction",
+      state: "review_required",
+      imageHash: "layout-low-confidence-image",
+    };
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -5122,6 +5343,15 @@ test("low-confidence image review can continue with canonical extracted text", a
             renderIssue: "KaTeX parse error",
           },
         ],
+        ingestion,
+        extractionReceipt: "layout-low-confidence-receipt",
+        imageSource: { imageHash: ingestion.imageHash },
+        ocrSolveDecision: {
+          solveDecision: "direct",
+          reviewRequired: true,
+          allowed: false,
+          reason: "ocr-structural-review-required",
+        },
         usage: { kind: "image", remaining: 998, limit: 999 },
       }),
     });
@@ -5152,7 +5382,7 @@ test("low-confidence image review can continue with canonical extracted text", a
   await expect(page.getByRole("button", { name: /Analyze with AI/i })).toBeEnabled();
   await page.getByRole("button", { name: /Analyze with AI/i }).click();
 
-  await expect(page.getByText(/Review the extracted text/i)).toBeVisible();
+  await expect(page.getByText(/Review required\. Confirm or correct the extracted text before solving/i)).toBeVisible();
   await expect(page.getByText(/Math 50% · low/i)).toBeVisible();
   const continueButton = page.getByRole("button", { name: /Continue with reviewed text/i });
   await expect(continueButton).toBeVisible();

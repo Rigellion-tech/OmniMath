@@ -1,0 +1,267 @@
+.omni-workspace-shell {
+  --omni-composer-height: 3rem;
+  --omni-toolbar-height: 3.25rem;
+  --omni-workspace-left: 0px;
+  --omni-workspace-width: 100vw;
+  position: relative;
+}
+
+.omni-workspace-canvas[data-lens-canvas] {
+  min-height: calc(100dvh - var(--omni-toolbar-height));
+  padding-bottom: calc(var(--omni-composer-height) + 2.5rem);
+}
+
+.omni-composer-dock {
+  position: fixed;
+  z-index: 38;
+  top: calc(100dvh - var(--omni-composer-height) - 1rem);
+  left: var(--omni-workspace-left);
+  width: var(--omni-workspace-width);
+  padding-inline: clamp(1rem, 3vw, 2.5rem);
+  pointer-events: none;
+  transition: top 320ms cubic-bezier(.2, .8, .2, 1), left 220ms ease, width 220ms ease;
+}
+
+[data-math-workspace][data-workspace-state="empty"] .omni-composer-dock {
+  top: max(
+    calc(var(--omni-toolbar-height) + 2rem),
+    calc(50dvh - (var(--omni-composer-height) / 2))
+  );
+}
+
+.omni-composer-dock-inner {
+  width: min(100%, 52rem);
+  margin-inline: auto;
+  pointer-events: auto;
+}
+
+.omni-primary-composer > [hidden],
+.omni-composer-workspace[hidden] {
+  display: none !important;
+}
+
+.omni-workspace-conversation {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.omni-workspace-conversation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .85rem 1rem .65rem;
+  border-bottom: 1px solid var(--omni-border-subtle);
+}
+
+.omni-workspace-conversation-heading p {
+  color: var(--omni-text-primary);
+  font-size: .875rem;
+  font-weight: 650;
+}
+
+.omni-workspace-conversation-heading span {
+  color: var(--omni-text-muted);
+  font-size: .72rem;
+}
+
+.omni-workspace-conversation .omni-scoped-conversation {
+  display: grid;
+  gap: .5rem;
+  padding: 0 0 .5rem;
+  border: 0;
+}
+
+.omni-workspace-conversation .omni-conversation-actions {
+  display: flex;
+  gap: .4rem;
+  overflow-x: auto;
+  padding-bottom: .15rem;
+  scrollbar-width: thin;
+}
+
+.omni-workspace-conversation .omni-conversation-actions button {
+  flex: 0 0 auto;
+  min-height: 1.9rem;
+  border: 1px solid var(--omni-border-subtle);
+  border-radius: .55rem;
+  padding: .25rem .6rem;
+  color: var(--omni-text-secondary);
+  background: var(--omni-bg-primary);
+  font-size: .7rem;
+  font-weight: 600;
+}
+
+.omni-workspace-conversation .omni-conversation-actions button:hover:not(:disabled) {
+  border-color: var(--omni-border-strong);
+  color: var(--omni-text-primary);
+}
+
+.omni-workspace-conversation .omni-conversation-messages:empty {
+  display: none;
+}
+
+.omni-workspace-conversation .omni-conversation-messages {
+  display: grid;
+  max-height: min(20rem, 35dvh);
+  gap: .65rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.omni-workspace-conversation .omni-conversation-turn {
+  max-width: min(88%, 48rem);
+  border-radius: .85rem;
+  padding: .65rem .8rem;
+  color: var(--omni-text-primary);
+  font-size: .85rem;
+  line-height: 1.55;
+}
+
+.omni-workspace-conversation .omni-conversation-turn.is-user {
+  justify-self: end;
+  background: rgba(var(--omni-accent-rgb), .12);
+}
+
+.omni-workspace-conversation .omni-conversation-turn.is-assistant {
+  justify-self: start;
+  background: var(--omni-bg-secondary);
+}
+
+.omni-workspace-conversation .omni-conversation-status,
+.omni-workspace-conversation .omni-conversation-error {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  color: var(--omni-text-muted);
+  font-size: .72rem;
+}
+
+.omni-workspace-conversation .omni-conversation-error {
+  color: var(--omni-danger, #b42318);
+}
+
+.omni-workspace-conversation .omni-scoped-conversation > form {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: .5rem;
+  align-items: center;
+  border: 1px solid var(--omni-border-subtle);
+  border-radius: 1rem;
+  background: var(--bg-control);
+  padding: .45rem;
+  box-shadow: 0 2px 12px rgba(0,0,0,.14);
+}
+
+.omni-workspace-conversation .omni-scoped-conversation > form input {
+  min-width: 0;
+  min-height: 2.5rem;
+  border: 0;
+  border-radius: .7rem;
+  background: var(--omni-bg-primary);
+  padding: .55rem .75rem;
+  color: var(--omni-text-primary);
+  outline: none;
+}
+
+.omni-composer-stack { display: grid; gap: .5rem; }
+.omni-primary-session { display: contents; }
+.omni-primary-session[hidden] { display: none; }
+.omni-primary-composer.is-solved-collapsed { display: none; }
+.omni-empty-greeting { text-align: center; padding: 0 1rem 1.65rem; color: var(--omni-text-primary); }
+.omni-empty-greeting > svg { margin: 0 auto .85rem; color: rgb(var(--omni-accent-rgb)); }
+.omni-empty-greeting h2 { font-size: clamp(1.55rem, 3vw, 2.15rem); font-weight: 600; letter-spacing: -.035em; line-height: 1.15; }
+.omni-empty-greeting p { margin-top: .4rem; color: var(--omni-text-muted); font-size: .9rem; }
+.omni-primary-composer.is-collapsed:has(.omni-compact-entry) { min-height: 9.5rem; height: auto; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto; border-radius: 1.25rem; }
+.omni-primary-composer.is-collapsed:has(.omni-compact-entry) .omni-primary-session > :first-child { grid-column: 1 / -1; grid-row: 1; }
+.omni-primary-composer.is-collapsed:has(.omni-compact-entry) .omni-primary-upload { grid-column: 1; grid-row: 2; border: 0; padding: 0 .5rem .5rem .9rem; }
+.omni-primary-composer.is-collapsed:has(.omni-compact-entry) .omni-composer-actions { display: none; }
+.omni-compact-entry { display: grid; gap: .35rem; padding: 1rem 1rem .2rem; }
+.omni-compact-entry textarea { width: 100%; min-height: 4.75rem; resize: vertical; border: 0; background: transparent; color: var(--omni-text-primary); font-size: 1rem; line-height: 1.55; outline: none; }
+.omni-compact-entry textarea::placeholder { color: var(--omni-text-muted); }
+.omni-primary-composer.is-collapsed .omni-composer-actions { display: none; }
+.omni-compact-entry-tools { display: flex; justify-content: space-between; align-items: center; }
+.omni-compact-entry-tools button { display: inline-flex; align-items: center; gap: .4rem; min-height: 2rem; border-radius: .65rem; padding: .3rem .55rem; color: var(--omni-text-secondary); font-size: .75rem; }
+.omni-compact-entry-tools button:hover { background: var(--omni-bg-tertiary); }
+.omni-compact-entry-tools .omni-compact-send { background: rgb(var(--omni-accent-rgb)); color: #062d29; }
+.omni-compact-entry-tools .omni-compact-send:disabled { opacity: .35; }
+.omni-primary-upload > div > button { width: 2.3rem !important; min-width: 0 !important; min-height: 2.3rem !important; padding: .4rem !important; font-size: 0 !important; border-color: transparent !important; background: transparent !important; color: var(--omni-text-muted) !important; box-shadow: none !important; }
+.omni-primary-upload > div > button:hover { background: var(--omni-bg-tertiary) !important; color: var(--omni-text-primary) !important; }
+.omni-primary-upload > div > button svg { width: 1rem; height: 1rem; }
+.omni-primary-composer.is-image-task { min-height: 8.5rem; height: auto; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto; border-radius: 1.25rem; }
+.omni-primary-composer.is-image-task .omni-image-task-composer { grid-column: 1 / -1; grid-row: 1; }
+.omni-primary-composer.is-image-task .omni-primary-upload { grid-column: 2; grid-row: 2; border: 0; padding: 0 .7rem .55rem 0; }
+.omni-image-task-composer { display: grid; gap: .35rem; padding: .85rem 1rem .15rem; }
+.omni-image-task-label { display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: rgb(var(--omni-accent-rgb)); font-size: .72rem; font-weight: 650; }
+.omni-image-task-label > span { display: inline-flex; align-items: center; gap: .4rem; }
+.omni-image-task-label button { display: inline-flex; min-height: 1.9rem; min-width: 1.9rem; align-items: center; justify-content: center; border-radius: .55rem; color: var(--omni-text-muted); }
+.omni-image-task-label button:hover { background: var(--omni-bg-tertiary); color: var(--omni-text-primary); }
+.omni-image-task-composer textarea { width: 100%; min-height: 3.5rem; resize: vertical; border: 0; background: transparent; color: var(--omni-text-primary); font-size: .95rem; line-height: 1.5; outline: none; }
+.omni-image-task-composer textarea::placeholder { color: var(--omni-text-muted); }
+.omni-image-task-composer p { color: var(--omni-text-muted); font-size: .68rem; line-height: 1.35; }
+.omni-conversation-more { position: relative; }
+.omni-conversation-more summary { display: flex; align-items: center; justify-content: center; width: 2.4rem; min-height: 2.4rem; border-radius: .65rem; color: var(--omni-text-muted); cursor: pointer; list-style: none; }
+.omni-conversation-more summary::-webkit-details-marker { display: none; }
+.omni-conversation-more summary:hover { background: var(--omni-bg-tertiary); }
+.omni-conversation-more summary:focus-visible { outline: 2px solid rgb(var(--omni-accent-rgb) / .65); outline-offset: 2px; }
+.omni-conversation-more[open] .omni-conversation-actions { display: grid; position: absolute; left: 0; bottom: calc(100% + .7rem); z-index: 5; min-width: 12rem; max-height: 16rem; overflow-y: auto; gap: .15rem; padding: .4rem; border: 1px solid var(--omni-border-subtle); border-radius: .75rem; background: var(--omni-bg-primary); box-shadow: 0 12px 30px rgba(0,0,0,.24); }
+.omni-conversation-more .omni-conversation-actions button { display: block; width: 100%; min-height: 2rem; border: 0; background: transparent; text-align: left; }
+.omni-conversation-prose { display: grid; gap: .55rem; }
+.omni-conversation-prose p { white-space: pre-wrap; }
+.omni-conversation-prose h3 { font-weight: 650; color: var(--omni-text-primary); }
+.omni-conversation-prose :is(ul,ol) { padding-left: 1.3rem; }
+.omni-conversation-prose ul { list-style: disc; }
+.omni-conversation-prose ol { list-style: decimal; }
+.omni-conversation-prose strong { color: var(--omni-text-primary); font-weight: 650; }
+
+.omni-workspace-conversation .omni-scoped-conversation > form input:focus {
+  border-color: var(--omni-border-strong);
+  box-shadow: var(--omni-focus-ring);
+}
+
+.omni-workspace-conversation .omni-scoped-conversation > form button {
+  display: inline-flex;
+  width: 2.5rem;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: .7rem;
+  background: var(--omni-text-primary);
+  color: var(--omni-bg-primary);
+}
+
+@media (max-width: 640px) {
+  .omni-composer-dock {
+    top: calc(100dvh - var(--omni-composer-height) - .5rem);
+    padding-inline: .5rem;
+  }
+
+  [data-math-workspace][data-workspace-state="empty"] .omni-composer-dock {
+    top: max(
+      calc(var(--omni-toolbar-height) + 1rem),
+      calc(50dvh - (var(--omni-composer-height) / 2))
+    );
+  }
+
+  .omni-workspace-canvas[data-lens-canvas] {
+    padding-bottom: calc(var(--omni-composer-height) + 1.5rem);
+  }
+
+  .omni-workspace-conversation {
+    margin-top: 1rem;
+  }
+
+  .omni-workspace-conversation-heading,
+  .omni-workspace-conversation .omni-scoped-conversation {
+    padding-inline: .75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .omni-composer-dock {
+    transition: none;
+  }
+}

@@ -176,7 +176,7 @@ async function installSessionStore(page) {
 }
 
 function sessionButtons(page) {
-  return page.locator("aside .omni-scrollbar button");
+  return page.locator("aside .omni-scrollbar .group > button:not([aria-label])");
 }
 
 function renderedMath(page, latex) {
@@ -184,7 +184,7 @@ function renderedMath(page, latex) {
 }
 
 function renderedProblemText(page, text) {
-  return page.getByRole("main").getByText(text);
+  return page.getByRole("main").getByText(text, { exact: true });
 }
 
 function captureSessionDiagnostics(page) {
@@ -235,8 +235,8 @@ test("image OCR and solve stay bound to the originating session across switches"
   await uploadAndAnalyze(page);
   const extractRoute = await extractRoutePromise;
 
-  await page.getByRole("button", { name: /New session/i }).click();
-  await expect(page.getByText(OCR_TEXT)).toHaveCount(0);
+  await page.locator('button[title="New session"]').click();
+  await expect(renderedProblemText(page, OCR_TEXT)).toHaveCount(0);
   await expect(page.getByText(/Reading image|Solving reviewed problem|Explanation ready/i)).toHaveCount(0);
 
   await extractRoute.fulfill({
@@ -246,7 +246,7 @@ test("image OCR and solve stay bound to the originating session across switches"
   });
   const solveRoute = await solveRoutePromise;
 
-  await expect(page.getByText(OCR_TEXT)).toHaveCount(0);
+  await expect(renderedProblemText(page, OCR_TEXT)).toHaveCount(0);
   await expect(page.getByText(/Reading image|Solving reviewed problem|Explanation ready|Race solution/i)).toHaveCount(0);
 
   await sessionButtons(page).nth(1).click();
@@ -262,7 +262,7 @@ test("image OCR and solve stay bound to the originating session across switches"
   await expect(renderedMath(page, "x=1")).toBeVisible();
 
   await sessionButtons(page).nth(0).click();
-  await expect(page.getByText(OCR_TEXT)).toHaveCount(0);
+  await expect(renderedProblemText(page, OCR_TEXT)).toHaveCount(0);
   await expect(page.getByText(/Solving reviewed problem/i)).toHaveCount(0);
   await expect(renderedMath(page, "x=1")).toHaveCount(0);
 
@@ -307,7 +307,7 @@ test("image extraction failure applies only to the origin session while another 
   await page.goto("/?mockAuth=1");
   await uploadAndAnalyze(page, "failure-readable-math.png");
   const extractRoute = await extractRoutePromise;
-  await page.getByRole("button", { name: /New session/i }).click();
+  await page.locator('button[title="New session"]').click();
   await extractRoute.fulfill({
     status: 500,
     contentType: "application/json",
@@ -315,7 +315,7 @@ test("image extraction failure applies only to the origin session while another 
   });
 
   await expect(page.getByText(/Image analysis failed|Synthetic extraction failure/i)).toHaveCount(0);
-  await expect(page.getByText(OCR_TEXT)).toHaveCount(0);
+  await expect(renderedProblemText(page, OCR_TEXT)).toHaveCount(0);
   await sessionButtons(page).nth(1).click();
   await expect(page.getByText(/Image analysis failed/i)).toBeVisible();
   expect(extractCount).toBe(1);

@@ -18,7 +18,7 @@ const OPERATOR_COMMANDS = new Set([
   "cdot", "times", "otimes", "circ", "bullet", "nabla", "partial",
   "to", "mapsto", "Rightarrow", "leftarrow", "rightarrow", "leftrightarrow",
 ]);
-const PRESENTATION_COMMANDS = new Set(["mathbf", "mathrm", "mathit", "mathcal", "mathbb", "mathsf", "mathtt", "boldsymbol", "vec", "hat", "bar", "tilde", "overline"]);
+const PRESENTATION_COMMANDS = new Set(["mathbf", "mathrm", "mathit", "mathcal", "mathbb", "mathsf", "mathtt", "boldsymbol", "vec", "hat", "bar", "tilde", "dot", "ddot", "overline"]);
 const SPACING_COMMANDS = ["\\qquad", "\\quad", "\\,", "\\!", "\\:", "\\;"];
 const NUMBER_LITERAL_SOURCE = "-?\\d+(?:\\.\\d+)?";
 const NUMBER_LITERAL_PATTERN = new RegExp(`^${NUMBER_LITERAL_SOURCE}$`);
@@ -388,6 +388,39 @@ function readScriptsAfter(text = "", startIndex = 0) {
   return { scripts, endIndex: index };
 }
 
+// Consume the complete supported decoration sequence before product/function
+// splitting. Primes are TeX superscripts, but valid source commonly places
+// them after a subscript (`u_*''`) or before one (`u'_i`).
+function readDecorationsAfter(text = "", startIndex = 0) {
+  const decorations = [];
+  let index = startIndex;
+  while (index < text.length) {
+    if (text[index] === "_" || text[index] === "^") {
+      const script = readScriptAtom(text, index);
+      if (!script) break;
+      decorations.push({ ...script, kind: "script" });
+      index = script.endIndex;
+      continue;
+    }
+    if (text[index] === "'") {
+      const primeStart = index;
+      index = readPrimeSuffixEnd(text, index);
+      decorations.push({
+        kind: "prime",
+        marker: "'",
+        markerStart: primeStart,
+        start: primeStart,
+        end: index,
+        endIndex: index,
+        value: text.slice(primeStart, index),
+      });
+      continue;
+    }
+    break;
+  }
+  return { decorations, endIndex: index };
+}
+
 function readPrimeSuffixEnd(text = "", startIndex = 0) {
   let index = startIndex;
   while (text[index] === "'") index += 1;
@@ -423,17 +456,17 @@ function readAtomicFactorEnd(text = "", startIndex = 0) {
   if (endIndex < 0) {
     const command = source.slice(startIndex).match(/^\\[a-zA-Z]+/)?.[0];
     if (command && PRESENTATION_COMMANDS.has(command.slice(1))) {
-      const group = readDelimited(source, startIndex + command.length);
-      if (group) return group.end;
+      const argument = readRequiredArgument(source, startIndex + command.length);
+      if (argument) endIndex = argument.end;
     }
-    const number = source.slice(startIndex).match(new RegExp(`^${NUMBER_LITERAL_SOURCE}`))?.[0];
-    const symbol = source.slice(startIndex).match(/^[A-Za-z]/)?.[0];
-    endIndex = startIndex + (command || number || symbol || "").length;
+    if (endIndex < 0) {
+      const number = source.slice(startIndex).match(new RegExp(`^${NUMBER_LITERAL_SOURCE}`))?.[0];
+      const symbol = source.slice(startIndex).match(/^[A-Za-z]/)?.[0];
+      endIndex = startIndex + (command || number || symbol || "").length;
+    }
   }
   if (endIndex <= startIndex) return -1;
-  endIndex = readPrimeSuffixEnd(source, endIndex);
-  const scriptInfo = readScriptsAfter(source, endIndex);
-  return scriptInfo.endIndex;
+  return readDecorationsAfter(source, endIndex).endIndex;
 }
 
 function readAtomicBaseEnd(text = "", startIndex = 0) {
@@ -444,6 +477,10 @@ function readAtomicBaseEnd(text = "", startIndex = 0) {
   const delimited = readDelimited(source, startIndex);
   if (delimited) return delimited.end;
   const command = readControlSequence(source, startIndex);
+  if (command && PRESENTATION_COMMANDS.has(command.slice(1))) {
+    const argument = readRequiredArgument(source, startIndex + command.length);
+    if (argument) return argument.end;
+  }
   if (command && source[startIndex + command.length] === "{") {
     const argument = readGroup(source, startIndex + command.length);
     if (argument) return argument.end;
@@ -462,8 +499,8 @@ function trailingNameToken(text = "") {
 function readLeadingFunctionCall(text = "") {
   const name = readNameToken(text, 0);
   if (!name) return null;
-  const scriptInfo = readScriptsAfter(text, name.length);
-  const argument = readDelimited(text, scriptInfo.endIndex);
+  const decorationInfo = readDecorationsAfter(text, name.length);
+  const argument = readDelimited(text, decorationInfo.endIndex);
   if (!argument) return null;
   const bareName = nameTokenDisplayName(name);
   if (!isLikelyFunctionName(name)
@@ -474,7 +511,9 @@ function readLeadingFunctionCall(text = "") {
     name,
     nameStart: 0,
     nameEnd: name.length,
-    scripts: scriptInfo.scripts,
+    decorations: decorationInfo.decorations,
+    scripts: decorationInfo.decorations.filter((item) => item.kind === "script"),
+    headEnd: decorationInfo.endIndex,
     argument,
     end: argument.end,
   };
@@ -928,7 +967,7 @@ function hasBalancedGroups(text = "") {
 function createBuilder(stepId, displayLatex) {
   const nodes = new Map();
   const idCounts = new Map();
-  const createNode = ({ type, role, latex, parentId = null, childIds = [], depth = 0, start = null, end = null }) => {
+  const createNode = ({ type, role, latex, parentId = null, childIds = [], depth = 0, start = null, end = null, decoratedCall = false }) => {
     const suffix = cleanIdPart(latex || role || type || "node");
     const rangeSuffix = Number.isFinite(start) && Number.isFinite(end) ? `${start}-${end}` : `${depth}`;
     const idBase = `${stepId}.${role || type}.${suffix}.${rangeSuffix}`;
@@ -947,6 +986,7 @@ function createBuilder(stepId, displayLatex) {
       normalizedSource: String(latex || ""),
       parentId,
       childIds,
+      decoratedCall: Boolean(decoratedCall),
       depth,
       leafStart: null,
       leafEnd: null,
@@ -1248,8 +1288,11 @@ function parseScriptedExpression(builder, text, parentId, depth, start, role) {
 
   const baseEnd = readAtomicBaseEnd(text, 0);
   if (baseEnd <= 0 || baseEnd >= text.length) return null;
-  const scriptInfo = readScriptsAfter(text, baseEnd);
-  if (scriptInfo.scripts.length === 1 && scriptInfo.scripts[0].marker === "_" && scriptInfo.endIndex === text.length) {
+  const decorationInfo = readDecorationsAfter(text, baseEnd);
+  if (decorationInfo.decorations.length === 1
+    && decorationInfo.decorations[0].kind === "script"
+    && decorationInfo.decorations[0].marker === "_"
+    && decorationInfo.endIndex === text.length) {
     return builder.createNode({
       type: "subscript",
       role: role === "expression" ? "variable" : role,
@@ -1260,6 +1303,59 @@ function parseScriptedExpression(builder, text, parentId, depth, start, role) {
       end: start + text.length,
     });
   }
+  // Prime-only atoms are already a safe, exact leaf in KaTeX. Keep that
+  // established occurrence shape; an envelope is needed when primes compose
+  // with scripts and the source otherwise splits into unrelated factors.
+  if (decorationInfo.decorations.length > 0
+    && decorationInfo.decorations.every((item) => item.kind === "prime")
+    && decorationInfo.endIndex === text.length) return null;
+  if (decorationInfo.decorations.length > 0 && decorationInfo.endIndex === text.length) {
+    const node = builder.createNode({
+      type: "decoratedAtom",
+      role: role === "expression" || role === "term" || role === "factor" ? "decorated" : role,
+      latex: text,
+      parentId,
+      depth,
+      start,
+      end: start + text.length,
+    });
+    const base = parseExpression(builder, text.slice(0, baseEnd), node.id, depth + 1, start, "base");
+    const childIds = [base?.id];
+    for (const decoration of decorationInfo.decorations) {
+      if (decoration.kind === "prime") {
+        childIds.push(builder.createNode({
+          type: "decorator",
+          role: "prime",
+          latex: decoration.value,
+          parentId: node.id,
+          depth: depth + 1,
+          start: start + decoration.start,
+          end: start + decoration.end,
+        }).id);
+        continue;
+      }
+      const scriptRole = decoration.marker === "^" ? "exponent" : "subscript";
+      childIds.push(builder.createNode({
+        type: "operator",
+        role: "operator",
+        latex: decoration.marker,
+        parentId: node.id,
+        depth: depth + 1,
+        start: start + decoration.markerStart,
+        end: start + decoration.markerStart + 1,
+      }).id);
+      childIds.push(parseExpression(
+        builder,
+        decoration.value,
+        node.id,
+        depth + 1,
+        start + decoration.start,
+        scriptRole
+      )?.id);
+    }
+    node.childIds = childIds.filter(Boolean);
+    return node;
+  }
   return null;
 }
 
@@ -1267,7 +1363,7 @@ function parseCommandApplication(builder, text, parentId, depth, start, role) {
   const command = readControlSequence(text, 0);
   if (!command) return null;
   const argument = readRequiredArgument(text, command.length);
-  if (!argument?.grouped || argument.end !== text.length) return null;
+  if (!argument || argument.end !== text.length) return null;
   try {
     const parsed = KATEX_INTERNAL.__parse(text, { strict: "ignore", throwOnError: true });
     if (parsed.length !== 1 || parsed[0]?.type !== "accent") return null;
@@ -1682,7 +1778,7 @@ function parseGenericFunctionCall(builder, text, parentId, depth, start, role) {
     return node;
   }
   const node = builder.createNode({ type: "functionCall", role: role === "expression" || role === "term" || role === "factor" ? "function" : role, latex: text, parentId, depth, start, end: start + text.length });
-  const childIds = [builder.createNode({
+  const functionName = builder.createNode({
     type: "function",
     role: "functionName",
     latex: call.name,
@@ -1690,20 +1786,54 @@ function parseGenericFunctionCall(builder, text, parentId, depth, start, role) {
     depth: depth + 1,
     start: start + call.nameStart,
     end: start + call.nameEnd,
-  }).id];
-  for (const script of call.scripts) {
+  });
+  const headDecorations = call.decorations || call.scripts || [];
+  const decoratedHead = headDecorations.length > 0 ? builder.createNode({
+    type: "decoratedAtom",
+    role: "decorated",
+    latex: text.slice(call.nameStart, call.headEnd),
+    parentId: node.id,
+    depth: depth + 1,
+    start: start + call.nameStart,
+    end: start + call.headEnd,
+  }) : null;
+  node.decoratedCall = Boolean(decoratedHead);
+  if (decoratedHead) functionName.parentId = decoratedHead.id;
+  const headChildIds = [functionName.id];
+  for (const script of headDecorations) {
+    if (script.kind === "prime") {
+      headChildIds.push(builder.createNode({
+        type: "decorator",
+        role: "prime",
+        latex: script.value,
+        parentId: decoratedHead?.id || node.id,
+        depth: depth + (decoratedHead ? 2 : 1),
+        start: start + script.start,
+        end: start + script.end,
+      }).id);
+      continue;
+    }
     const scriptRole = script.marker === "^" ? "exponent" : "subscript";
-    childIds.push(builder.createNode({
+    headChildIds.push(builder.createNode({
       type: "operator",
       role: "operator",
       latex: script.marker,
-      parentId: node.id,
-      depth: depth + 1,
+      parentId: decoratedHead?.id || node.id,
+      depth: depth + (decoratedHead ? 2 : 1),
       start: start + script.markerStart,
       end: start + script.markerStart + 1,
     }).id);
-    childIds.push(parseExpression(builder, script.value, node.id, depth + 1, start + script.start, scriptRole)?.id);
+    headChildIds.push(parseExpression(
+      builder,
+      script.value,
+      decoratedHead?.id || node.id,
+      depth + (decoratedHead ? 2 : 1),
+      start + script.start,
+      scriptRole
+    )?.id);
   }
+  if (decoratedHead) decoratedHead.childIds = headChildIds.filter(Boolean);
+  const childIds = decoratedHead ? [decoratedHead.id] : headChildIds;
   const open = text[call.argument.start];
   const close = text[call.argument.end - 1];
   childIds.push(builder.createNode({ type: "operator", role: "delimiter", latex: open, parentId: node.id, depth: depth + 1, start: start + call.argument.start, end: start + call.argument.start + 1 }).id);
@@ -2210,6 +2340,7 @@ export function semanticNodeToToken(node, tree) {
     deep: node.deep,
     parentId: node.parentId,
     childIds: node.childIds || [],
+    decoratedCall: Boolean(node.decoratedCall),
     depth: node.depth,
     order: node.order,
     leafStart: node.leafStart,

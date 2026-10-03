@@ -125,6 +125,42 @@ function payloadHasAssistantAnswer(payload) {
   ));
 }
 
+function expectPersistedPinGeometrySanitized(payload) {
+  const transientWindowKeys = [
+    "anchor",
+    "anchorRect",
+    "selectionRect",
+    "dragStartPoint",
+    "dragCurrentPoint",
+    "transientSpawnPosition",
+  ];
+  const transientSelectionKeys = [
+    "rect",
+    "rects",
+    "anchorRect",
+    "selectionRect",
+    "dragStartPoint",
+    "dragCurrentPoint",
+    "transientSpawnPosition",
+  ];
+  for (const item of payload?.pinnedWindows || []) {
+    for (const key of transientWindowKeys) expect(Object.hasOwn(item, key)).toBe(false);
+    for (const token of item.selectedTokens || []) {
+      for (const key of ["rect", "rects", "anchorRect", "selectionRect", "visualSelectionKey"]) {
+        expect(Object.hasOwn(token, key)).toBe(false);
+      }
+    }
+    for (const selection of [
+      item.semanticSelection,
+      item.selectedSemanticRange,
+      item.context?.semanticSelection,
+      item.context?.selectedSemanticRange,
+    ].filter(Boolean)) {
+      for (const key of transientSelectionKeys) expect(Object.hasOwn(selection, key)).toBe(false);
+    }
+  }
+}
+
 async function contextClickSemanticPointer(page, x, y) {
   await page.evaluate(({ x: clientX, y: clientY }) => {
     const contains = (rect) => clientX >= rect.left && clientX <= rect.right
@@ -163,6 +199,7 @@ async function solveAndPinAdjugateTwenty(page) {
 }
 
 async function submitFollowup(page, floatingWindow) {
+  await floatingWindow.getByRole("button", { name: "Ask follow-up" }).click();
   const input = floatingWindow.getByPlaceholder("Ask about this");
   await input.fill(FOLLOWUP_QUESTION);
   await input.press("Enter");
@@ -213,6 +250,7 @@ for (const failure of [
         return;
       }
       const payload = request.postDataJSON()?.session || {};
+      expectPersistedPinGeometrySanitized(payload);
       if (payloadHasAssistantAnswer(payload)) {
         failedChatSaveMethod = request.method();
         failedChatRequestId = payload.pinnedWindows
@@ -263,6 +301,7 @@ test("a successful follow-up remains visible when the delayed session list conne
         return;
       }
       const payload = request.postDataJSON()?.session || {};
+      expectPersistedPinGeometrySanitized(payload);
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(savedSessionResponse(payload)) });
     });
   });
@@ -296,6 +335,7 @@ test("a stale successful session save cannot overwrite a newer visible follow-up
         return;
       }
       const payload = request.postDataJSON()?.session || {};
+      expectPersistedPinGeometrySanitized(payload);
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(savedSessionResponse(payload)) });
     });
   });

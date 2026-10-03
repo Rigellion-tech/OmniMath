@@ -1,4 +1,4 @@
-import { getProblemLabel, getStatusStepText } from "./problemLabels.js";
+import { getConciseProblemTitle, getStatusStepText } from "./problemLabels.js";
 import { getGeneratedProblemStatus } from "./generationStatus.js";
 import { getSolutionSteps, withNormalizedSolutionSteps } from "./solutionSteps.js";
 
@@ -15,7 +15,7 @@ function stripDemoFields(problem) {
 }
 
 function titleFromProblem(problem, fallback = "Math Problem") {
-  return getProblemLabel(problem, fallback);
+  return getConciseProblemTitle(problem, fallback);
 }
 
 function canonicalProblemKey(problem = {}) {
@@ -26,6 +26,9 @@ function canonicalProblemKey(problem = {}) {
 }
 
 function shouldReplaceExistingProblem(existing = {}, next = {}) {
+  if (existing.progressiveSolve?.attemptId && next.progressiveSolve?.attemptId) {
+    return existing.progressiveSolve.attemptId === next.progressiveSolve.attemptId;
+  }
   const existingKey = canonicalProblemKey(existing);
   const nextKey = canonicalProblemKey(next);
   return Boolean(existingKey && nextKey && existingKey === nextKey);
@@ -55,6 +58,7 @@ export function createGeneratedProblemState(normalizedData = {}) {
  *   activeSessionId?: string,
  *   requestSessionId?: string,
  *   problemData?: any,
+ *   strictTarget?: boolean,
  * }} options
  */
 export function commitGeneratedProblemToSessions({
@@ -62,13 +66,14 @@ export function commitGeneratedProblemToSessions({
   activeSessionId = "",
   requestSessionId = "",
   problemData = {},
+  strictTarget = false,
 } = {}) {
   const targetId = (
     requestSessionId && sessions.some((session) => session.id === requestSessionId)
       ? requestSessionId
-      : activeSessionId && sessions.some((session) => session.id === activeSessionId)
+      : !strictTarget && activeSessionId && sessions.some((session) => session.id === activeSessionId)
         ? activeSessionId
-        : sessions[0]?.id || ""
+        : !strictTarget ? sessions[0]?.id || "" : ""
   );
   const steps = getSolutionSteps(problemData);
 
@@ -106,6 +111,7 @@ export function commitGeneratedProblemToSessions({
   };
 }
 
+/** @param {{ problem?: string, problemText?: string, problemLatex?: string, canonicalProblem?: any, extraction?: any, solveDecision?: string, reviewAction?: any }} options */
 export function createPendingReviewedProblemState({
   problem = "",
   problemText = "",

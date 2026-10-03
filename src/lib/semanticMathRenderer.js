@@ -238,7 +238,9 @@ function shouldAnnotateNode(node = {}, source = "") {
   const range = numericRange(node.sourceRange || { start: node.start, end: node.end });
   if (!range || isHiddenSyntaxNode(node, source)) return false;
   if (isLeafNode(node)) return true;
-  return GROUP_ANNOTATION_ROLES.has(nodeRole(node)) || GROUP_ANNOTATION_ROLES.has(nodeType(node));
+  return Boolean(node.decoratedCall)
+    || GROUP_ANNOTATION_ROLES.has(nodeRole(node))
+    || GROUP_ANNOTATION_ROLES.has(nodeType(node));
 }
 
 function semanticKindForNode(node = {}) {

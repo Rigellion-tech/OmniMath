@@ -5,6 +5,7 @@ export const INITIAL_FOLLOWUP_STATE = {
   draft: "",
   activeRequest: null,
   failedQuestion: "",
+  status: "idle",
 };
 
 export const FOLLOWUP_REQUEST_STATES = new Set([
@@ -18,6 +19,8 @@ export const FOLLOWUP_REQUEST_STATES = new Set([
   "committed_to_ui",
   "rendered",
   "local_window_update_requested",
+  "streaming",
+  "timed_out",
 ]);
 
 export function recordFollowupLifecycle(state, details = {}, {
@@ -81,19 +84,28 @@ export function reduceFollowupLifecycle(state = INITIAL_FOLLOWUP_STATE, event = 
       if (!question) return state;
       return {
         ...state,
-        messages: [...state.messages, { role: "user", text: question }],
+        messages: [...state.messages, { role: "user", text: question, ...(event.preservePartial ? { requestId: event.request.requestId } : {}) }],
         loading: true,
         error: "",
         draft: "",
-        activeRequest: { ...event.request, question, baseMessages: state.messages },
+        activeRequest: { ...event.request, question, baseMessages: state.messages, preservePartial: Boolean(event.preservePartial) },
         failedQuestion: "",
+        status: "generating",
       };
+    }
+    case "response_delta": {
+      if (!isSameFollowupRequest(state.activeRequest, event.request)) return state;
+      const last = state.messages.at(-1);
+      const messages = last?.role === "assistant" && last.requestId === event.request.requestId
+        ? [...state.messages.slice(0, -1), { ...last, text: last.text + event.delta }]
+        : [...state.messages, { role: "assistant", text: event.delta, requestId: event.request.requestId, partial: true }];
+      return { ...state, messages, status: "streaming" };
     }
     case "request_succeeded":
       if (!isSameFollowupRequest(state.activeRequest, event.request) || event.ownsRequest === false) return state;
       return {
         ...state,
-        messages: [...state.messages, {
+        messages: [...(state.messages.at(-1)?.role === "assistant" && state.messages.at(-1)?.requestId === event.request.requestId ? state.messages.slice(0, -1) : state.messages), {
           role: "assistant",
           text: event.answer,
           requestId: event.request.requestId,
@@ -102,28 +114,31 @@ export function reduceFollowupLifecycle(state = INITIAL_FOLLOWUP_STATE, event = 
         error: "",
         activeRequest: null,
         failedQuestion: "",
+        status: "complete",
       };
     case "request_failed":
       if (!isSameFollowupRequest(state.activeRequest, event.request)) return state;
       return {
         ...state,
-        messages: state.activeRequest.baseMessages || [],
+        messages: state.activeRequest.preservePartial ? state.messages : state.activeRequest.baseMessages || [],
         loading: false,
         error: event.error || "Could not answer that follow-up.",
         draft: state.activeRequest.question || "",
         activeRequest: null,
         failedQuestion: state.activeRequest.question || "",
+        status: event.timedOut ? "timed_out" : "failed",
       };
     case "request_aborted":
       if (!isSameFollowupRequest(state.activeRequest, event.request)) return state;
       return {
         ...state,
-        messages: state.activeRequest.baseMessages || [],
+        messages: state.activeRequest.preservePartial ? state.messages : state.activeRequest.baseMessages || [],
         loading: false,
         error: "",
         draft: state.activeRequest.question || "",
         activeRequest: null,
         failedQuestion: state.activeRequest.question || "",
+        status: "aborted",
       };
     default:
       return state;

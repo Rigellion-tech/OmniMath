@@ -4,6 +4,12 @@ import { parseStatement, VERIFICATION_VERSION, verifyAstClaim } from "./mathVeri
 const MAX_FIELDS = 32;
 const inconclusive = (reason) => ({ state: "inconclusive", method: "claim_interpretation", reason });
 function parse(value) { try { return parseStatement(value); } catch { return null; } }
+const CONDITION_CUE = /\b(?:if|assuming|under|where|provided|subject to|positive|negative|nonzero|complex|real|branch|domain|except)\b|[<>≠≤≥]/iu;
+function hasCondition(value) {
+  if (Array.isArray(value)) return value.some(hasCondition);
+  if (value && typeof value === "object") return Object.values(value).some(hasCondition);
+  return typeof value === "string" && Boolean(value.trim());
+}
 
 /** Evidence refers to immutable source fields, never tokens or renderer geometry.
  * Prose, cross-step implications and completeness are deliberately not inferred.
@@ -13,6 +19,17 @@ export function verifySolution(result, { problem = "", problemText = problem, as
   const inputStatement = parse(problem);
   const original = inputStatement?.kind === "calculation_assignment" ? inputStatement.calculation : inputStatement;
   const options = { assumptions };
+  // OCR display text and provider-authored conditions can contain restrictions
+  // the scalar parser cannot interpret. Suppress contradictions in that case;
+  // neither source is silently converted into trusted assumptions.
+  const unparsedRestrictions = Boolean(
+    (problemText && problemText !== problem && CONDITION_CUE.test(problemText))
+    || hasCondition(result.assumptions) || hasCondition(result.conditions)
+    || hasCondition(result.domain) || hasCondition(result.restrictions)
+    || (result.steps || []).some((step) => [step.summary, step.explanation,
+      step.reasoning, step.description, step.conditions, step.assumptions]
+      .some((value) => typeof value === "string" ? CONDITION_CUE.test(value) : hasCondition(value))),
+  );
   const definitions = new Map();
   if (original?.kind === "function_definition") definitions.set(original.name, { ...original, fieldPath: "input" });
   const fields = (result.steps || []).map((step, index) => ({
@@ -51,6 +68,10 @@ export function verifySolution(result, { problem = "", problemText = problem, as
       // explicit universal-equivalence claim; numerical nonidentity is not failure.
       if (proof.state === "verified" || (!variables(statement.left).size && !variables(statement.right).size)) evidence = proof;
       else evidence = inconclusive("equation_may_be_constraint_not_universal_identity");
+    }
+    if (["verified", "contradicted"].includes(evidence.state) && unparsedRestrictions) {
+      evidence = { state: "inconclusive", method: "assumption_check",
+        reason: "unparsed_display_or_candidate_restrictions" };
     }
     checks.push({ id: `math-check-${checks.length + 1}`, ...field, kind, assumptions, ...evidence });
   }

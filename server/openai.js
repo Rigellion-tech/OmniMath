@@ -23,8 +23,10 @@ import { sanitizeStringValues } from "../src/lib/textSanitization.js";
 import { assertSolveCandidateStructure, inspectSolveCandidateStructure } from "./solveCandidateStructure.js";
 import { inspectLatexControlCharacterStage } from "./latexControlCharacterRecovery.js";
 import { logBackendReasoningLatexStage } from "./reasoningLatexDiagnostics.js";
+import { createSolveBudget, createSolveTimeoutError } from "./solveBudget.js";
 import {
   buildResponsesModelParameters,
+  DEFAULT_CANONICAL_SOLVE_TIMEOUT_MS,
   estimateModelCostUsd,
   getOpenAiModelForPath,
   getOpenAiModelResolutions,
@@ -32,6 +34,7 @@ import {
   getOpenAiSamplingForPath,
   getOpenAiTimeoutPolicy,
   logOpenAiModelSelection,
+  resolveImageExtractionOutputTokenBudget,
   resolveOpenAiRequestTimeout,
   selectOpenAiModel,
 } from "./openaiModels.js";
@@ -40,13 +43,26 @@ loadEnvFiles();
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_RESPONSES_HOSTNAME = new URL(OPENAI_RESPONSES_URL).hostname;
+
+function getStreamingResponsesUrl() {
+  const override = process.env.OPENAI_RESPONSES_URL;
+  if (!override || process.env.NODE_ENV === "production") return OPENAI_RESPONSES_URL;
+  let parsed;
+  try { parsed = new URL(override); }
+  catch { throw new Error("OPENAI_RESPONSES_URL must be a valid local URL."); }
+  if (!(["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)
+    && ["http:", "https:"].includes(parsed.protocol)
+    && !parsed.username && !parsed.password)) {
+    throw new Error("OPENAI_RESPONSES_URL must target local loopback outside production.");
+  }
+  return parsed.href;
+}
 const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 const DEFAULT_SOLVE_MAX_OUTPUT_TOKENS = 6500;
 const DEFAULT_LAZY_MAX_OUTPUT_TOKENS = 700;
-const DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1700;
 const DEFAULT_OPENAI_RETRY_BASE_DELAY_MS = 500;
-const DEFAULT_SOLVE_TOTAL_TIMEOUT_MS = 75000;
+const MIN_IMAGE_EXTRACTION_COMPACT_RETRY_MS = 5000;
 const DEFAULT_SOLVE_OUTPUT_BUDGETS = Object.freeze({
   solver: Object.freeze({ full: 6500, compact: 3200 }),
   repair: Object.freeze({ full: 16000, compact: 8000 }),
@@ -217,6 +233,7 @@ function tagUsageWithModel(usage = null, model = "") {
     _omni_model_usage: [
       {
         model,
+        accountingModel: model,
         input_tokens: normalized.inputTokens,
         output_tokens: normalized.outputTokens,
         total_tokens: normalized.totalTokens,
@@ -229,6 +246,11 @@ function tagUsageWithModel(usage = null, model = "") {
 }
 
 function providerCallCountFromError(error) {
+  const dispatchedAttempts = error?._omniOpenAiDiagnostics?.providerAttempts
+    || error?.openAiTransportDiagnostics?.providerAttempts;
+  if (Array.isArray(dispatchedAttempts) && dispatchedAttempts.length > 0) {
+    return dispatchedAttempts.length;
+  }
   const diagnosticAttempts = Array.isArray(error?.openAiTransportDiagnostics?.attempts)
     ? error.openAiTransportDiagnostics.attempts
     : [];
@@ -241,6 +263,21 @@ function providerCallCountFromError(error) {
     && Number.isFinite(Number(error.providerStatus))
     ? 1
     : 0;
+}
+
+function providerCallCountFromResponse(responseBody) {
+  const dispatchedAttempts = responseBody?._omniOpenAiMeta?.providerAttempts;
+  if (Array.isArray(dispatchedAttempts) && dispatchedAttempts.length > 0) {
+    return dispatchedAttempts.length;
+  }
+  const attempts = responseBody?._omniOpenAiMeta?.transportDiagnostics?.attempts;
+  if (Array.isArray(attempts)) {
+    const providerResponses = attempts.filter((attempt) => (
+      attempt?.stage === "provider_response" || attempt?.stage === "provider_error"
+    )).length;
+    if (providerResponses > 0) return providerResponses;
+  }
+  return Number(responseBody?._omniOpenAiMeta?.providerCallCount) || 1;
 }
 
 function debugAttemptType(debugContext = {}) {
@@ -319,7 +356,7 @@ function getOpenAiRetryBaseDelayMs() {
 }
 
 export function getSolveTotalTimeoutMs() {
-  return readPositiveNumber("OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS", DEFAULT_SOLVE_TOTAL_TIMEOUT_MS);
+  return readPositiveNumber("OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS", DEFAULT_CANONICAL_SOLVE_TIMEOUT_MS);
 }
 
 function getOpenAiMaxAttempts(modelPath = "solver") {
@@ -348,7 +385,11 @@ export function getLazyMaxOutputTokens() {
 }
 
 export function getImageExtractionMaxOutputTokens() {
-  return readPositiveNumber("OPENAI_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS", DEFAULT_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS);
+  return resolveImageExtractionOutputTokenBudget().effectiveMaxOutputTokens;
+}
+
+export function getImageExtractionOutputTokenConfig(options = {}) {
+  return resolveImageExtractionOutputTokenBudget(options);
 }
 
 export function getSolveOutputTokenBudget({
@@ -368,7 +409,9 @@ export function getSolveOutputTokenBudget({
     SOLVE_OUTPUT_BUDGET_ENV[role][stage],
     defaultBudget,
   );
-  const capabilityLimit = Number(selection.maxOutputTokens);
+  const capabilityLimit = Number(
+    selection.maxOutputTokenCapability ?? selection.maxOutputTokens,
+  );
   return Math.max(1, Math.floor(
     Number.isFinite(capabilityLimit) && capabilityLimit > 0
       ? Math.min(requestedBudget, capabilityLimit)
@@ -453,13 +496,40 @@ function createOpenAiHeaders() {
   };
 }
 
-function logOpenAiRequest({ purpose, payload }) {
+function imageIngestionCorrelation(debugContext) {
+  return Object.fromEntries(["uploadId", "extractionId", "selectedExtractionId", "reviewRevision", "reviewRevisionId", "canonicalProblemId", "canonicalSolveRequestId"]
+    .filter((key) => debugContext[key] !== undefined).map((key) => [key, debugContext[key]]));
+}
+
+function logOpenAiRequest({ purpose, payload, outputTokenConfig = null, debugContext = {} }) {
   const config = getOpenAiRuntimeConfig();
+  const configuredMaxOutputTokens = outputTokenConfig?.configuredMaxOutputTokens
+    ?? payload.max_output_tokens;
+  const effectiveMaxOutputTokens = outputTokenConfig?.effectiveMaxOutputTokens
+    ?? payload.max_output_tokens;
   console.info("[omnimath:openai-request]", {
     purpose,
     hasApiKey: config.hasApiKey,
     model: payload.model,
-    maxOutputTokens: config.maxOutputTokens,
+    role: debugContext.modelRole || null,
+    requestId: debugContext.requestId || null,
+    logicalImageIngestionRequestId: debugContext.logicalImageIngestionRequestId
+      || debugContext.ingestionRequestId
+      || debugContext.requestId
+      || null,
+    imageHash: debugContext.imageHash || null,
+    extractionAttemptId: debugContext.extractionAttemptId || null,
+    ...imageIngestionCorrelation(debugContext),
+    requestedModel: debugContext.requestedModel || payload.model,
+    effectiveModel: debugContext.effectiveModel || payload.model,
+    accountingModel: debugContext.accountingModel || payload.model,
+    configuredMaxOutputTokens,
+    effectiveMaxOutputTokens,
+    providerPayloadMaxOutputTokens: payload.max_output_tokens,
+    maxOutputTokens: payload.max_output_tokens,
+    maxOutputTokensSource: outputTokenConfig?.source || "request_argument",
+    maxOutputTokensConfigStatus: outputTokenConfig?.configStatus || "request_argument",
+    outputContract: outputTokenConfig?.stage || null,
     organizationConfigured: config.organizationConfigured,
     projectConfigured: config.projectConfigured,
     payloadShape: summarizePayload(payload),
@@ -529,12 +599,36 @@ function createSolveAttemptDiagnostics({
   const hasVisibleOutput = Boolean(findOutputText(responseBody));
   return {
     requestId: debugContext.requestId || null,
+    logicalImageIngestionRequestId: debugContext.logicalImageIngestionRequestId
+      || debugContext.ingestionRequestId
+      || debugContext.requestId
+      || null,
+    imageHash: debugContext.imageHash || null,
+    extractionAttemptId: debugContext.extractionAttemptId || null,
+    ...imageIngestionCorrelation(debugContext),
+    routeAttemptId: debugContext.routeAttemptId || null,
+    routeAttemptIndex: debugContext.routeAttemptIndex ?? null,
     purpose,
+    requestedModel: debugContext.requestedModel || model,
+    effectiveModel: debugContext.effectiveModel || model,
+    providerModel: typeof responseBody?.model === "string" ? responseBody.model : null,
+    accountingModel: debugContext.accountingModel || model,
     model,
     modelRole,
     solveMode,
     reasoningEffort: payload.reasoning?.effort || null,
     maxOutputTokens: payload.max_output_tokens ?? null,
+    configuredMaxOutputTokens: debugContext.configuredMaxOutputTokens
+      ?? payload.max_output_tokens
+      ?? null,
+    effectiveMaxOutputTokens: debugContext.effectiveMaxOutputTokens
+      ?? payload.max_output_tokens
+      ?? null,
+    providerPayloadMaxOutputTokens: payload.max_output_tokens ?? null,
+    providerTransportAttempt: debugContext.providerTransportAttempt ?? null,
+    providerResponseId: responseBody?.id || null,
+    responseStatus: responseBody?.status || null,
+    incompleteReason: getFinishReason(responseBody) || null,
     actualReasoningTokens: usage.reasoningTokens,
     actualVisibleOutputTokens,
     responseTruncated,
@@ -915,6 +1009,14 @@ function logOpenAiRequestDeadline({
   timeoutMs,
   timeoutSource,
   timeoutConfigStatus,
+  configuredRoleTimeoutMs = timeoutMs,
+  remainingLogicalBudgetMs = null,
+  remainingAttemptBudgetMs = null,
+  allocatedAttemptBudgetMs = null,
+  budgetLimitReason = null,
+  effectiveAttemptTimeoutMs = timeoutMs,
+  transportAttempt = null,
+  debugContext = {},
 }) {
   console.info("[omnimath:openai-timeout]", {
     purpose,
@@ -924,11 +1026,39 @@ function logOpenAiRequestDeadline({
     timeoutMs,
     timeoutSource,
     timeoutConfigStatus,
+    configuredRoleTimeoutMs,
+    remainingLogicalBudgetMs,
+    remainingAttemptBudgetMs,
+    allocatedAttemptBudgetMs,
+    budgetLimitReason,
+    effectiveAttemptTimeoutMs,
+    transportAttempt,
+    requestId: debugContext.requestId || null,
+    logicalImageIngestionRequestId: debugContext.logicalImageIngestionRequestId
+      || debugContext.ingestionRequestId
+      || debugContext.requestId
+      || null,
+    imageHash: debugContext.imageHash || null,
+    extractionAttemptId: debugContext.extractionAttemptId || null,
+    ...imageIngestionCorrelation(debugContext),
   });
 }
 
-async function readOpenAiResponseBody(response) {
-  const responseText = await response.text();
+async function readOpenAiResponseBody(response, signal = null) {
+  const bodyRead = response.text();
+  let onAbort;
+  const responseText = signal
+    ? await Promise.race([
+        bodyRead,
+        new Promise((_, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          else {
+            onAbort = () => reject(signal.reason);
+            signal.addEventListener("abort", onAbort, { once: true });
+          }
+        }),
+      ]).finally(() => signal.removeEventListener("abort", onAbort))
+    : await bodyRead;
   logOpenAiDebug("latex_control_character_stage", inspectLatexControlCharacterStage(
     responseText,
     "provider_http_response"
@@ -956,12 +1086,18 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
   const timeoutResolution = resolveOpenAiRequestTimeout(modelRole);
   const maxAttempts = getOpenAiMaxAttempts(modelRole);
   const configuredTimeoutMs = timeoutResolution.timeoutMs;
+  const solveBudget = debugContext.solveBudget || null;
+  const recoveryStage = debugContext.solveBudgetStage === "recovery"
+    || debugContext.retryPurpose === "compact";
   const solveDeadlineAt = Number(debugContext.solveDeadlineAt) || null;
-  const remainingTimeoutMs = () => solveDeadlineAt
-    ? Math.max(0, Math.floor(solveDeadlineAt - Date.now()))
-    : configuredTimeoutMs;
+  const remainingTimeoutMs = () => solveBudget
+    ? solveBudget.remainingMs({ recovery: recoveryStage })
+    : solveDeadlineAt
+      ? Math.max(0, Math.floor(solveDeadlineAt - Date.now()))
+      : configuredTimeoutMs;
   const timeoutMs = Math.max(1, Math.min(configuredTimeoutMs, remainingTimeoutMs()));
   const startedAt = Date.now();
+  const providerAttemptStartCount = solveBudget?.providerAttempts?.length || 0;
   let lastRetryableError = null;
   const transportDiagnostics = {
     apiHost: OPENAI_RESPONSES_HOSTNAME,
@@ -972,10 +1108,13 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
     purpose,
     maxAttempts,
     timeoutMs,
+    configuredRoleTimeoutMs: configuredTimeoutMs,
+    logicalSolveDeadlineConfigured: Boolean(solveDeadlineAt),
     timeoutSource: timeoutResolution.timeoutSource,
     timeoutConfigStatus: timeoutResolution.timeoutConfigStatus,
     transportAttempts: 0,
     successfulProviderResponses: 0,
+    providerAttempts: solveBudget?.providerAttempts || [],
     retryCount: 0,
     finalInfrastructureErrorCode: null,
     finalInfrastructureFailureType: null,
@@ -987,38 +1126,139 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
     finalTimeoutScope: null,
     attempts: [],
   };
-  logOpenAiRequestDeadline({
-    purpose,
-    model,
-    modelRole,
-    solveMode,
-    timeoutMs,
-    timeoutSource: timeoutResolution.timeoutSource,
-    timeoutConfigStatus: timeoutResolution.timeoutConfigStatus,
-  });
-
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    solveBudget?.throwIfExpired();
     let response;
+    let responseBody;
+    let providerAttempt = null;
     transportDiagnostics.transportAttempts = attempt;
     const attemptStartedAt = Date.now();
-    const attemptTimeoutMs = Math.min(configuredTimeoutMs, remainingTimeoutMs());
+    const allocation = solveBudget?.attemptBudget({
+      configuredTimeoutMs,
+      recovery: recoveryStage,
+    });
+    const attemptRemainingBudgetMs = allocation?.remainingMs ?? remainingTimeoutMs();
+    const attemptTimeoutMs = allocation?.effectiveTimeoutMs
+      ?? Math.min(configuredTimeoutMs, attemptRemainingBudgetMs);
     if (attemptTimeoutMs <= 0) {
-      throw Object.assign(new Error("Interactive solve wall-clock budget exhausted."), {
-        statusCode: 503,
-        code: "AI_SERVICE_UNAVAILABLE",
-        responseFailureType: "interactive_deadline_exceeded",
-        publicMessage: "The AI service did not complete the explanation in time.",
+      if (solveBudget?.signal.aborted) throw solveBudget.signal.reason;
+      throw createSolveTimeoutError({
+        timeoutSource: "provider_attempt_timeout",
+        budgetLimitReason: recoveryStage ? "recovery_stage_budget" : "primary_stage_budget",
       });
     }
+    logOpenAiRequestDeadline({
+      purpose,
+      model,
+      modelRole,
+      solveMode,
+      timeoutMs: attemptTimeoutMs,
+      timeoutSource: allocation?.timeoutSource || timeoutResolution.timeoutSource,
+      timeoutConfigStatus: timeoutResolution.timeoutConfigStatus,
+      configuredRoleTimeoutMs: configuredTimeoutMs,
+      remainingLogicalBudgetMs: solveBudget
+        ? Math.max(0, Math.floor(solveBudget.deadlineAt - Date.now()))
+        : attemptRemainingBudgetMs,
+      remainingAttemptBudgetMs: attemptRemainingBudgetMs,
+      allocatedAttemptBudgetMs: attemptTimeoutMs,
+      budgetLimitReason: allocation?.budgetLimitReason || null,
+      effectiveAttemptTimeoutMs: attemptTimeoutMs,
+      transportAttempt: attempt,
+      debugContext,
+    });
+    const attemptController = solveBudget ? new AbortController() : null;
+    const attemptTimeoutError = solveBudget ? createSolveTimeoutError({
+      timeoutSource: "provider_attempt_timeout",
+      budgetLimitReason: allocation?.budgetLimitReason || null,
+    }) : null;
+    const attemptTimer = solveBudget
+      ? setTimeout(() => attemptController.abort(attemptTimeoutError), attemptTimeoutMs)
+      : null;
+    attemptTimer?.unref?.();
+    const requestSignal = solveBudget
+      ? AbortSignal.any([solveBudget.signal, attemptController.signal])
+      : AbortSignal.timeout(attemptTimeoutMs);
     try {
+      const headers = createOpenAiHeaders();
+      const body = JSON.stringify(payload);
+      providerAttempt = solveBudget?.recordProviderDispatch({
+        model,
+        requestId: debugContext.requestId || null,
+        attemptId: debugContext.attemptId || null,
+        routeAttemptId: debugContext.routeAttemptId || null,
+        routeAttemptIndex: debugContext.routeAttemptIndex ?? null,
+        providerAttemptIndex: attempt,
+        route: modelPath,
+        attempt,
+        timeoutSource: "provider_attempt_timeout",
+        budgetLimitReason: allocation?.budgetLimitReason || null,
+        estimatedInputTokens: estimatePromptTokens(JSON.stringify(payload.input || [])),
+      }) || null;
       response = await fetch(OPENAI_RESPONSES_URL, {
         method: "POST",
-        headers: createOpenAiHeaders(),
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(attemptTimeoutMs),
+        headers,
+        body,
+        signal: requestSignal,
         dispatcher: getOpenAiAgent(attemptTimeoutMs),
       });
+      solveBudget?.recordProviderOutcome(providerAttempt, {
+        providerRequestId: response.headers?.get?.("x-request-id") || null,
+      });
+      responseBody = await readOpenAiResponseBody(response, requestSignal);
     } catch (error) {
+      clearTimeout(attemptTimer);
+      const ownedError = requestSignal.aborted && requestSignal.reason
+        ? requestSignal.reason
+        : error;
+      const aborted = requestSignal.aborted;
+      solveBudget?.recordProviderOutcome(providerAttempt, {
+        aborted,
+        timeoutSource: ownedError?.timeoutSource || null,
+        usageStatus: aborted ? "unknown_due_to_abort" : "unknown_unreconciled",
+      });
+      if (ownedError?.code === "AI_SOLVE_TIMEOUT") {
+        transportDiagnostics.finalInfrastructureErrorCode = ownedError.code;
+        transportDiagnostics.finalInfrastructureFailureType = ownedError.responseFailureType;
+        transportDiagnostics.finalTimeoutScope = ownedError.timeoutScope;
+        transportDiagnostics.attempts.push({
+          attempt,
+          configuredRoleTimeoutMs: configuredTimeoutMs,
+          remainingLogicalBudgetMs: attemptRemainingBudgetMs,
+          effectiveAttemptTimeoutMs: attemptTimeoutMs,
+          stage: "transport_error",
+          elapsedMs: Date.now() - attemptStartedAt,
+          retryable: false,
+          errorCode: ownedError.code,
+          timeoutScope: ownedError.timeoutScope,
+          timeoutSource: ownedError.timeoutSource,
+          budgetLimitReason: ownedError.budgetLimitReason || allocation?.budgetLimitReason || null,
+          failureType: ownedError.responseFailureType,
+        });
+        ownedError.openAiTransportDiagnostics = transportDiagnostics;
+        throw attachOpenAiDiagnosticsToError(ownedError, {
+          requestId: debugContext.requestId || null,
+          model,
+          modelRole,
+          providerAttempts: solveBudget?.providerAttempts || [],
+          transportDiagnostics,
+        });
+      }
+      if (solveBudget?.signal.aborted) {
+        const cancellationError = ownedError && typeof ownedError === "object"
+          ? ownedError
+          : Object.assign(new Error(String(ownedError || "Solve cancelled.")), { name: "AbortError" });
+        transportDiagnostics.finalInfrastructureErrorCode = cancellationError.code || cancellationError.name || "AbortError";
+        transportDiagnostics.finalInfrastructureFailureType = "upstream_abort";
+        transportDiagnostics.finalTimeoutScope = cancellationError.timeoutScope || "upstream";
+        cancellationError.openAiTransportDiagnostics = transportDiagnostics;
+        throw attachOpenAiDiagnosticsToError(cancellationError, {
+          requestId: debugContext.requestId || null,
+          model,
+          modelRole,
+          providerAttempts: solveBudget.providerAttempts,
+          transportDiagnostics,
+        });
+      }
       const normalizedError = normalizeOpenAiTransportError(error);
       const retryable = isTransientNetworkError(error) && attempt < maxAttempts;
       transportDiagnostics.finalInfrastructureErrorCode = normalizedError.normalizedErrorCode;
@@ -1031,6 +1271,9 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       transportDiagnostics.finalTimeoutScope = normalizedError.timeoutScope;
       transportDiagnostics.attempts.push({
         attempt,
+        configuredRoleTimeoutMs: configuredTimeoutMs,
+        remainingLogicalBudgetMs: attemptRemainingBudgetMs,
+        effectiveAttemptTimeoutMs: attemptTimeoutMs,
         stage: "transport_error",
         elapsedMs: Date.now() - attemptStartedAt,
         retryable,
@@ -1071,11 +1314,11 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
         startedAt,
         error,
       });
-      await delay(getOpenAiRetryDelayMs(attempt));
+      const retryDelayMs = Math.min(getOpenAiRetryDelayMs(attempt), remainingTimeoutMs());
+      if (retryDelayMs > 0) await delay(retryDelayMs);
       continue;
     }
-
-    const responseBody = await readOpenAiResponseBody(response);
+    clearTimeout(attemptTimer);
     if (response.ok) {
       transportDiagnostics.successfulProviderResponses += 1;
       transportDiagnostics.finalInfrastructureErrorCode = null;
@@ -1088,6 +1331,9 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       transportDiagnostics.finalTimeoutScope = null;
       transportDiagnostics.attempts.push({
         attempt,
+        configuredRoleTimeoutMs: configuredTimeoutMs,
+        remainingLogicalBudgetMs: attemptRemainingBudgetMs,
+        effectiveAttemptTimeoutMs: attemptTimeoutMs,
         stage: "provider_response",
         elapsedMs: Date.now() - attemptStartedAt,
         status: response.status,
@@ -1096,9 +1342,14 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       if (responseBody.usage) {
         responseBody.usage = tagUsageWithModel(responseBody.usage, model);
       }
+      solveBudget?.recordProviderOutcome(providerAttempt, {
+        providerRequestId: response.headers?.get?.("x-request-id") || null,
+        providerResponseId: responseBody?.id || null,
+        usage: responseBody.usage || null,
+      });
       const solveAttemptDiagnostics = createSolveAttemptDiagnostics({
         responseBody,
-        debugContext,
+        debugContext: { ...debugContext, providerTransportAttempt: attempt },
         purpose,
         model,
         modelRole,
@@ -1111,7 +1362,13 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
         configurable: true,
         value: {
           requestId: debugContext.requestId || null,
+          routeAttemptId: debugContext.routeAttemptId || null,
+          routeAttemptIndex: debugContext.routeAttemptIndex ?? null,
           purpose,
+          requestedModel: debugContext.requestedModel || model,
+          effectiveModel: debugContext.effectiveModel || model,
+          providerModel: typeof responseBody?.model === "string" ? responseBody.model : null,
+          accountingModel: debugContext.accountingModel || model,
           model,
           modelPath,
           modelRole,
@@ -1131,6 +1388,7 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
           reasoning: payload.reasoning || null,
           samplingOmitted: Boolean(debugContext.samplingOmitted),
           reasoningOmittedReason: debugContext.reasoningOmittedReason || null,
+          recoveryPurpose: debugContext.recoveryPurpose || null,
           normalizedProblemHash: debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null,
           promptHash: debugContext.promptHash || null,
           attemptType: debugAttemptType(debugContext),
@@ -1138,8 +1396,21 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
           promptText: debugContentText(payload.input?.[0]?.content || []),
           modelInputMessages: createDiagnosticInputMessages(payload.input),
           maxOutputTokens: payload.max_output_tokens ?? null,
+          configuredMaxOutputTokens: debugContext.configuredMaxOutputTokens
+            ?? payload.max_output_tokens
+            ?? null,
+          effectiveMaxOutputTokens: debugContext.effectiveMaxOutputTokens
+            ?? payload.max_output_tokens
+            ?? null,
+          providerPayloadMaxOutputTokens: payload.max_output_tokens ?? null,
+          maxOutputTokensSource: debugContext.maxOutputTokensSource || "request_argument",
+          maxOutputTokensConfigStatus: debugContext.maxOutputTokensConfigStatus || "request_argument",
+          outputContract: debugContext.outputContract || null,
           schemaName: payload.text?.format?.name || null,
-          providerCallCount: transportDiagnostics.successfulProviderResponses,
+          providerCallCount: solveBudget
+            ? solveBudget.providerAttempts.length - providerAttemptStartCount
+            : transportDiagnostics.transportAttempts,
+          providerAttempts: solveBudget?.providerAttempts || [],
           durationMs: Date.now() - startedAt,
           transportDiagnostics,
           ...solveAttemptDiagnostics,
@@ -1170,6 +1441,12 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       return responseBody;
     }
 
+    solveBudget?.recordProviderOutcome(providerAttempt, {
+      providerRequestId: response.headers?.get?.("x-request-id") || null,
+      providerResponseId: responseBody?.id || null,
+      usage: responseBody?.usage || null,
+    });
+
     logOpenAiProviderError({
       purpose,
       response,
@@ -1191,6 +1468,9 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       transportDiagnostics.finalTimeoutScope = null;
       transportDiagnostics.attempts.push({
         attempt,
+        configuredRoleTimeoutMs: configuredTimeoutMs,
+        remainingLogicalBudgetMs: attemptRemainingBudgetMs,
+        effectiveAttemptTimeoutMs: attemptTimeoutMs,
         stage: "provider_error",
         elapsedMs: Date.now() - attemptStartedAt,
         status: response.status,
@@ -1238,6 +1518,9 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
     transportDiagnostics.retryCount += 1;
     transportDiagnostics.attempts.push({
       attempt,
+      configuredRoleTimeoutMs: configuredTimeoutMs,
+      remainingLogicalBudgetMs: attemptRemainingBudgetMs,
+      effectiveAttemptTimeoutMs: attemptTimeoutMs,
       stage: "provider_error",
       elapsedMs: Date.now() - attemptStartedAt,
       status: response.status,
@@ -1258,10 +1541,486 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       error: providerError,
       response,
     });
-    await delay(getOpenAiRetryDelayMs(attempt));
+    const retryDelayMs = Math.min(getOpenAiRetryDelayMs(attempt), remainingTimeoutMs());
+    if (retryDelayMs > 0) await delay(retryDelayMs);
   }
 
   throw createOpenAiUnavailableError(lastRetryableError || new Error("OpenAI request failed."), { transportDiagnostics });
+}
+
+const MAX_PROVIDER_SSE_FRAME_CHARS = 2_000_000;
+const MAX_PROVIDER_OUTPUT_TEXT_CHARS = 1_000_000;
+
+function createStreamTerminalError(eventType, responseBody = {}) {
+  const reason = responseBody?.error?.code
+    || responseBody?.incomplete_details?.reason
+    || responseBody?.error?.type
+    || eventType;
+  return Object.assign(new Error(`OpenAI stream ended with ${reason}.`), {
+    statusCode: 502,
+    code: "AI_SERVICE_ERROR",
+    responseFailureType: eventType === "response.incomplete" ? RESPONSE_FAILURE_TYPES.TRUNCATED : eventType,
+    publicMessage: "The AI service could not complete the explanation.",
+    providerCode: reason,
+  });
+}
+
+function parseProviderSseFrame(frame) {
+  let eventName = "";
+  const data = [];
+  for (const line of frame.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon < 0 ? line : line.slice(0, colon);
+    const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
+    if (field === "event") eventName = value;
+    if (field === "data") data.push(value);
+  }
+  if (data.length === 0) return null;
+  const joined = data.join("\n");
+  if (joined === "[DONE]") return { type: "done" };
+  let parsed;
+  try {
+    parsed = JSON.parse(joined);
+  } catch {
+    throw Object.assign(new Error("OpenAI stream contained invalid event JSON."), {
+      statusCode: 502,
+      code: "AI_RESPONSE_INVALID",
+      publicMessage: "The AI service returned an invalid explanation.",
+    });
+  }
+  return { ...parsed, type: parsed.type || eventName };
+}
+
+async function readProviderChunk(reader, signal) {
+  if (signal.aborted) throw signal.reason || new DOMException("Stream aborted.", "AbortError");
+  let onAbort;
+  const aborted = new Promise((_, reject) => {
+    onAbort = () => reject(signal.reason || new DOMException("Stream aborted.", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    // Some provider connections leave a pending body read unresolved after the
+    // fetch signal aborts. Race the read itself against the same deadline.
+    return await Promise.race([reader.read(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/** Provider SSE transport. Callers own client framing and content validation. */
+async function streamOpenAiTextResponse({
+  prompt,
+  originalProblem = "",
+  debugContext = {},
+  signal = null,
+  onTextDelta = null,
+  onProviderEvent = null,
+  schema = null,
+  schemaName = "",
+  modelPath = "canonicalSolve",
+  purpose = "text_completion_stream",
+  maxOutputTokens = null,
+  deadlineAt = null,
+  timeoutRole = null,
+  includeModelParameters = true,
+  maxOutputChars = MAX_PROVIDER_OUTPUT_TEXT_CHARS,
+  maxProviderAttempts = null,
+} = {}) {
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    throw Object.assign(new Error("A prompt is required."), { statusCode: 400, code: "INVALID_INPUT" });
+  }
+  const selection = selectOpenAiModel({ modelPath, debugContext });
+  const timeoutResolution = resolveOpenAiRequestTimeout(timeoutRole || selection.role);
+  const startedAt = Date.now();
+  const solveBudget = debugContext.solveBudget || null;
+  const recoveryStage = debugContext.solveBudgetStage === "recovery"
+    || debugContext.retryPurpose === "compact";
+  const solveDeadlineAt = solveBudget?.deadlineAt || Number(deadlineAt || debugContext.solveDeadlineAt)
+    || startedAt + (timeoutRole ? timeoutResolution.timeoutMs : getSolveTotalTimeoutMs());
+  const payload = {
+    model: selection.modelId,
+    input: [{ role: "user", content: sanitizeStringValues([{ type: "input_text", text: prompt }]) }],
+    max_output_tokens: maxOutputTokens ?? getSolveOutputTokenBudget({ modelPath, debugContext }),
+    ...(includeModelParameters ? buildResponsesModelParameters(selection) : {}),
+    ...(schema ? { text: { format: { type: "json_schema", name: schemaName, strict: true, schema } } } : {}),
+    stream: true,
+  };
+  logOpenAiModelSelection(modelPath, { purpose, selection });
+  logOpenAiRequest({ purpose, payload });
+  logCanonicalInputProbe({
+    requestId: debugContext.requestId || null,
+    model: selection.modelId,
+    solveMode: selection.solveMode,
+    inputSource: debugContext.inputSource || null,
+    canonicalInput: originalProblem || debugContext.normalizedProblem || "",
+    providerInput: payload.input,
+  });
+
+  const maxAttempts = maxProviderAttempts === null
+    ? getOpenAiMaxAttempts(selection.role)
+    : Math.max(1, Math.min(3, Math.trunc(maxProviderAttempts) || 1));
+  let providerCallCount = 0;
+  let retryCount = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (signal?.aborted) throw signal.reason || new DOMException("Solve cancelled.", "AbortError");
+    solveBudget?.throwIfExpired();
+    const allocation = solveBudget?.attemptBudget({
+      configuredTimeoutMs: timeoutResolution.timeoutMs,
+      recovery: recoveryStage,
+    });
+    const solveBudgetRemainingMs = allocation?.remainingMs ?? solveDeadlineAt - Date.now();
+    const remainingMs = allocation?.effectiveTimeoutMs
+      ?? Math.min(timeoutResolution.timeoutMs, solveBudgetRemainingMs);
+    if (remainingMs <= 0) {
+      if (solveBudget?.signal.aborted) throw solveBudget.signal.reason;
+      throw createSolveTimeoutError({
+        timeoutSource: "provider_attempt_timeout",
+        budgetLimitReason: recoveryStage ? "recovery_stage_budget" : "primary_stage_budget",
+      });
+    }
+    logOpenAiRequestDeadline({
+      purpose,
+      model: selection.modelId,
+      modelRole: selection.role,
+      solveMode: selection.solveMode,
+      timeoutMs: remainingMs,
+      timeoutSource: allocation?.timeoutSource || timeoutResolution.timeoutSource,
+      timeoutConfigStatus: timeoutResolution.timeoutConfigStatus,
+      configuredRoleTimeoutMs: timeoutResolution.timeoutMs,
+      remainingLogicalBudgetMs: solveBudget
+        ? Math.max(0, Math.floor(solveBudget.deadlineAt - Date.now()))
+        : solveBudgetRemainingMs,
+      remainingAttemptBudgetMs: solveBudgetRemainingMs,
+      allocatedAttemptBudgetMs: remainingMs,
+      budgetLimitReason: allocation?.budgetLimitReason || null,
+      effectiveAttemptTimeoutMs: remainingMs,
+      transportAttempt: attempt,
+      debugContext,
+    });
+    const attemptController = solveBudget ? new AbortController() : null;
+    const timeoutSignal = solveBudget ? attemptController.signal : AbortSignal.timeout(remainingMs);
+    const timeoutError = solveBudget ? createSolveTimeoutError({
+      timeoutSource: "provider_attempt_timeout",
+      budgetLimitReason: allocation?.budgetLimitReason || null,
+    }) : null;
+    const timeoutTimer = solveBudget
+      ? setTimeout(() => attemptController.abort(timeoutError), remainingMs)
+      : null;
+    timeoutTimer?.unref?.();
+    const signals = [signal, solveBudget?.signal, timeoutSignal].filter(Boolean);
+    const requestSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    let reader;
+    let bytesSeen = false;
+    let terminalResponse = null;
+    let providerResponseId = null;
+    let providerModel = null;
+    let usage = null;
+    let outputText = "";
+    let firstProviderByteMs = null;
+    let firstProviderEventMs = null;
+    let providerEventCount = 0;
+    let providerAttempt = null;
+    try {
+      providerCallCount += 1;
+      const headers = createOpenAiHeaders();
+      const body = JSON.stringify(payload);
+      providerAttempt = solveBudget?.recordProviderDispatch({
+        model: selection.modelId,
+        requestId: debugContext.requestId || null,
+        attemptId: debugContext.attemptId || null,
+        routeAttemptId: debugContext.routeAttemptId || null,
+        routeAttemptIndex: debugContext.routeAttemptIndex ?? null,
+        providerAttemptIndex: attempt,
+        route: modelPath,
+        attempt,
+        timeoutSource: "provider_attempt_timeout",
+        budgetLimitReason: allocation?.budgetLimitReason || null,
+        estimatedInputTokens: estimatePromptTokens(JSON.stringify(payload.input || [])),
+      }) || null;
+      const response = await fetch(getStreamingResponsesUrl(), {
+        method: "POST",
+        headers,
+        body,
+        signal: requestSignal,
+        dispatcher: getOpenAiAgent(remainingMs),
+      });
+      solveBudget?.recordProviderOutcome(providerAttempt, {
+        providerRequestId: response.headers?.get?.("x-request-id") || null,
+      });
+      if (!response.ok) {
+        const responseBody = await readOpenAiResponseBody(response, requestSignal);
+        const providerError = createProviderError(response, responseBody);
+        providerError.retryableBeforeStream = isRetryableProviderError(response, responseBody);
+        logOpenAiProviderError({ purpose, response, responseBody, model: selection.modelId,
+          modelRole: selection.role, solveMode: selection.solveMode,
+          timeoutMs: remainingMs, timeoutSource: timeoutResolution.timeoutSource });
+        throw providerError;
+      }
+      if (!response.body) throw createStreamTerminalError("missing_response_body");
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      const processFrame = async (frame) => {
+        if (requestSignal.aborted) throw requestSignal.reason;
+        const event = parseProviderSseFrame(frame);
+        if (!event || event.type === "done") return;
+        if (terminalResponse) throw createStreamTerminalError("event_after_terminal");
+        providerEventCount += 1;
+        firstProviderEventMs ??= Date.now() - startedAt;
+        const details = {
+          type: event.type,
+          sequenceNumber: Number.isInteger(event.sequence_number) ? event.sequence_number : null,
+          providerResponseId,
+          model: providerModel,
+          providerModel,
+          effectiveModel: selection.modelId,
+          role: selection.role,
+          reasoningEffort: payload.reasoning?.effort || null,
+          elapsedMs: Date.now() - startedAt,
+        };
+        if (event.response && typeof event.response === "object") {
+          providerResponseId = event.response.id || providerResponseId;
+          providerModel = event.response.model || providerModel;
+          usage = event.response.usage ? tagUsageWithModel(event.response.usage, selection.modelId) : usage;
+          details.providerResponseId = providerResponseId;
+          details.model = providerModel;
+          details.providerModel = providerModel;
+          if (providerAttempt && providerResponseId) {
+            providerAttempt.providerResponseId = providerResponseId;
+          }
+        }
+        const responseRefusal = event.response?.output?.some?.((item) =>
+          item?.type === "refusal" || item?.content?.some?.((part) => part?.type === "refusal"));
+        if (event.type === "response.refusal" || event.type === "response.output_refusal.delta"
+          || event.item?.type === "refusal"
+          || event.item?.content?.some?.((part) => part?.type === "refusal")
+          || event.content_part?.type === "refusal" || responseRefusal) {
+          throw createStreamTerminalError("response.refusal", { error: { code: "refusal" } });
+        }
+        if (event.type === "response.output_text.delta") {
+          if (typeof event.delta !== "string") throw createStreamTerminalError("invalid_text_delta");
+          outputText += event.delta;
+          if (outputText.length > maxOutputChars) throw createStreamTerminalError("oversized_output_text");
+          if (typeof onTextDelta === "function") await onTextDelta(event.delta, details);
+        }
+        if (requestSignal.aborted) throw requestSignal.reason;
+        if (typeof onProviderEvent === "function") await onProviderEvent(details);
+        if (requestSignal.aborted) throw requestSignal.reason;
+        if (["response.completed", "response.failed", "response.incomplete", "error"].includes(event.type)) {
+          terminalResponse = event;
+          if (event.type !== "response.completed") throw createStreamTerminalError(event.type, event.response || event);
+        }
+      };
+      while (true) {
+        if (requestSignal.aborted) throw requestSignal.reason;
+        const { value, done } = await readProviderChunk(reader, requestSignal);
+        if (done) break;
+        if (value?.byteLength) {
+          bytesSeen = true;
+          firstProviderByteMs ??= Date.now() - startedAt;
+        }
+        pending += decoder.decode(value, { stream: true });
+        let boundary;
+        while ((boundary = /\r?\n\r?\n/.exec(pending))) {
+          if (boundary.index > MAX_PROVIDER_SSE_FRAME_CHARS) throw createStreamTerminalError("oversized_stream_frame");
+          const frame = pending.slice(0, boundary.index);
+          pending = pending.slice(boundary.index + boundary[0].length);
+          await processFrame(frame);
+        }
+        if (pending.length > MAX_PROVIDER_SSE_FRAME_CHARS) throw createStreamTerminalError("oversized_stream_frame");
+      }
+      pending += decoder.decode();
+      if (requestSignal.aborted) throw requestSignal.reason;
+      if (pending.trim()) await processFrame(pending);
+      if (!terminalResponse || terminalResponse.type !== "response.completed") {
+        throw createStreamTerminalError("missing_terminal_completion");
+      }
+      const finalStatus = terminalResponse.response?.status || "completed";
+      if (finalStatus !== "completed") throw createStreamTerminalError(`response.${finalStatus}`, terminalResponse.response);
+      solveBudget?.recordProviderOutcome(providerAttempt, {
+        providerResponseId,
+        usage,
+      });
+      console.info("[omnimath:openai-stream]", {
+        requestId: debugContext.requestId || null,
+        attemptId: debugContext.attemptId || null,
+        routeAttemptId: debugContext.routeAttemptId || null,
+        providerAttemptIndex: debugContext.providerAttemptIndex ?? null,
+        providerResponseId,
+        requestedModel: selection.modelId,
+        effectiveModel: selection.modelId,
+        providerModel,
+        accountingModel: selection.modelId,
+        role: selection.role,
+        reasoningEffort: payload.reasoning?.effort || null,
+        model: providerModel,
+        attempt,
+        retryCount,
+        providerEventCount,
+        firstProviderByteMs,
+        firstProviderEventMs,
+        durationMs: Date.now() - startedAt,
+        terminalReason: "completed",
+        usagePresent: Boolean(usage),
+      });
+      return {
+        responseId: providerResponseId,
+        model: providerModel,
+        requestedModel: selection.modelId,
+        effectiveModel: selection.modelId,
+        providerModel,
+        accountingModel: selection.modelId,
+        role: selection.role,
+        reasoningEffort: payload.reasoning?.effort || null,
+        usage,
+        outputText,
+        status: finalStatus,
+        firstProviderByteMs,
+        firstProviderEventMs,
+        durationMs: Date.now() - startedAt,
+        providerEventCount,
+        providerCallCount,
+        retryCount,
+      };
+    } catch (error) {
+      const cancelled = Boolean(signal?.aborted);
+      const budgetAborted = Boolean(solveBudget?.signal.aborted) && !cancelled;
+      const timedOut = timeoutSignal.aborted && !cancelled && !budgetAborted;
+      const ownedError = cancelled
+        ? signal.reason || error
+        : budgetAborted
+          ? solveBudget.signal.reason || error
+          : timedOut
+            ? timeoutSignal.reason || error
+            : error;
+      solveBudget?.recordProviderOutcome(providerAttempt, {
+        providerResponseId,
+        aborted: cancelled || budgetAborted || timedOut,
+        timeoutSource: cancelled ? "upstream_abort" : ownedError?.timeoutSource || null,
+        usage,
+        usageStatus: usage
+          ? "observed"
+          : cancelled || budgetAborted || timedOut
+            ? "unknown_due_to_abort"
+            : "unknown_unreconciled",
+      });
+      const retryable = !bytesSeen && !cancelled && !budgetAborted && !timedOut && attempt < maxAttempts
+        && (error.retryableBeforeStream || isTransientNetworkError(error));
+      console.warn("[omnimath:openai-stream]", {
+        requestId: debugContext.requestId || null,
+        attemptId: debugContext.attemptId || null,
+        routeAttemptId: debugContext.routeAttemptId || null,
+        providerAttemptIndex: debugContext.providerAttemptIndex ?? null,
+        providerResponseId,
+        requestedModel: selection.modelId,
+        effectiveModel: selection.modelId,
+        providerModel,
+        accountingModel: selection.modelId,
+        role: selection.role,
+        reasoningEffort: payload.reasoning?.effort || null,
+        model: providerModel,
+        attempt,
+        providerEventCount,
+        firstProviderByteMs,
+        durationMs: Date.now() - startedAt,
+        terminalReason: cancelled ? "cancelled" : budgetAborted || timedOut ? "timeout" : error.code || error.name || "provider_failure",
+        retryable,
+        usagePresent: Boolean(usage),
+      });
+      if (retryable) {
+        retryCount += 1;
+        const retryDelayMs = Math.min(
+          getOpenAiRetryDelayMs(attempt),
+          Math.max(0, solveDeadlineAt - Date.now()),
+        );
+        if (retryDelayMs > 0) {
+          const retrySignal = signal && solveBudget?.signal
+            ? AbortSignal.any([signal, solveBudget.signal])
+            : signal || solveBudget?.signal;
+          await delay(retryDelayMs, undefined, retrySignal ? { signal: retrySignal } : {});
+        }
+        continue;
+      }
+      const diagnostics = {
+        requestId: debugContext.requestId || null,
+        attemptId: debugContext.attemptId || null,
+        routeAttemptId: debugContext.routeAttemptId || null,
+        providerAttemptIndex: debugContext.providerAttemptIndex ?? null,
+        providerResponseId,
+        requestedModel: selection.modelId,
+        effectiveModel: selection.modelId,
+        providerModel,
+        accountingModel: selection.modelId,
+        role: selection.role,
+        reasoningEffort: payload.reasoning?.effort || null,
+        model: providerModel,
+        providerEventCount,
+        firstProviderByteMs,
+        firstProviderEventMs,
+        durationMs: Date.now() - startedAt,
+      };
+      if (cancelled) {
+        const cancellationError = signal.reason instanceof Error ? signal.reason : error;
+        throw attachOpenAiUsageToError(
+          attachOpenAiDiagnosticsToError(cancellationError, diagnostics), usage, providerCallCount);
+      }
+      if (budgetAborted || timedOut) {
+        const timeoutError = ownedError?.code === "AI_SOLVE_TIMEOUT"
+          ? ownedError
+          : createOpenAiUnavailableError(timeoutSignal.reason || error);
+        timeoutError.responseFailureType ||= "request_timeout";
+        timeoutError.timeoutScope ||= solveBudgetRemainingMs <= timeoutResolution.timeoutMs
+          ? "total_solve" : "model_request";
+        throw attachOpenAiUsageToError(
+          attachOpenAiDiagnosticsToError(timeoutError, {
+            ...diagnostics,
+            providerAttempts: solveBudget?.providerAttempts || [],
+          }), usage, providerCallCount);
+      }
+      const translated = error.statusCode ? error : createOpenAiUnavailableError(error);
+      if (outputText && !Object.hasOwn(translated, "_omniFailedOutputText")) {
+        Object.defineProperty(translated, "_omniFailedOutputText", {
+          value: outputText.slice(0, 1_000_000), configurable: true,
+        });
+      }
+      throw attachOpenAiUsageToError(
+        attachOpenAiDiagnosticsToError(translated, diagnostics), usage, providerCallCount);
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (reader) {
+        try { await reader.cancel(); } catch { /* stream may already be closed */ }
+      }
+    }
+  }
+  throw createStreamTerminalError("retry_limit_exceeded");
+}
+
+export async function streamMathExplanation(options = {}) {
+  const incomingDebugContext = options.debugContext || {};
+  const existingBudget = incomingDebugContext.solveBudget || null;
+  const ownedBudget = existingBudget || createSolveBudget({
+    deadlineAt: Number(options.deadlineAt || incomingDebugContext.solveDeadlineAt) || null,
+    totalTimeoutMs: getSolveTotalTimeoutMs(),
+    signal: options.signal || null,
+  });
+  try {
+    return await streamOpenAiTextResponse({
+      ...options,
+      deadlineAt: ownedBudget.deadlineAt,
+      debugContext: {
+        ...incomingDebugContext,
+        solveDeadlineAt: ownedBudget.deadlineAt,
+        solveBudget: ownedBudget,
+      },
+      purpose: "math_fast_solve_stream",
+      schema: options.schema || fastSolveSchema,
+      schemaName: options.schemaName || "math_fast_solve",
+      modelPath: options.modelPath || "canonicalSolve",
+    });
+  } finally {
+    if (!existingBudget) ownedBudget.cleanup();
+  }
 }
 
 export function estimatePromptTokens(text = "") {
@@ -1294,6 +2053,35 @@ export function estimateOpenAiCostBudget({ prompt = "", image = null, maxOutputT
     + (maxOutputTokens / 1000000 * outputCost);
 }
 
+export function estimateImageExtractionReservation({ prompt = "", image = null } = {}) {
+  const full = getImageExtractionOutputTokenConfig();
+  const compact = getImageExtractionOutputTokenConfig({ compact: true });
+  const imageTokensPerGeneration = image
+    ? readPositiveNumber("OPENAI_IMAGE_TOKEN_ESTIMATE", DEFAULT_IMAGE_TOKEN_ESTIMATE)
+    : 0;
+  const fullInputTokens = estimatePromptTokens(prompt) + imageTokensPerGeneration;
+  const compactInputTokens = estimatePromptTokens(buildCompactImageExtractionPrompt(prompt))
+    + imageTokensPerGeneration;
+  const inputTokens = fullInputTokens + compactInputTokens;
+  const outputTokens = full.effectiveMaxOutputTokens + compact.effectiveMaxOutputTokens;
+  const model = selectOpenAiModel({ modelPath: "imageExtraction" }).modelId;
+  const estimatedCostUsd = estimateModelCostUsd(model, {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+  });
+  return {
+    model,
+    estimatedTokens: inputTokens + outputTokens,
+    estimatedInputTokens: inputTokens,
+    estimatedOutputTokens: outputTokens,
+    estimatedCostUsd,
+    semanticGenerationLimit: 2,
+    providerHttpAttemptLimit: 4,
+    full,
+    compact,
+  };
+}
+
 export function normalizeOpenAiUsage(usage, fallbackTotalTokens = 0) {
   const inputTokens = Number(usage?.input_tokens || usage?.prompt_tokens || 0);
   const outputTokens = Number(usage?.output_tokens || usage?.completion_tokens || 0);
@@ -1319,7 +2107,7 @@ export function estimateOpenAiCost(usage, { model = "" } = {}) {
   const modelUsage = Array.isArray(usage?._omni_model_usage) ? usage._omni_model_usage : [];
   if (modelUsage.length > 0) {
     return modelUsage.reduce((total, item) => {
-      const itemModel = item?.model || model;
+      const itemModel = item?.accountingModel || item?.model || model;
       const itemCost = itemModel ? estimateModelCostUsd(itemModel, item) : null;
       return total + (Number.isFinite(itemCost) ? itemCost : estimateOpenAiCost(item));
     }, 0);
@@ -1434,7 +2222,7 @@ function createTruncatedJsonError(outputText, responseBody) {
     code: "AI_RESPONSE_TRUNCATED",
     compactRetryable: true,
     responseFailureType: RESPONSE_FAILURE_TYPES.TRUNCATED,
-    publicMessage: "The model response was cut off. Retrying with a shorter explanation...",
+    publicMessage: "The AI response was cut off before it finished.",
     invalidOutputText: outputText,
     finishReason: getFinishReason(responseBody) || null,
   });
@@ -1447,8 +2235,14 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
   const responseTruncated = isLengthFinishReason(responseBody);
   const baseDiagnostics = {
     requestId: debugContext.requestId || meta.requestId || null,
+    routeAttemptId: debugContext.routeAttemptId || meta.routeAttemptId || null,
+    routeAttemptIndex: debugContext.routeAttemptIndex ?? meta.routeAttemptIndex ?? null,
     purpose: debugContext.purpose || meta.purpose || "json_parse",
-    model: meta.model || responseBody?.model || null,
+    requestedModel: meta.requestedModel || meta.model || null,
+    effectiveModel: meta.effectiveModel || meta.model || null,
+    providerModel: meta.providerModel ?? responseBody?.model ?? null,
+    accountingModel: meta.accountingModel || meta.model || null,
+    model: meta.effectiveModel || meta.model || null,
     responseModel: responseBody?.model || null,
     modelPath: meta.modelPath || null,
     temperature: meta.temperature ?? null,
@@ -1464,6 +2258,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
     promptHash: debugContext.promptHash || meta.promptHash || null,
     normalizedProblemHash: meta.normalizedProblemHash || (debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null),
     attemptType: debugContext.attemptType || meta.attemptType || debugAttemptType(debugContext),
+    recoveryPurpose: debugContext.recoveryPurpose || meta.recoveryPurpose || null,
     initialRouting: debugContext.initialRouting || meta.initialRouting || null,
     attempt: meta.attempt ?? null,
     maxAttempts: meta.maxAttempts ?? null,
@@ -1476,6 +2271,12 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
     incompleteReason: getIncompleteDetails(responseBody)?.reason || null,
     responseShape: summarizeOpenAiResponseShape(responseBody),
     maxOutputTokens: meta.maxOutputTokens ?? null,
+    configuredMaxOutputTokens: meta.configuredMaxOutputTokens ?? meta.maxOutputTokens ?? null,
+    effectiveMaxOutputTokens: meta.effectiveMaxOutputTokens ?? meta.maxOutputTokens ?? null,
+    providerPayloadMaxOutputTokens: meta.providerPayloadMaxOutputTokens ?? meta.maxOutputTokens ?? null,
+    maxOutputTokensSource: meta.maxOutputTokensSource || null,
+    maxOutputTokensConfigStatus: meta.maxOutputTokensConfigStatus || null,
+    outputContract: meta.outputContract || null,
     actualReasoningTokens: meta.actualReasoningTokens ?? responseUsage.reasoningTokens,
     actualVisibleOutputTokens: meta.actualVisibleOutputTokens ?? actualVisibleOutputTokens,
     responseTruncated: meta.responseTruncated ?? responseTruncated,
@@ -1485,6 +2286,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       ?? (debugContext.retryPurpose === "compact" ? meta.reasoningEffort || null : null),
     schemaName: meta.schemaName || null,
     schemaValidator: debugContext.schemaValidator || null,
+    strictJsonEnvelope: debugContext.strictJsonEnvelope === true,
     usage: responseBody?.usage || null,
     providerCallCount: meta.providerCallCount
       ?? meta.transportDiagnostics?.successfulProviderResponses
@@ -1530,7 +2332,10 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
     throw error;
   }
 
-  const extracted = extractFirstCompleteJsonObject(outputText);
+  const strictJsonEnvelope = debugContext.strictJsonEnvelope === true;
+  const extracted = strictJsonEnvelope
+    ? { text: String(outputText || "").trim(), complete: true }
+    : extractFirstCompleteJsonObject(outputText);
   if (!extracted.complete) {
     const error = Object.assign(new Error("OpenAI returned incomplete JSON."), {
       statusCode: 502,
@@ -1563,6 +2368,7 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       requestId: debugContext.requestId || meta.requestId || null,
       purpose: debugContext.purpose || meta.purpose || "json_parse",
       schemaValidator: debugContext.schemaValidator || assertFn?.name || "anonymous",
+      strictJsonEnvelope,
       code: error.code || null,
       message: error.message,
       failedRule: error.code || error.message,
@@ -1572,11 +2378,14 @@ export function parseJsonResponse(responseBody, assertFn, debugContext = {}) {
       code: "AI_RESPONSE_INVALID",
       compactRetryable: true,
       responseFailureType: RESPONSE_FAILURE_TYPES.JSON_PARSE,
-      publicMessage: "The AI service returned an invalid explanation.",
+      publicMessage: strictJsonEnvelope
+        ? "The image extraction service returned invalid structured data."
+        : "The AI service returned an invalid explanation.",
       invalidOutputText: outputText,
     });
     attachResponseFailureDiagnostics(wrapped, outputDiagnostics, {
       responseFailureType: RESPONSE_FAILURE_TYPES.JSON_PARSE,
+      strictJsonEnvelope,
     });
     throw wrapped;
   }
@@ -1660,6 +2469,7 @@ async function requestOpenAi({
   schema = fastSolveSchema,
   schemaName = "math_solve",
   maxOutputTokens = getSolveMaxOutputTokens(),
+  outputTokenConfig = null,
   model = "",
   debugContext = {},
 }) {
@@ -1669,9 +2479,18 @@ async function requestOpenAi({
   const enrichedDebugContext = {
     ...debugContext,
     modelRole: selection.role,
+    requestedModel: selection.modelId,
+    effectiveModel: selection.modelId,
+    accountingModel: selection.modelId,
     solveMode: selection.solveMode,
     samplingOmitted: selection.samplingOmitted,
     reasoningOmittedReason: selection.reasoningOmittedReason,
+    configuredMaxOutputTokens: outputTokenConfig?.configuredMaxOutputTokens ?? maxOutputTokens,
+    effectiveMaxOutputTokens: outputTokenConfig?.effectiveMaxOutputTokens ?? maxOutputTokens,
+    providerPayloadMaxOutputTokens: maxOutputTokens,
+    maxOutputTokensSource: outputTokenConfig?.source || "request_argument",
+    maxOutputTokensConfigStatus: outputTokenConfig?.configStatus || "request_argument",
+    outputContract: outputTokenConfig?.stage || null,
   };
   const payload = {
     model: selection.modelId,
@@ -1688,7 +2507,7 @@ async function requestOpenAi({
     },
   };
   logOpenAiModelSelection(modelPath, { purpose, selection });
-  logOpenAiRequest({ purpose, payload });
+  logOpenAiRequest({ purpose, payload, outputTokenConfig, debugContext: enrichedDebugContext });
   logCanonicalInputProbe({
     requestId: debugContext.requestId || null,
     model: selection.modelId,
@@ -1699,11 +2518,18 @@ async function requestOpenAi({
   });
   logOpenAiDebug("request_settings", {
     requestId: debugContext.requestId || null,
+    routeAttemptId: debugContext.routeAttemptId || null,
+    routeAttemptIndex: debugContext.routeAttemptIndex ?? null,
     purpose,
+    requestedModel: selection.modelId,
+    effectiveModel: selection.modelId,
+    providerModel: null,
+    accountingModel: selection.modelId,
     model: selection.modelId,
     modelPath,
     modelRole: selection.role,
     modelSource: selection.modelSource,
+    maxOutputTokenCapability: selection.maxOutputTokenCapability ?? selection.maxOutputTokens,
     timeoutMs: selection.timeoutMs,
     timeoutSource: selection.timeoutSource,
     timeoutConfigStatus: selection.timeoutConfigStatus,
@@ -1716,7 +2542,14 @@ async function requestOpenAi({
     configuredPromptHash: debugContext.promptHash || null,
     normalizedProblemHash: debugContext.normalizedProblem ? hashDebugText(debugContext.normalizedProblem) : null,
     attemptType: debugAttemptType(debugContext),
+    recoveryPurpose: debugContext.recoveryPurpose || null,
     maxOutputTokens,
+    configuredMaxOutputTokens: outputTokenConfig?.configuredMaxOutputTokens ?? maxOutputTokens,
+    effectiveMaxOutputTokens: outputTokenConfig?.effectiveMaxOutputTokens ?? maxOutputTokens,
+    providerPayloadMaxOutputTokens: payload.max_output_tokens,
+    maxOutputTokensSource: outputTokenConfig?.source || "request_argument",
+    maxOutputTokensConfigStatus: outputTokenConfig?.configStatus || "request_argument",
+    outputContract: outputTokenConfig?.stage || null,
     temperature: payload.temperature ?? null,
     topP: payload.top_p ?? null,
     temperatureSource: payload.temperature === undefined ? "provider_default" : "payload",
@@ -1737,8 +2570,9 @@ async function requestOpenAiText({
   deadlineAt = null,
   timeoutRole = null,
   requireComplete = false,
+  debugContext = {},
 }) {
-  const selection = selectOpenAiModel({ modelPath });
+  const selection = selectOpenAiModel({ modelPath, debugContext });
   const payload = {
     model: selection.modelId,
     input: [{ role: "user", content }],
@@ -1751,7 +2585,11 @@ async function requestOpenAiText({
     modelPath,
     payload,
     debugContext: {
+      ...debugContext,
       modelRole: timeoutRole || selection.role,
+      requestedModel: selection.modelId,
+      effectiveModel: selection.modelId,
+      accountingModel: selection.modelId,
       solveMode: selection.solveMode,
       solveDeadlineAt: Number(deadlineAt) || null,
     },
@@ -1759,8 +2597,16 @@ async function requestOpenAiText({
 
   const diagnostics = {
     requestId: responseBody?._omniOpenAiMeta?.requestId || null,
+    routeAttemptId: responseBody?._omniOpenAiMeta?.routeAttemptId || null,
+    routeAttemptIndex: responseBody?._omniOpenAiMeta?.routeAttemptIndex ?? null,
     purpose,
-    model: responseBody?._omniOpenAiMeta?.model || responseBody?.model || null,
+    requestedModel: responseBody?._omniOpenAiMeta?.requestedModel || selection.modelId,
+    effectiveModel: responseBody?._omniOpenAiMeta?.effectiveModel || selection.modelId,
+    providerModel: responseBody?._omniOpenAiMeta?.providerModel ?? responseBody?.model ?? null,
+    accountingModel: responseBody?._omniOpenAiMeta?.accountingModel || selection.modelId,
+    modelRole: selection.role,
+    reasoningEffort: null,
+    model: responseBody?._omniOpenAiMeta?.providerModel ?? responseBody?.model ?? null,
     responseModel: responseBody?.model || null,
     responseId: responseBody?.id || null,
     responseStatus: responseBody?.status || null,
@@ -1772,11 +2618,25 @@ async function requestOpenAiText({
     providerCallCount: responseBody?._omniOpenAiMeta?.providerCallCount
       ?? responseBody?._omniOpenAiMeta?.transportDiagnostics?.successfulProviderResponses
       ?? 0,
+    attempt: responseBody?._omniOpenAiMeta?.attempt ?? null,
+    transportDiagnostics: responseBody?._omniOpenAiMeta?.transportDiagnostics || null,
+    recoveryPurpose: debugContext.recoveryPurpose
+      || responseBody?._omniOpenAiMeta?.recoveryPurpose
+      || null,
   };
-  return {
+  return attachOpenAiDiagnostics({
     text: extractOpenAiTextResponse(responseBody, { diagnostics, requireComplete }),
     usage: responseBody.usage || null,
-  };
+  }, {
+    ...diagnostics,
+    requestedModel: responseBody?._omniOpenAiMeta?.requestedModel || selection.modelId,
+    effectiveModel: responseBody?._omniOpenAiMeta?.effectiveModel || selection.modelId,
+    providerModel: responseBody?._omniOpenAiMeta?.providerModel ?? responseBody?.model ?? null,
+    accountingModel: responseBody?._omniOpenAiMeta?.accountingModel || selection.modelId,
+    modelRole: selection.role,
+    // requestOpenAiText intentionally sends no reasoning parameter.
+    reasoningEffort: null,
+  });
 }
 
 export function extractOpenAiTextResponse(responseBody, { diagnostics = {}, requireComplete = false } = {}) {
@@ -1919,6 +2779,7 @@ Compact mode output rules:
 - Preserve mathematical correctness over hover interactivity.
 - Use compact equations for verification; avoid prose-heavy derivations.
   - The last step latex is treated as finalAnswerLatex and must contain the complete final result.
+  - Make that last step a concise result summary, not a repeated derivation or a dump of intermediate systems. Preserve all requested parts and necessary qualifications.
   - Preserve related systems, boundary or initial conditions, branches, and equivalent final forms in the last step when they are part of the answer.
 - Return JSON only.
 
@@ -2025,7 +2886,7 @@ async function notifyGeneratedResponseFailure(callback, details = {}) {
   }
 }
 
-function normalizeProviderSolveCandidate(value, { image = false, compact = false, originalProblem = "" } = {}) {
+export function normalizeProviderSolveCandidate(value, { image = false, compact = false, originalProblem = "" } = {}) {
   const structured = image
     ? assertImageSolveResponse(value)
     : compact
@@ -2068,7 +2929,29 @@ function normalizeProviderSolveCandidate(value, { image = false, compact = false
   return normalized;
 }
 
-export async function createMathExplanation({
+export async function createMathExplanation(options = {}) {
+  const incomingDebugContext = options.debugContext || {};
+  const existingBudget = incomingDebugContext.solveBudget || null;
+  const ownedBudget = existingBudget || createSolveBudget({
+    deadlineAt: Number(incomingDebugContext.solveDeadlineAt) || null,
+    totalTimeoutMs: getSolveTotalTimeoutMs(),
+    signal: options.signal || null,
+  });
+  try {
+    return await createMathExplanationWithBudget({
+      ...options,
+      debugContext: {
+        ...incomingDebugContext,
+        solveDeadlineAt: ownedBudget.deadlineAt,
+        solveBudget: ownedBudget,
+      },
+    });
+  } finally {
+    if (!existingBudget) ownedBudget.cleanup();
+  }
+}
+
+async function createMathExplanationWithBudget({
   prompt,
   image,
   originalProblem = "",
@@ -2085,6 +2968,16 @@ export async function createMathExplanation({
     ...debugContext,
     solveDeadlineAt,
   };
+  const providerAttemptStartCount = solveDebugContext.solveBudget?.providerAttempts?.length || 0;
+  const dispatchedCallCount = () => solveDebugContext.solveBudget
+    ? Math.max(0, solveDebugContext.solveBudget.providerAttempts.length - providerAttemptStartCount)
+    : null;
+  const routeAttemptId = solveDebugContext.routeAttemptId
+    || `${solveDebugContext.requestId || "solve"}:route:${solveDebugContext.routeAttemptIndex || 1}`;
+  const fullGenerationAttemptId = `${routeAttemptId}:generation:full`;
+  const compactGenerationAttemptId = `${routeAttemptId}:generation:compact`;
+  const fullCandidateId = `${routeAttemptId}:candidate:full`;
+  const compactCandidateId = `${routeAttemptId}:candidate:compact`;
   const content = [{ type: "input_text", text: prompt }];
   if (image) {
     content.push({
@@ -2118,10 +3011,10 @@ export async function createMathExplanation({
       debugContext: solveDebugContext,
     });
   } catch (error) {
-    attachOpenAiUsageToError(error, null, providerCallCountFromError(error));
+    attachOpenAiUsageToError(error, null, dispatchedCallCount() ?? providerCallCountFromError(error));
     logSolveCandidateOutcome({
       requestId: solveDebugContext.requestId || null,
-      attemptId: `${solveDebugContext.requestId || "solve"}:initial-provider`,
+      attemptId: fullGenerationAttemptId,
       candidateId: null,
       solveMode: solveDebugContext.solveMode || debugAttemptType(solveDebugContext),
       model: error?._omniOpenAiDiagnostics?.model || null,
@@ -2141,7 +3034,7 @@ export async function createMathExplanation({
   let usage = responseBody.usage || null;
   let parsed;
   let compactFallback = false;
-  let aiCallCount = 1;
+  let aiCallCount = dispatchedCallCount() ?? providerCallCountFromResponse(responseBody);
   try {
     parsed = parseJsonResponse(
       responseBody,
@@ -2153,14 +3046,19 @@ export async function createMathExplanation({
       }
     );
   } catch (error) {
+    const recoveryBudgetAvailable = solveDebugContext.solveBudget?.canStartRecovery?.() !== false;
     const compactRetryAllowed = error.compactRetryable
       && !image
-      && allowCompactRetry !== false;
+      && allowCompactRetry !== false
+      && recoveryBudgetAvailable;
+    if (error.compactRetryable && !recoveryBudgetAvailable) {
+      error.retrySuppressedReason = "insufficient_recovery_budget";
+    }
     attachOpenAiUsageToError(error, usage, aiCallCount);
     logSolveCandidateOutcome({
       requestId: solveDebugContext.requestId || null,
-      attemptId: `${solveDebugContext.requestId || "solve"}:initial-full`,
-      candidateId: `${solveDebugContext.requestId || "solve"}:candidate-1`,
+      attemptId: fullGenerationAttemptId,
+      candidateId: fullCandidateId,
       solveMode: solveDebugContext.solveMode || debugAttemptType(solveDebugContext),
       model: error?._omniOpenAiDiagnostics?.model || null,
       providerCompletionStatus: error?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "incomplete" : "completed",
@@ -2213,6 +3111,7 @@ export async function createMathExplanation({
     const compactPrompt = buildCompactSolvePrompt(prompt, originalProblem, error);
     const compactDebugContext = {
       ...solveDebugContext,
+      solveBudgetStage: "recovery",
       promptHash: hashDebugText(compactPrompt),
       retryPurpose: "compact",
       attemptType: generatedAttemptType(debugContext, true),
@@ -2234,11 +3133,15 @@ export async function createMathExplanation({
         debugContext: compactDebugContext,
       });
     } catch (compactRequestError) {
-      attachOpenAiUsageToError(compactRequestError, usage, aiCallCount + providerCallCountFromError(compactRequestError));
+      attachOpenAiUsageToError(
+        compactRequestError,
+        usage,
+        dispatchedCallCount() ?? aiCallCount + providerCallCountFromError(compactRequestError),
+      );
       logSolveCandidateOutcome({
         requestId: solveDebugContext.requestId || null,
-        attemptId: `${solveDebugContext.requestId || "solve"}:compact-provider`,
-        candidateId: `${solveDebugContext.requestId || "solve"}:candidate-2`,
+        attemptId: compactGenerationAttemptId,
+        candidateId: compactCandidateId,
         solveMode: compactDebugContext.solveMode || "compact",
         model: compactRequestError?._omniOpenAiDiagnostics?.model || null,
         providerCompletionStatus: "provider_failure",
@@ -2259,7 +3162,7 @@ export async function createMathExplanation({
       throw compactRequestError;
     }
     usage = mergeUsage(usage, compactResponse.usage || null);
-    aiCallCount = 2;
+    aiCallCount = dispatchedCallCount() ?? aiCallCount + providerCallCountFromResponse(compactResponse);
     compactFallback = true;
     try {
       parsed = parseJsonResponse(
@@ -2278,8 +3181,8 @@ export async function createMathExplanation({
       attachOpenAiUsageToError(compactError, usage, aiCallCount);
       logSolveCandidateOutcome({
         requestId: solveDebugContext.requestId || null,
-        attemptId: `${solveDebugContext.requestId || "solve"}:compact`,
-        candidateId: `${solveDebugContext.requestId || "solve"}:candidate-2`,
+        attemptId: compactGenerationAttemptId,
+        candidateId: compactCandidateId,
         solveMode: "compact",
         model: compactError?._omniOpenAiDiagnostics?.model || null,
         providerCompletionStatus: compactError?.responseFailureType === RESPONSE_FAILURE_TYPES.TRUNCATED ? "incomplete" : "completed",
@@ -2327,8 +3230,8 @@ export async function createMathExplanation({
     });
     logSolveCandidateOutcome({
       requestId: solveDebugContext.requestId || null,
-      attemptId: `${solveDebugContext.requestId || "solve"}:compact`,
-      candidateId: `${solveDebugContext.requestId || "solve"}:candidate-2`,
+      attemptId: compactGenerationAttemptId,
+      candidateId: compactCandidateId,
       solveMode: "compact",
       model: compactResponse?._omniOpenAiMeta?.model || compactResponse?.model || null,
       providerCompletionStatus: "completed",
@@ -2349,8 +3252,8 @@ export async function createMathExplanation({
     });
     logSolveCandidateOutcome({
       requestId: solveDebugContext.requestId || null,
-      attemptId: `${solveDebugContext.requestId || "solve"}:initial-full`,
-      candidateId: `${solveDebugContext.requestId || "solve"}:candidate-1`,
+      attemptId: fullGenerationAttemptId,
+      candidateId: fullCandidateId,
       solveMode: solveDebugContext.solveMode || debugAttemptType(solveDebugContext),
       model: responseBody?._omniOpenAiMeta?.model || responseBody?.model || null,
       providerCompletionStatus: "completed",
@@ -2366,6 +3269,9 @@ export async function createMathExplanation({
   if (parsed?._omniOpenAiDiagnostics) {
     attachOpenAiDiagnostics(result, {
       ...parsed._omniOpenAiDiagnostics,
+      routeAttemptId,
+      attemptId: compactFallback ? compactGenerationAttemptId : fullGenerationAttemptId,
+      candidateId: compactFallback ? compactCandidateId : fullCandidateId,
       compactFallback,
       aiCallCount,
     });
@@ -2408,13 +3314,125 @@ export async function createMathExplanation({
   return result;
 }
 
-export async function createImageProblemExtraction({ prompt, image }) {
-  const content = [{ type: "input_text", text: prompt }];
-  content.push({
-    type: "input_image",
-    image_url: `data:${image.contentType};base64,${image.buffer.toString("base64")}`,
-    detail: "high",
+const compactImageExtractionIssueSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "message", "severity"],
+  properties: {
+    type: { type: "string" },
+    message: { type: "string" },
+    severity: { type: "string", enum: ["low", "medium", "high"] },
+  },
+};
+
+const compactImageExtractionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["extractedProblemLatex", "confidence", "issues"],
+  properties: {
+    extractedProblemLatex: { type: "string" },
+    confidence: { type: "number" },
+    issues: {
+      type: "array",
+      maxItems: 3,
+      items: compactImageExtractionIssueSchema,
+    },
+  },
+};
+
+function assertCompactImageExtractionResponse(value) {
+  const providerIssues = Array.isArray(value?.issues) ? value.issues : [];
+  const explicitlyUnreadable = providerIssues.length === 1
+    && providerIssues[0]?.type === "image_unreadable";
+  return assertImageExtractionResponse({
+    ...value,
+    // The compact recovery intentionally avoids a second long transcription.
+    // Exact LaTeX remains human-reviewable and is the canonical extraction.
+    extractedProblemText: value?.extractedProblemLatex,
+    issues: explicitlyUnreadable
+      ? providerIssues
+      : [
+          ...providerIssues,
+          {
+            type: "compact_extraction_recovery",
+            message: "Extraction recovered from a cut-off response; review the transcription before solving.",
+            severity: "medium",
+          },
+        ],
   });
+}
+
+function buildCompactImageExtractionPrompt(prompt = "") {
+  return `${prompt}
+
+Compact recovery contract:
+- The previous extraction was explicitly cut off by the output-token limit.
+- Return only extractedProblemLatex, confidence, and issues.
+- Transcribe the complete problem exactly once in extractedProblemLatex.
+- Use at most three concise issue objects and do not repeat the problem in issue messages.
+- Do not solve, summarize, or add prose outside the strict JSON object.`;
+}
+
+function isExplicitImageExtractionTokenTruncation(error = {}) {
+  const reason = String(
+    error.finishReason
+    || error?._omniOpenAiDiagnostics?.incompleteReason
+    || "",
+  ).toLowerCase();
+  return error.code === "AI_RESPONSE_TRUNCATED"
+    && ["max_output_tokens", "max_tokens", "length"].includes(reason);
+}
+
+function classifyImageExtractionTransportError(error) {
+  const failureType = error?.openAiTransportDiagnostics?.finalInfrastructureFailureType;
+  if (failureType === "request_timeout" || failureType === "connection_timeout" || failureType === "timeout") {
+    error.code = "AI_REQUEST_TIMEOUT";
+    error.responseFailureType = "provider_timeout";
+    error.publicMessage = "Image extraction timed out before the provider returned a result.";
+  }
+  return error;
+}
+
+export async function createImageProblemExtraction({
+  prompt,
+  image,
+  debugContext = {},
+  deadlineAt = null,
+}) {
+  const logicalImageIngestionRequestId = debugContext.logicalImageIngestionRequestId
+    || debugContext.ingestionRequestId
+    || debugContext.requestId
+    || `image-ingestion:${crypto.randomUUID()}`;
+  const imageHash = debugContext.imageHash || crypto
+    .createHash("sha256")
+    .update(image.buffer)
+    .digest("hex");
+  const initialExtractionAttemptId = debugContext.extractionAttemptId
+    || `${logicalImageIngestionRequestId}:extraction:initial`;
+  const lifecycleDebugContext = {
+    ...debugContext,
+    requestId: debugContext.requestId || logicalImageIngestionRequestId,
+    logicalImageIngestionRequestId,
+    imageHash,
+    extractionAttemptId: initialExtractionAttemptId,
+  };
+  const imageDataUrl = `data:${image.contentType};base64,${image.buffer.toString("base64")}`;
+  const imageContent = {
+    type: "input_image",
+    image_url: imageDataUrl,
+    detail: "high",
+  };
+  const content = [{ type: "input_text", text: prompt }, imageContent];
+  const timeoutResolution = resolveOpenAiRequestTimeout("imageExtraction");
+  const extractionDeadlineAt = Number.isFinite(Number(deadlineAt)) && Number(deadlineAt) > 0
+    ? Number(deadlineAt)
+    : Date.now() + timeoutResolution.timeoutMs;
+  const fullTokenConfig = getImageExtractionOutputTokenConfig({ debugContext: lifecycleDebugContext });
+  const initialDebugContext = {
+    ...lifecycleDebugContext,
+    attemptType: lifecycleDebugContext.attemptType || "image-extraction-initial",
+    solveDeadlineAt: extractionDeadlineAt,
+  };
 
   console.info("[omnimath:image-openai-forward]", {
     forwarded: true,
@@ -2422,19 +3440,127 @@ export async function createImageProblemExtraction({ prompt, image }) {
     filename: image.filename || null,
     contentType: image.contentType,
     bytes: image.buffer?.length || 0,
-    dataUrlChars: `data:${image.contentType};base64,`.length + image.buffer.toString("base64").length,
+    dataUrlChars: imageDataUrl.length,
+    requestId: lifecycleDebugContext.requestId,
+    logicalImageIngestionRequestId,
+    imageHash,
+    extractionAttemptId: initialExtractionAttemptId,
+    configuredTimeoutMs: timeoutResolution.timeoutMs,
+    remainingLogicalBudgetMs: Math.max(0, extractionDeadlineAt - Date.now()),
   });
 
-  const responseBody = await requestOpenAi({
-    content,
-    purpose: "math_image_extract",
-    schema: imageExtractionSchema,
-    schemaName: "math_image_extract",
-    maxOutputTokens: getImageExtractionMaxOutputTokens(),
-    modelPath: "imageExtraction",
-  });
-  const usage = responseBody.usage || null;
-  const result = parseJsonResponse(responseBody, assertImageExtractionResponse);
+  let responseBody;
+  try {
+    responseBody = await requestOpenAi({
+      content,
+      purpose: "math_image_extract",
+      schema: imageExtractionSchema,
+      schemaName: "math_image_extract",
+      maxOutputTokens: fullTokenConfig.effectiveMaxOutputTokens,
+      outputTokenConfig: fullTokenConfig,
+      modelPath: "imageExtraction",
+      debugContext: initialDebugContext,
+    });
+  } catch (error) {
+    attachOpenAiUsageToError(error, error?._aiUsage || null, providerCallCountFromError(error));
+    throw classifyImageExtractionTransportError(error);
+  }
+
+  let usage = responseBody.usage || null;
+  let aiCallCount = providerCallCountFromResponse(responseBody);
+  let result;
+  try {
+    result = parseJsonResponse(responseBody, assertImageExtractionResponse, {
+      ...initialDebugContext,
+      purpose: "math_image_extract",
+      schemaValidator: "assertImageExtractionResponse",
+      strictJsonEnvelope: true,
+    });
+  } catch (error) {
+    const remainingLogicalBudgetMs = Math.max(0, extractionDeadlineAt - Date.now());
+    const compactRetryAllowed = isExplicitImageExtractionTokenTruncation(error)
+      && remainingLogicalBudgetMs >= MIN_IMAGE_EXTRACTION_COMPACT_RETRY_MS;
+    if (!compactRetryAllowed) {
+      if (isExplicitImageExtractionTokenTruncation(error)
+        && remainingLogicalBudgetMs < MIN_IMAGE_EXTRACTION_COMPACT_RETRY_MS) {
+        error.retrySuppressedReason = "insufficient_remaining_extraction_budget";
+      }
+      attachOpenAiUsageToError(error, usage, aiCallCount);
+      throw error;
+    }
+
+    const compactTokenConfig = getImageExtractionOutputTokenConfig({
+      compact: true,
+      debugContext: lifecycleDebugContext,
+    });
+    const compactPrompt = buildCompactImageExtractionPrompt(prompt);
+    const compactDebugContext = {
+      ...lifecycleDebugContext,
+      extractionAttemptId: `${initialExtractionAttemptId}:compact`,
+      attemptType: "image-extraction-compact",
+      retryPurpose: "compact",
+      solveDeadlineAt: extractionDeadlineAt,
+    };
+    console.warn("[omnimath:image-extraction-retry]", {
+      requestId: lifecycleDebugContext.requestId,
+      logicalImageIngestionRequestId,
+      imageHash,
+      extractionAttemptId: compactDebugContext.extractionAttemptId,
+      retryReason: "provider_max_output_tokens",
+      priorOutputContract: "full",
+      selectedOutputContract: "compact",
+      remainingLogicalBudgetMs,
+      configuredTimeoutMs: timeoutResolution.timeoutMs,
+      configuredMaxOutputTokens: compactTokenConfig.configuredMaxOutputTokens,
+      effectiveMaxOutputTokens: compactTokenConfig.effectiveMaxOutputTokens,
+    });
+
+    let compactResponse;
+    try {
+      compactResponse = await requestOpenAi({
+        content: [{ type: "input_text", text: compactPrompt }, imageContent],
+        purpose: "math_image_extract_compact_retry",
+        schema: compactImageExtractionSchema,
+        schemaName: "math_image_extract_compact",
+        maxOutputTokens: compactTokenConfig.effectiveMaxOutputTokens,
+        outputTokenConfig: compactTokenConfig,
+        modelPath: "imageExtraction",
+        debugContext: compactDebugContext,
+      });
+    } catch (compactRequestError) {
+      const compactUsage = compactRequestError?._aiUsage || null;
+      attachOpenAiUsageToError(
+        classifyImageExtractionTransportError(compactRequestError),
+        mergeUsage(usage, compactUsage),
+        aiCallCount + providerCallCountFromError(compactRequestError),
+      );
+      throw compactRequestError;
+    }
+
+    usage = mergeUsage(usage, compactResponse.usage || null);
+    aiCallCount += providerCallCountFromResponse(compactResponse);
+    try {
+      result = parseJsonResponse(compactResponse, assertCompactImageExtractionResponse, {
+        ...compactDebugContext,
+        purpose: "math_image_extract_compact_retry",
+        schemaValidator: "assertCompactImageExtractionResponse",
+        strictJsonEnvelope: true,
+      });
+    } catch (compactError) {
+      attachOpenAiUsageToError(compactError, usage, aiCallCount);
+      throw compactError;
+    }
+
+    attachOpenAiDiagnostics(result, {
+      ...result?._omniOpenAiDiagnostics,
+      extractionRecoveryAttempted: true,
+      extractionRecoveryReason: "provider_max_output_tokens",
+      selectedExtractionContract: "compact",
+      initialConfiguredMaxOutputTokens: fullTokenConfig.configuredMaxOutputTokens,
+      initialEffectiveMaxOutputTokens: fullTokenConfig.effectiveMaxOutputTokens,
+      providerCallCount: aiCallCount,
+    });
+  }
 
   Object.defineProperty(result, "_aiUsage", {
     enumerable: false,
@@ -2444,20 +3570,92 @@ export async function createImageProblemExtraction({ prompt, image }) {
   Object.defineProperty(result, "_aiCallCount", {
     enumerable: false,
     configurable: true,
-    value: 1,
+    value: aiCallCount,
   });
   return result;
 }
 
-export async function createFollowupAnswer({ prompt, deadlineAt = null }) {
+function followupModelPath(scope = "lens") {
+  return scope === "workspace" ? "solver" : "pinned";
+}
+
+export async function createFollowupAnswer({
+  prompt,
+  scope = "lens",
+  deadlineAt = null,
+  debugContext = {},
+}) {
+  const modelPath = followupModelPath(scope);
   const result = await requestOpenAiText({
     content: [{ type: "input_text", text: prompt }],
     purpose: "math_explanation_followup",
+    modelPath,
     deadlineAt,
     timeoutRole: "pinned",
     requireComplete: true,
+    debugContext: { ...debugContext, followupScope: scope },
   });
   return result;
+}
+
+export async function streamFollowupAnswer({
+  prompt,
+  scope = "lens",
+  deadlineAt = null,
+  debugContext = {},
+  signal = null,
+  onTextDelta = null,
+  onProviderEvent = null,
+} = {}) {
+  const modelPath = followupModelPath(scope);
+  const result = await streamOpenAiTextResponse({
+    prompt,
+    purpose: "math_explanation_followup_stream",
+    modelPath,
+    maxOutputTokens: 900,
+    deadlineAt,
+    timeoutRole: "pinned",
+    includeModelParameters: false,
+    maxOutputChars: 128_000,
+    // The existing follow-up path applies the pinned timeout/retry policy even
+    // when workspace scope retains solver model routing. Keep both scopes at
+    // two pre-output transport attempts and never add a semantic retry.
+    maxProviderAttempts: 2,
+    signal,
+    onTextDelta,
+    onProviderEvent,
+    debugContext: { ...debugContext, followupScope: scope },
+  });
+  const answer = String(result.outputText || "").trim();
+  if (!answer) {
+    const error = Object.assign(new Error("The AI service returned an empty follow-up answer."), {
+      statusCode: 502,
+      code: "INVALID_AI_RESPONSE",
+      responseFailureType: "empty_text",
+      publicMessage: "The AI service returned an incomplete explanation. Please try again.",
+    });
+    attachOpenAiUsageToError(error, result.usage, result.providerCallCount);
+    throw attachOpenAiDiagnosticsToError(error, result);
+  }
+  return attachOpenAiDiagnostics({ ...result, text: answer }, {
+    requestId: debugContext.requestId || null,
+    requestedModel: result.requestedModel,
+    effectiveModel: result.effectiveModel,
+    providerModel: result.providerModel,
+    accountingModel: result.accountingModel,
+    modelRole: result.role,
+    reasoningEffort: result.reasoningEffort,
+    responseId: result.responseId,
+    responseStatus: result.status,
+    usage: result.usage,
+    providerCallCount: result.providerCallCount,
+    retryCount: result.retryCount,
+    providerEventCount: result.providerEventCount,
+    firstProviderByteMs: result.firstProviderByteMs,
+    firstProviderEventMs: result.firstProviderEventMs,
+    durationMs: result.durationMs,
+    recoveryPurpose: debugContext.recoveryPurpose || null,
+  });
 }
 
 export async function createLazyTokenExplanation({ prompt, mode = "hover", debugContext = {} }) {
@@ -2471,17 +3669,18 @@ export async function createLazyTokenExplanation({ prompt, mode = "hover", debug
     modelPath,
     debugContext,
   });
-  return {
-    ...parseJsonResponse(responseBody, assertLazyTokenExplanation, {
+  const parsed = parseJsonResponse(responseBody, assertLazyTokenExplanation, {
       ...debugContext,
       purpose: mode === "pin" ? "math_pin_explanation" : "math_token_explanation",
       schemaValidator: "assertLazyTokenExplanation",
-    }),
+    });
+  return attachOpenAiDiagnostics({
+    ...parsed,
     usage: responseBody.usage || null,
-  };
+  }, parsed._omniOpenAiDiagnostics || {});
 }
 
-export async function createCompareMethods({ prompt }) {
+export async function createCompareMethods({ prompt, debugContext = {} }) {
   const responseBody = await requestOpenAi({
     content: [{ type: "input_text", text: prompt }],
     purpose: "math_compare_methods",
@@ -2489,11 +3688,13 @@ export async function createCompareMethods({ prompt }) {
     schemaName: "math_compare_methods",
     maxOutputTokens: getSolveMaxOutputTokens(),
     modelPath: "solver",
+    debugContext,
   });
-  return {
-    ...parseJsonResponse(responseBody, assertCompareMethods),
+  const parsed = parseJsonResponse(responseBody, assertCompareMethods);
+  return attachOpenAiDiagnostics({
+    ...parsed,
     usage: responseBody.usage || null,
-  };
+  }, parsed._omniOpenAiDiagnostics || {});
 }
 
 export async function debugOpenAiConnection() {

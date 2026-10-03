@@ -143,7 +143,7 @@ Model routing is role-specific. Canonical solves submitted through `/api/explain
 
 Current role defaults are `gpt-5.6-sol` for solving, repair, escalation, and premium escalation, `gpt-4.1` for image extraction, and `gpt-4.1-mini` for extraction review, hover, and pinned explanations.
 
-OpenAI request deadlines are also role-specific. Defaults are 60 seconds for image extraction, extraction review, and the initial solver; 120 seconds for repair; 180 seconds for escalation and premium escalation; and 30 seconds for hover and pinned explanations. Initial compact retries inherit the solver deadline, while compact retries inside another resolved role inherit that role's deadline. Configured deadlines are clamped to 5–300 seconds; missing, zero, negative, and nonnumeric values use the role default. The legacy blanket `OPENAI_REQUEST_TIMEOUT_MS` is not used for request deadlines.
+OpenAI request deadlines are also role-specific. Defaults are 90 seconds for the initial solver, 60 seconds for image extraction and extraction review, 120 seconds for repair, 180 seconds for escalation and premium escalation, and 30 seconds for hover and pinned explanations. The canonical solve's shared wall-clock budget is also 90 seconds. Initial compact retries inherit the solver deadline, while compact retries inside another resolved role inherit that role's deadline. Configured deadlines are clamped to 5–300 seconds; missing, zero, negative, and nonnumeric values use the role default. The legacy blanket `OPENAI_REQUEST_TIMEOUT_MS` is not used for request deadlines.
 
 ## Running Locally
 

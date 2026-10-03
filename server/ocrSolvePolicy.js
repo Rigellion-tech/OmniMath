@@ -1,4 +1,5 @@
 const STRUCTURAL_REVIEW_ISSUES = new Set([
+  "compact_extraction_recovery",
   "text_latex_mismatch",
   "ocr_text_cleanup_review",
   "exponent_loss",
@@ -33,6 +34,9 @@ export function assessOcrSolveDecision({
   extractionValidation = {},
   reviewAction = null,
   canonicalInputHash = "",
+  extractionId = "",
+  reviewRevision = null,
+  reviewRevisionId = "",
 } = {}) {
   const validation = extractionValidation && typeof extractionValidation === "object"
     ? extractionValidation
@@ -62,6 +66,8 @@ export function assessOcrSolveDecision({
     && action.kind === expectedActionKind
     && canonicalInputHash
     && action.canonicalInputHash === canonicalInputHash
+    && (!extractionId || (action.extractionId === extractionId
+      && action.reviewRevision === reviewRevision && action.reviewRevisionId === reviewRevisionId))
   );
   const explicitReviewDecision = solveDecision === "confirmed" || solveDecision === "edited";
   const invalidReviewAction = explicitReviewDecision && !reviewActionValid;

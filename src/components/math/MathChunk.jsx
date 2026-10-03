@@ -8,8 +8,10 @@ import { userFacingTooltipTitle } from "@/lib/presentationLabels";
 import { endOmniMeasure, measureOmniSync, startOmniMeasure } from "@/lib/performanceDiagnostics";
 import { auditSemanticCoverage } from "@/lib/semanticCoverageAudit";
 import { inspectSemanticRenderTarget } from "@/lib/semanticRenderDiagnostics";
-import { hasSerializableSemanticRanges, normalizeCanonicalSemanticTree, serializeSemanticTreeToLatex } from "@/lib/semanticMathRenderer";
+import { hasSerializableSemanticRanges, normalizeCanonicalSemanticTree } from "@/lib/semanticMathRenderer";
+import { prepareSemanticRender } from "@/lib/semanticRenderClient";
 import { flushMathScrollTranslations, hasMathScrollStateDrift, subscribeToMathScroll } from "@/lib/mathScrollCoordinator";
+import { cancelMathGeometryMeasurement, scheduleMathGeometryMeasurement } from "@/lib/mathGeometryScheduler";
 import {
   auditSemanticHoverCoverage,
   buildSemanticGapRects,
@@ -572,6 +574,109 @@ function directlyOwnedSyntaxPrimitiveRects(elements = [], containerRect = null) 
     .filter((rect) => !containerRect || rectIntersects(rect, containerRect));
 }
 
+function svgGraphicsPaintRect(element) {
+  try {
+    const box = element?.getBBox?.();
+    const matrix = element?.getScreenCTM?.();
+    if (!box || !matrix) return null;
+    const corners = [
+      [box.x, box.y],
+      [box.x + box.width, box.y],
+      [box.x, box.y + box.height],
+      [box.x + box.width, box.y + box.height],
+    ].map(([x, y]) => ({
+      x: matrix.a * x + matrix.c * y + matrix.e,
+      y: matrix.b * x + matrix.d * y + matrix.f,
+    }));
+    const strokeWidth = Number.parseFloat(globalThis.getComputedStyle?.(element)?.strokeWidth || "0") || 0;
+    const scale = Math.max(Math.hypot(matrix.a, matrix.b), Math.hypot(matrix.c, matrix.d), 1);
+    const padding = Math.max(0.5, strokeWidth * scale / 2);
+    return normalizeSemanticRect({
+      left: Math.min(...corners.map((point) => point.x)) - padding,
+      right: Math.max(...corners.map((point) => point.x)) + padding,
+      top: Math.min(...corners.map((point) => point.y)) - padding,
+      bottom: Math.max(...corners.map((point) => point.y)) + padding,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function subtractOwnedRect(rect, blocker) {
+  const source = normalizeSemanticRect(rect);
+  const foreign = normalizeSemanticRect(blocker);
+  if (!source || !foreign || !rectIntersects(source, foreign)) return source ? [source] : [];
+  const overlap = {
+    left: Math.max(source.left, foreign.left),
+    right: Math.min(source.right, foreign.right),
+    top: Math.max(source.top, foreign.top),
+    bottom: Math.min(source.bottom, foreign.bottom),
+  };
+  return [
+    { left: source.left, right: source.right, top: source.top, bottom: overlap.top },
+    { left: source.left, right: source.right, top: overlap.bottom, bottom: source.bottom },
+    { left: source.left, right: overlap.left, top: overlap.top, bottom: overlap.bottom },
+    { left: overlap.right, right: source.right, top: overlap.top, bottom: overlap.bottom },
+  ].map(normalizeSemanticRect).filter(Boolean);
+}
+
+function subtractForeignSemanticRects(rects = [], blockers = []) {
+  return safeList(blockers).reduce(
+    (fragments, blocker) => fragments.flatMap((fragment) => subtractOwnedRect(fragment, blocker)),
+    preserveSemanticRectFragments(rects),
+  ).filter((rect) => rect.width >= 0.75 && rect.height >= 0.75);
+}
+
+// Some non-leaf annotations are the smallest TeX-safe envelope for an atom
+// whose base cannot be wrapped without changing script/accent attachment.
+// Retain only ink whose nearest semantic ancestor is that envelope. Nested
+// index/exponent annotations remain foreign and cannot be stolen by it.
+function directlyOwnedResidualPrimitiveRects(elements = [], containerRect = null) {
+  if (typeof document === "undefined" || typeof NodeFilter === "undefined") return [];
+  const rects = [];
+  for (const owner of [...new Set(safeList(elements).filter(Boolean))]) {
+    const ownerSemanticId = owner.getAttribute?.("data-semantic-id") || "";
+    if (!ownerSemanticId) continue;
+    const ownerRects = [];
+    const walker = document.createTreeWalker(owner, NodeFilter.SHOW_TEXT);
+    let current = walker.nextNode();
+    while (current) {
+      const raw = String(current.textContent || "");
+      const nearestOwner = current.parentElement?.closest?.("[data-semantic-id]");
+      if (raw.trim() && nearestOwner?.getAttribute?.("data-semantic-id") === ownerSemanticId) {
+        const range = document.createRange();
+        try {
+          range.selectNodeContents(current);
+          ownerRects.push(...getElementRects(range));
+        } finally {
+          range.detach?.();
+        }
+      }
+      current = walker.nextNode();
+    }
+    // `.accent-body` and its SVG viewport are KaTeX positioning containers
+    // whose boxes can extend through the decorated base. The actual accent
+    // paint is either text (already captured above) or an SVG graphics
+    // element; owning either container would let the decorated parent steal
+    // exact pointer hits from its base child.
+    for (const primitive of queryElements(owner, "svg path, svg line, svg rect, svg circle, svg ellipse, svg polyline, svg polygon, svg use")) {
+      const nearestOwner = primitive.closest?.("[data-semantic-id]");
+      if (nearestOwner?.getAttribute?.("data-semantic-id") !== ownerSemanticId) continue;
+      const hasForeignSemanticDescendant = queryElements(primitive, "[data-semantic-id]")
+        .some((descendant) => descendant.getAttribute?.("data-semantic-id") !== ownerSemanticId);
+      if (hasForeignSemanticDescendant) continue;
+      const paintRect = svgGraphicsPaintRect(primitive);
+      if (paintRect) ownerRects.push(paintRect);
+    }
+    const foreignRects = queryElements(owner, "[data-semantic-id]")
+      .filter((descendant) => descendant.getAttribute?.("data-semantic-id") !== ownerSemanticId)
+      .flatMap(getElementRects);
+    rects.push(...subtractForeignSemanticRects(ownerRects, foreignRects));
+  }
+  return preserveSemanticRectFragments(rects)
+    .filter((rect) => !containerRect || rectIntersects(rect, containerRect));
+}
+
 function visibleKatexPrimitiveRectsInElement(root, scopeElement) {
   if (!root || !scopeElement) return [];
   const rootRect = normalizeSemanticRect(root.getBoundingClientRect());
@@ -1068,7 +1173,15 @@ function attachFractionLinePrimitiveGeometry({
     if (lineRects.length === 0) continue;
     const matchingLines = lineRects.filter((lineRect) => (
       fractionLineBelongsToTarget(lineRect, target, measuredById, semanticNodeById)
-    ));
+    )).map((lineRect) => normalizeSemanticRect({
+      left: lineRect.left,
+      right: lineRect.right,
+      // KaTeX bars can be only one CSS pixel tall, while browser pointer
+      // coordinates are integral. Keep the owned primitive reachable on both
+      // sides of a fractional-pixel boundary without enlarging its width.
+      top: lineRect.top - 0.75,
+      bottom: lineRect.bottom + 0.75,
+    })).filter(Boolean);
     if (matchingLines.length === 0) continue;
     const paintedRects = uniqueSemanticRects([
       ...primaryPaintedRects(target),
@@ -1133,6 +1246,7 @@ function refineAggregateGeometryFromChildren({
 
 const INTERNAL_GAP_OWNER_ROLES = new Set([
   "absoluteValue",
+  "decorated",
   "integral",
   "integral-expression",
   "integralExpression",
@@ -1174,7 +1288,10 @@ function attachSemanticInternalGapGeometry({
   semanticNodeById = new Map(),
   medianHeight = 18,
 }) {
-  for (const target of targets) {
+  // Establish the smallest semantic gaps first. Ancestors must treat both
+  // descendant ink and descendant-owned whitespace as occupied so the same
+  // pointer rectangle cannot be registered to two semantic scopes.
+  for (const target of [...targets].sort((left, right) => Number(right.depth || 0) - Number(left.depth || 0))) {
     const role = target.role || target.kind || target.type || "";
     if (isLeafSemanticTarget(target) || !INTERNAL_GAP_OWNER_ROLES.has(role)) continue;
     const directChildRects = safeList(target.childIds)
@@ -1183,7 +1300,13 @@ function attachSemanticInternalGapGeometry({
       ...collectDescendantPaintedRects(target, measuredById, semanticNodeById),
       ...targets
         .filter((candidate) => candidate.id !== target.id && semanticSourceRangeContains(target, candidate))
-        .flatMap(primaryPaintedRects),
+        .flatMap((candidate) => {
+          const measuredCandidate = measuredById.get(candidate.id) || candidate;
+          return [
+            ...primaryPaintedRects(measuredCandidate),
+            ...safeList(measuredCandidate.gapRects),
+          ];
+        }),
     ]);
     const gapRects = buildSemanticGapRects(directChildRects, {
       medianHeight,
@@ -1432,7 +1555,7 @@ function measureAnnotatedSemanticTargets({
   annotationDiagnostics = [],
 }) {
   const blockedFallbackIds = new Set(annotationDiagnostics.filter((item) => (
-    /^(?:tex-owner-not-emitted-once|tex-comment-not-rendered|pure-tex-syntax|tex-parse-structure-changed|range-|source-slice-|crossing-semantic-range)/.test(item.reason)
+    /^(?:annotation-work-budget|tex-owner-not-emitted-once|tex-comment-not-rendered|pure-tex-syntax|tex-parse-structure-changed|range-|source-slice-|crossing-semantic-range)/.test(item.reason)
   )).map((item) => item.semanticId));
   const annotatedElements = queryElements(katexRoot, "[data-semantic-id]");
   const annotatedDomCount = annotatedElements.length;
@@ -1469,13 +1592,24 @@ function measureAnnotatedSemanticTargets({
       .filter((rect) => !containerRect || rectIntersects(rect, containerRect));
     const rawPaintedRects = paintedRectsForElements(katexRoot, elements, containerRect);
     const leaf = isLeafSemanticTarget(semanticTarget);
-    const ownedPrimitiveRects = leaf
-      ? []
-      : directlyOwnedSyntaxPrimitiveRects(directElements, containerRect);
-    const clusteredPaintedRects = clusterSemanticRects([
-      ...rawPaintedRects,
-      ...ownedPrimitiveRects,
+    const role = semanticTarget.role || semanticTarget.type || "";
+    const syntaxPrimitiveRects = leaf ? [] : directlyOwnedSyntaxPrimitiveRects(directElements, containerRect);
+    const ownsDecoratedResidualInk = semanticTarget.type === "decoratedAtom"
+      || role === "decorated"
+      || semanticTarget.decoratedCall;
+    const residualPrimitiveRects = !leaf && ownsDecoratedResidualInk
+      ? directlyOwnedResidualPrimitiveRects(directElements, containerRect)
+      : [];
+    const ownedPrimitiveRects = clusterSemanticRects([
+      ...syntaxPrimitiveRects,
+      ...residualPrimitiveRects,
     ], leafMedianHeight || 18);
+    const clusteredPaintedRects = role === "decorated" && ownedPrimitiveRects.length > 0
+      ? ownedPrimitiveRects
+      : clusterSemanticRects([
+          ...rawPaintedRects,
+          ...ownedPrimitiveRects,
+        ], leafMedianHeight || 18);
     const leafRects = normalizeDeterministicLeafRects(filterLeafRects(rawRects, semanticTarget, {
           medianLeafHeight: leafMedianHeight,
           containerRect,
@@ -1499,11 +1633,20 @@ function measureAnnotatedSemanticTargets({
       : (clusteredPaintedRects.length > 0 ? clusteredPaintedRects : rawRects)
     );
     const paintedRects = clusteredPaintedRects.length > 0 ? clusteredPaintedRects : rects;
+    const runtimeFallbackOwner = directElements.some((element) => (
+      element.getAttribute?.("data-semantic-owner-source") === "targeted-fallback"
+    ));
+    const ownershipProvenance = runtimeFallbackOwner
+      ? "targeted-fallback"
+      : directElements.length > 0
+        ? "validated-annotation"
+        : "structural-fallback";
     const measured = {
       ...semanticTarget,
       depth: semanticTarget.depth ?? node.depth,
       rects,
-      rectSource: "semantic-dom",
+      rectSource: runtimeFallbackOwner ? "semantic-dom-targeted-fallback" : "semantic-dom",
+      ownershipProvenance,
       deterministic: true,
       hitboxRole: deterministicHitboxRoleForNode(semanticTarget, semanticNodeById),
       elements,
@@ -1523,6 +1666,10 @@ function measureAnnotatedSemanticTargets({
   const leafNodes = semanticNodes.filter(isLeafSemanticTarget);
   const eligibleMissingLeaves = targets
     .filter((target) => !blockedFallbackIds.has(target.id))
+    // A validated owner can have temporarily empty geometry while fonts or
+    // layout settle. Adding a second text-matched owner would turn that
+    // temporary state into conflicting semantic ownership.
+    .filter((target) => !annotatedIdSet.has(target.id))
     .filter((target) => isLeafSemanticTarget(target))
     .filter((target) => isHoverEligibleTarget(target))
     .filter((target) => !safeList(target.rects).some((rect) => rectArea(rect) > 0))
@@ -1550,6 +1697,16 @@ function measureAnnotatedSemanticTargets({
     const claimedFallbackMatchKeys = new Set();
     const claimedFallbackElements = new Set();
     const claimedFallbackTextRanges = [];
+    const renderedMatchesByText = new Map();
+    const renderedMatchesForText = (targetText) => {
+      if (!renderedMatchesByText.has(targetText)) {
+        renderedMatchesByText.set(targetText, sortMatchesByRenderedOrder(
+          getTextRangeMatches(textIndex, targetText),
+          Math.max(1, fallbackMedianHeight * 1.35 || 18)
+        ));
+      }
+      return renderedMatchesByText.get(targetText) || [];
+    };
     for (const target of eligibleMissingLeaves.sort((left, right) => (
       Number(left.sourceRange?.start ?? left.order ?? 0) - Number(right.sourceRange?.start ?? right.order ?? 0)
       || Number(left.order ?? 0) - Number(right.order ?? 0)
@@ -1571,12 +1728,16 @@ function measureAnnotatedSemanticTargets({
             containerRect,
           });
           if (rects.length > 0) {
-            annotateMeasuredElements(radicalMatch.elements, target.id, { protectDescendants: true });
+            annotateMeasuredElements(radicalMatch.elements, target.id, {
+              protectDescendants: true,
+              ownerProvenance: "targeted-fallback",
+            });
             const normalizedRects = sortRectsByVisualOrder(normalizeDeterministicLeafRects(rects, target));
             const patched = applySemanticGeometryMetadata({
               ...target,
               rects: normalizedRects,
               rectSource: "semantic-dom-targeted-fallback",
+              ownershipProvenance: "targeted-fallback",
               deterministic: true,
               elements: radicalMatch.elements || [],
               domMatchCount: radicalCandidates.length,
@@ -1605,20 +1766,21 @@ function measureAnnotatedSemanticTargets({
           }
         }
       }
-      const rawMatches = sortMatchesByRenderedOrder(
-        getTextRangeMatches(textIndex, targetText),
-        Math.max(1, fallbackMedianHeight * 1.35 || 18)
-      ).filter((match) => (
-        elementsAvailableForSemanticId(match.elements, target.id, { protectDescendants: true })
-        && !safeList(match.elements).some((element) => claimedFallbackElements.has(element))
-        && !claimedFallbackTextRanges.some((range) => (
-          match.foundAt < range.end
-          && match.foundAt + targetText.length > range.start
-        ))
-      ));
+      // Select against the immutable rendered occurrence sequence. Filtering
+      // first changes occurrence identity when an earlier glyph is already
+      // owned, so later repeated symbols can steal a sibling occurrence.
+      const rawMatches = renderedMatchesForText(targetText);
       const preferred = rawMatches[occurrenceIndex] || null;
+      const preferredAvailable = preferred && (
+        elementsAvailableForSemanticId(preferred.elements, target.id, { protectDescendants: true })
+        && !safeList(preferred.elements).some((element) => claimedFallbackElements.has(element))
+        && !claimedFallbackTextRanges.some((range) => (
+          preferred.foundAt < range.end
+          && preferred.foundAt + targetText.length > range.start
+        ))
+      );
       const preferredKey = preferred ? textMatchKey(preferred) : "";
-      const splitSignedFallback = (!preferred || claimedFallbackMatchKeys.has(preferredKey))
+      const splitSignedFallback = (!preferredAvailable || claimedFallbackMatchKeys.has(preferredKey))
         ? findSplitSignedNumberFallback({
           target,
           targetText,
@@ -1628,14 +1790,14 @@ function measureAnnotatedSemanticTargets({
           containerRect,
         })
         : null;
-      if ((!preferred || claimedFallbackMatchKeys.has(preferredKey)) && !splitSignedFallback) {
+      if ((!preferredAvailable || claimedFallbackMatchKeys.has(preferredKey)) && !splitSignedFallback) {
         fallbackSemanticMappings.push({
           id: target.id,
           role: target.role || target.kind || target.type || "node",
           sourceRange: target.sourceRange || null,
           sourceText: target.latex || target.display || target.text || "",
           fallbackStatus: "unmapped",
-          fallbackReason: preferred ? "fallback-occurrence-already-claimed" : "no-confident-text-occurrence",
+          fallbackReason: preferred ? "exact-rendered-occurrence-unavailable" : "no-confident-text-occurrence",
           candidateCount: rawMatches.length,
           expectedOccurrence: occurrenceIndex,
         });
@@ -1686,11 +1848,16 @@ function measureAnnotatedSemanticTargets({
           end: finalFallback.foundAt + targetText.length,
         });
       }
-      annotateMeasuredElements(finalFallback.elements, target.id, { protectDescendants: true });
-      const patched = {
+      annotateMeasuredElements(finalFallback.elements, target.id, {
+        protectDescendants: true,
+        ownerProvenance: "targeted-fallback",
+      });
+      const normalizedFallbackRects = sortRectsByVisualOrder(normalizeDeterministicLeafRects(finalRects, target));
+      const patched = applySemanticGeometryMetadata({
         ...target,
-        rects: sortRectsByVisualOrder(normalizeDeterministicLeafRects(finalRects, target)),
+        rects: normalizedFallbackRects,
         rectSource: "semantic-dom-targeted-fallback",
+        ownershipProvenance: "targeted-fallback",
         deterministic: true,
         elements: finalFallback.elements || [],
         domMatchCount: splitSignedFallback?.candidateCount ?? filteredSplitSignedFallback?.candidateCount ?? rawMatches.length,
@@ -1699,7 +1866,9 @@ function measureAnnotatedSemanticTargets({
         fallbackMappingReason: splitSignedFallback || filteredSplitSignedFallback
           ? "missing-deterministic-split-signed-number-dom-node"
           : "missing-deterministic-dom-node",
-      };
+      }, normalizedFallbackRects, normalizedFallbackRects, {
+        rectSource: "semantic-dom-targeted-fallback",
+      });
       measuredById.set(target.id, patched);
       const index = targets.findIndex((candidate) => candidate.id === target.id);
       if (index >= 0) targets[index] = patched;
@@ -2812,6 +2981,9 @@ function annotateMeasuredElements(elements = [], semanticId, options = {}) {
   for (const element of candidates) {
     element.setAttribute("data-semantic-id", semanticId);
     element.setAttribute("data-leaf-id", semanticId);
+    if (options.ownerProvenance) {
+      element.setAttribute("data-semantic-owner-source", options.ownerProvenance);
+    }
   }
   return candidates.length > 0;
 }
@@ -2881,6 +3053,7 @@ function candidateDebugPayload(target = {}, rect = null, pointer = {}, score = n
       : null,
     targetClass: isLeafSemanticTarget(safeTarget) ? "leaf" : isAggregateHoverTarget(safeTarget) ? "parent" : "container",
     rectSource: safeTarget?.rectSource || safeTarget?.debugDom?.rectSource || "unknown",
+    ownershipProvenance: safeTarget?.ownershipProvenance || null,
     rankingScore: Number.isFinite(Number(score?.score)) ? Math.round(Number(score.score) * 1000) / 1000 : null,
     rankingTuple: score ? {
       exact: score.exact ?? null,
@@ -2950,6 +3123,7 @@ function geometryTargetDebugPayload(target = {}) {
     childIds: safeList(target.childIds),
     sourceRange: target.sourceRange || null,
     rectSource: target.rectSource || "unknown",
+    ownershipProvenance: target.ownershipProvenance || null,
     geometryQuality: target.geometryQuality || null,
     geometryValid: target.geometryValid ?? null,
     rejectionReasons: safeList(target.geometryRejectionReasons),
@@ -3344,6 +3518,10 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
       data-token-role={safePart.role || "other"}
       data-explainable={isHoverEligible ? "true" : undefined}
       data-inspectable={isHoverEligible ? "math-subtoken" : undefined}
+      data-active-target={isActive || isConceptActive ? "true" : undefined}
+      data-pinned-target={isPinned || hasWindow ? "true" : undefined}
+      data-selected-target={isSelected ? "true" : undefined}
+      data-related-target={isConceptRelated || isExplicitlyRelated ? "true" : undefined}
       tabIndex={isHoverEligible ? 0 : undefined}
       aria-label={accessibleTitle}
       onMouseEnter={handleEnter}
@@ -3366,7 +3544,7 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
         handleChunkRightClick(inspectablePart, stepId, event);
       }}
       className={cn(
-        "math-subtoken relative inline-block rounded-sm transition-all duration-200 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45",
+        "math-subtoken relative inline-block rounded-sm transition-all duration-200 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400",
         isHoverEligible && "explainable-token cursor-help",
         hasChildParts ? "math-subtoken-group px-0.5 pb-0.5 pt-0" : "math-subtoken-leaf px-0.5",
         isPowerGroup && "math-power-group",
@@ -3380,17 +3558,11 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
       )}
       style={{
         zIndex: depth + 3,
-        transform: `translateY(calc(var(--math-subtoken-offset-y, 0em) + ${
-          isActive || isConceptActive || isPinned || hasWindow ? "-1px" : "0px"
-        }))`,
-        color: isActive || isConceptActive || isPinned || hasWindow ? "#ccfbf1" : "inherit",
-        textDecorationLine: isActive || isConceptActive || isPinned || hasWindow ? "underline" : "none",
-        textDecorationColor: "rgba(94, 234, 212, 0.55)",
-        textUnderlineOffset: "0.18em",
+        transform: "translateY(var(--math-subtoken-offset-y, 0em))",
+        color: "inherit",
+        textDecorationLine: "none",
         flex: `${hitboxWeight} 1 0`,
-        filter: isActive || isConceptActive || isPinned || hasWindow
-          ? "drop-shadow(0 0 8px rgba(45, 212, 191, 0.42))"
-          : "none",
+        filter: "none",
       }}
     >
       {isPowerGroup && canRecurse ? (
@@ -3485,7 +3657,7 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
       )}
       {(isPinned || hasWindow) && (
         <span
-          className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-teal-200 shadow-[0_0_8px_rgba(94,234,212,0.8)]"
+          className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-neutral-500"
           aria-hidden="true"
         />
       )}
@@ -3494,6 +3666,9 @@ function MathSubToken({ part, parentChunk, stepId, depth = 0, tokenClassName = "
 }
 
 function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
+  const renderPerfToken = import.meta.env.DEV
+    ? startOmniMeasure("react.render.math-chunk", { stepId, chunkId: chunk?.id || "" })
+    : null;
   recordSemanticHoverPerf("mathChunkRender", { stepId, chunkId: chunk?.id || "" });
   const tokenRef = useRef(null);
   const mathVisualRef = useRef(null);
@@ -3509,15 +3684,38 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
   const dragPhaseLoggedRef = useRef(false);
   const lastResolvedHoverIdRef = useRef(null);
   const lastMovedHoverIdRef = useRef(null);
+  const activeChunkIdRef = useRef(null);
   const pointerResolveRetryFrameRef = useRef(0);
   const pointerResolveRevisionRef = useRef(0);
+  const latestSemanticPointerRef = useRef(null);
+  const resolvePointerAfterMeasureRef = useRef(
+    /** @type {(phase?: string) => boolean} */ (() => false)
+  );
+  const scheduleSemanticMeasurementRef = useRef(
+    /** @type {(phase?: string) => boolean} */ (() => false)
+  );
   const sourceDomInstanceRef = useRef("");
+  const overlayGeometrySignatureRef = useRef("");
   if (!sourceDomInstanceRef.current) {
     mathChunkDomInstanceSequence += 1;
     sourceDomInstanceRef.current = `math-chunk-${mathChunkDomInstanceSequence}`;
   }
   const handleAnnotatedMoveRef = useRef((_event) => {});
   const [overlayTargets, setOverlayTargets] = useState([]);
+  const updateOverlayTargets = useCallback((targets = []) => {
+    const signature = targets.map((target) => [
+      target.id || "",
+      safeList(target.rects).map((rect) => (
+        `${Math.round(rect.left * 10) / 10},${Math.round(rect.top * 10) / 10},${Math.round(rect.width * 10) / 10},${Math.round(rect.height * 10) / 10}`
+      )).join(";"),
+      target.measurementRevision ?? "",
+      target.geometryValid === false ? "invalid" : "valid",
+    ].join(":" )).join("|");
+    if (overlayGeometrySignatureRef.current === signature) return false;
+    overlayGeometrySignatureRef.current = signature;
+    setOverlayTargets(targets);
+    return true;
+  }, []);
   const safeChunk = useMemo(
     () => normalizeRenderableToken(chunk, `chunk-${stepId || "step"}`),
     [chunk, stepId]
@@ -3546,6 +3744,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     openReferenceIds = [],
     selectedTokenIds = [],
   } = hoverSemantic;
+  activeChunkIdRef.current = activeChunkId;
   const {
     handleChunkEnter = noop,
     handleChunkMove = noop,
@@ -3578,8 +3777,6 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     latex: safeChunk.latex,
     role: safeChunk.role,
   });
-  const isSiblingActive = activeChunkId && activeChunkId !== safeChunk.id;
-  const mathColor = isActive || isConceptActive || isPinned || hasWindow ? "#ccfbf1" : "rgba(224, 242, 254, 0.9)";
   const parts = safeChunk.parts;
   const hasParts = parts.length > 0;
   const isOperator = isOperatorToken(safeChunk);
@@ -3647,11 +3844,29 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       explicitPartCount: parts.length,
     }) : flattenTargets();
   }, [canonicalSemanticTree, parts, safeChunk.id, stepId]);
-  const authoritativeSemanticRender = useMemo(() => {
-    if (!canonicalSemanticTree) return null;
-    const serialized = serializeSemanticTreeToLatex(canonicalSemanticTree);
-    return serialized.error || !serialized.latex ? null : serialized;
-  }, [canonicalSemanticTree]);
+  const semanticRenderKey = useMemo(() => {
+    if (!canonicalSemanticTree) return "";
+    return [
+      renderSignature,
+      ...safeList(canonicalSemanticTree.flatNodes).map((node) => (
+        `${node.id || ""}:${node.sourceRange?.start ?? node.start ?? ""}-${node.sourceRange?.end ?? node.end ?? ""}`
+      )),
+    ].join("|");
+  }, [canonicalSemanticTree, renderSignature]);
+  const [semanticRenderState, setSemanticRenderState] = useState({ key: "", value: null });
+  const semanticRenderReady = semanticRenderState.key === semanticRenderKey;
+  const authoritativeSemanticRender = semanticRenderReady
+    ? semanticRenderState.value
+    : null;
+  useEffect(() => {
+    if (!canonicalSemanticTree || !semanticRenderKey) return undefined;
+    return prepareSemanticRender(canonicalSemanticTree, (serialized) => {
+        setSemanticRenderState({
+          key: semanticRenderKey,
+          value: serialized.error || !serialized.latex ? null : serialized,
+        });
+    });
+  }, [canonicalSemanticTree, semanticRenderKey]);
   useEffect(() => {
     if (!import.meta.env.DEV || typeof window === "undefined") return undefined;
     const debugWindow = /** @type {any} */ (window);
@@ -3768,7 +3983,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     ];
     const signature = semanticSnapshotSignature({ rootRect, visualRect, targets: acceptedTargets });
     const previous = geometrySnapshotRef.current;
-    const revision = previous.signature === signature && previous.valid
+    const revision = previous.signature === signature
       ? previous.revision
       : previous.revision + 1;
     measurementRevisionRef.current = revision;
@@ -3837,6 +4052,45 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     return snapshot;
   }, [renderRevision, safeChunk.id, semanticNodeById, stepId]);
 
+  const reconcileMeasuredHover = useCallback((phase) => {
+    const result = reconcileHoverOwnership(`source-geometry:${phase}`);
+    const activeId = lastResolvedHoverIdRef.current;
+    if (!activeId || activeChunkIdRef.current !== activeId) return;
+
+    const measuredTarget = geometrySnapshotRef.current?.targetById?.get(activeId);
+    const pointer = result?.pointer;
+    const pointerStillOnTarget = pointer && measuredTarget?.rects?.some((rect) => (
+      rectContainsPoint(rect, pointer.clientX, pointer.clientY)
+    ));
+    const retained = measuredTarget && result?.retained
+      && (result.owner === "tooltip" || pointerStillOnTarget);
+    if (!retained) {
+      lastResolvedHoverIdRef.current = null;
+      lastMovedHoverIdRef.current = null;
+      pointerResolveRevisionRef.current += 1;
+      if (pointerResolveRetryFrameRef.current) {
+        cancelAnimationFrame(pointerResolveRetryFrameRef.current);
+        pointerResolveRetryFrameRef.current = 0;
+      }
+      clearHoverLens();
+      return;
+    }
+
+    // Re-anchor the retained lens to the new authoritative rectangle without
+    // restarting its explanation request or changing its semantic identity.
+    const anchorRect = measuredTarget.rects.find((rect) => (
+      pointerStillOnTarget && rectContainsPoint(rect, pointer.clientX, pointer.clientY)
+    )) || measuredTarget.rects[0];
+    if (anchorRect) {
+      handleChunkMove({
+        clientX: pointer.clientX,
+        clientY: pointer.clientY,
+        anchorRect,
+        target: result.tooltip || tokenRef.current,
+      });
+    }
+  }, [clearHoverLens, handleChunkMove, reconcileHoverOwnership]);
+
   const measureSemanticTargets = useCallback((phase = "measure") => {
     const measurementStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
     const measurementRevision = measurementRevisionRef.current;
@@ -3866,7 +4120,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       replaceGeometrySnapshot("missing-render-root-or-semantic-nodes");
       measuredTargetCleanupRef.current?.();
       measuredTargetCleanupRef.current = null;
-      setOverlayTargets([]);
+      updateOverlayTargets([]);
       if (import.meta.env.DEV) endOmniMeasure(geometryPerfToken, { result: "missing-render-root-or-semantic-nodes" });
       return [];
     }
@@ -3883,7 +4137,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       const snapshot = commitGeometrySnapshot({ phase, rootRect, visualRect, targets: [] });
       measuredTargetCleanupRef.current?.();
       measuredTargetCleanupRef.current = registerMeasuredTargets(stepId, [], safeChunk.id);
-      setOverlayTargets([]);
+      updateOverlayTargets([]);
       if (import.meta.env.DEV) endOmniMeasure(geometryPerfToken, { result: "no-safe-annotations", revision: snapshot.revision });
       return true;
     }
@@ -4067,13 +4321,14 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
           scrollLeft: root.scrollLeft || 0,
           scrollTop: root.scrollTop || 0,
         };
-        setOverlayTargets(finalOverlayTargets.map((target) => ({
+        updateOverlayTargets(finalOverlayTargets.map((target) => ({
           ...targetViewportGeometryToLocal(target, rootRect, originSize),
-          measurementRevision,
+          measurementRevision: measurementRevisionRef.current,
           isLeafTarget: isLeafSemanticTarget(target),
           rectSource: target.rectSource || "unknown",
         })));
-        reconcileHoverOwnership(`source-geometry:${phase}`);
+        reconcileMeasuredHover(phase);
+        resolvePointerAfterMeasureRef.current(phase);
       }
 
       recordSemanticHoverPerf("geometryMeasurementComplete", {
@@ -5063,7 +5318,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
         phase,
         stepId,
         chunkId: safeChunk.id,
-        measurementRevision,
+        measurementRevision: measurementRevisionRef.current,
           stepIds: [stepId].filter(Boolean),
           semanticNodeCount: semanticNodes.length,
           leafTokenCount: leafNodes.length,
@@ -5128,13 +5383,14 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
         scrollLeft: root.scrollLeft || 0,
         scrollTop: root.scrollTop || 0,
       };
-      setOverlayTargets(finalOverlayTargets.map((target) => ({
+      updateOverlayTargets(finalOverlayTargets.map((target) => ({
         ...targetViewportGeometryToLocal(target, rootRect, originSize),
-        measurementRevision,
+        measurementRevision: measurementRevisionRef.current,
         isLeafTarget: isLeafSemanticTarget(target),
         rectSource: target.rectSource || "unknown",
       })));
-      reconcileHoverOwnership(`source-geometry:${phase}`);
+      reconcileMeasuredHover(phase);
+      resolvePointerAfterMeasureRef.current(phase);
     }
 
     recordSemanticHoverPerf("geometryMeasurementComplete", {
@@ -5155,7 +5411,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       });
     }
     return semanticTargetsRef.current;
-  }, [authoritativeSemanticRender, canonicalSemanticTree, commitGeometrySnapshot, reconcileHoverOwnership, registerMeasuredTargets, replaceGeometrySnapshot, safeChunk, semanticNodeById, semanticNodes, settings?.interaction?.debugSemanticHitboxes, stepId]);
+  }, [authoritativeSemanticRender, canonicalSemanticTree, commitGeometrySnapshot, reconcileMeasuredHover, registerMeasuredTargets, replaceGeometrySnapshot, safeChunk, semanticNodeById, semanticNodes, settings?.interaction?.debugSemanticHitboxes, stepId, updateOverlayTargets]);
 
   const translateSemanticGeometry = useCallback(({ changedTargets = [] } = {}) => {
     const translationStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -5585,9 +5841,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
         snapshotReason: geometrySnapshotRef.current?.reason || "",
         geometryRevision: geometrySnapshotRef.current?.revision || 0,
       });
-      if (hasInteractiveTargets) {
-        measureSemanticTargets(`pointer-resolve-retry:${reason}`);
-      }
+      scheduleSemanticMeasurementRef.current(`pointer-resolve-retry:${reason}`);
       const token = resolvePointerToken(pointer);
       if (pointerRevision !== pointerResolveRevisionRef.current) return;
       if (token) {
@@ -5599,7 +5853,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       }
     });
     return true;
-  }, [activateResolvedHoverTarget, clearHoverLens, hasInteractiveTargets, measureSemanticTargets, resolvePointerToken, safeChunk.id, stepId]);
+  }, [activateResolvedHoverTarget, clearHoverLens, resolvePointerToken, safeChunk.id, stepId]);
 
   const handleClick = (event) => {
     event.stopPropagation();
@@ -5609,6 +5863,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
 
   useEffect(() => {
     if (hasInteractiveTargets) return undefined;
+    if (activeChunkId !== safeChunk.id) return undefined;
     const node = tokenRef.current;
     if (!node) return undefined;
 
@@ -5660,6 +5915,10 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
 
   useEffect(() => {
     if (!hasInteractiveTargets) return undefined;
+    const ownsActiveHover = lastResolvedHoverIdRef.current !== null
+      || activeChunkId === safeChunk.id
+      || semanticNodeById.has(activeChunkId);
+    if (!ownsActiveHover) return undefined;
     const node = tokenRef.current;
     if (!node) return undefined;
 
@@ -5668,10 +5927,6 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       // chunk that currently owns a resolved target may translate a document
       // move into a global hover leave; otherwise sibling chunks race the
       // active owner and clear its debounced explanation request.
-      const ownsActiveHover = lastResolvedHoverIdRef.current !== null
-        || activeChunkId === safeChunk.id
-        || semanticNodeById.has(activeChunkId);
-      if (!ownsActiveHover) return;
       const target = event.target;
       const isOverToken = typeof Node !== "undefined" && target instanceof Node && node.contains(target);
       const floatingElement = typeof Element !== "undefined" && target instanceof Element
@@ -5750,6 +6005,10 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
   };
 
   const handleAnnotatedEnter = (event) => {
+    latestSemanticPointerRef.current = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    };
     pointerResolveRevisionRef.current += 1;
     const pointerRevision = pointerResolveRevisionRef.current;
     if (pointerResolveRetryFrameRef.current) {
@@ -5762,6 +6021,9 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     if (!hoverPhaseLoggedRef.current) {
       hoverPhaseLoggedRef.current = true;
       logReadinessSnapshot("first-hover");
+    }
+    if (pointerSnapshotNeedsRetry()) {
+      scheduleSemanticMeasurementRef.current("pointer-boundary-enter");
     }
     refreshMovedGeometryRoot("pointer-enter");
     const token = resolvePointerToken(event);
@@ -5780,6 +6042,10 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
   };
 
   const handleAnnotatedMove = (event) => {
+    latestSemanticPointerRef.current = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    };
     pointerResolveRevisionRef.current += 1;
     const pointerRevision = pointerResolveRevisionRef.current;
     if (pointerResolveRetryFrameRef.current) {
@@ -5797,6 +6063,9 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
     if (!hoverPhaseLoggedRef.current) {
       hoverPhaseLoggedRef.current = true;
       logReadinessSnapshot("first-hover");
+    }
+    if (pointerSnapshotNeedsRetry()) {
+      scheduleSemanticMeasurementRef.current("pointer-boundary-move");
     }
     let token = resolvePointerToken(event);
     if (!token && refreshMovedGeometryRoot("pointer-no-hit")) {
@@ -5832,7 +6101,35 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
   };
   handleAnnotatedMoveRef.current = handleAnnotatedMove;
 
+  resolvePointerAfterMeasureRef.current = (phase) => {
+    if (lastResolvedHoverIdRef.current !== null) return false;
+    const pointer = latestSemanticPointerRef.current;
+    const owner = tokenRef.current;
+    if (!pointer || !owner?.isConnected || typeof document === "undefined") return false;
+    const topElement = document.elementFromPoint?.(pointer.clientX, pointer.clientY);
+    if (!topElement || !owner.contains(topElement)) return false;
+    const token = resolvePointerToken({
+      ...pointer,
+      target: topElement,
+      currentTarget: owner,
+    });
+    if (!token) return false;
+    recordSemanticHoverPerf("pointerResolvedAfterMeasurement", {
+      phase,
+      stepId,
+      chunkId: safeChunk.id,
+      targetId: token.id,
+      measurementRevision: measurementRevisionRef.current,
+    });
+    return activateResolvedHoverTarget(token, {
+      ...pointer,
+      target: topElement,
+      currentTarget: owner,
+    }, { move: true });
+  };
+
   const handleAnnotatedLeave = (event) => {
+    latestSemanticPointerRef.current = null;
     pointerResolveRevisionRef.current += 1;
     if (pointerResolveRetryFrameRef.current) {
       cancelAnimationFrame(pointerResolveRetryFrameRef.current);
@@ -5891,15 +6188,18 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
 
   useLayoutEffect(() => {
     if (!hasInteractiveTargets) return undefined;
+    if (canonicalSemanticTree && !semanticRenderReady) return undefined;
     let disposed = false;
-    let scheduledFrame = 0;
     let postRenderFrame = 0;
+    let containerResizeTimer = 0;
     let pendingPhase = "";
+    const measurementKey = `${sourceDomInstanceRef.current}:${stepId}:${safeChunk.id}`;
     const clearFrames = () => {
-      if (scheduledFrame) cancelAnimationFrame(scheduledFrame);
+      cancelMathGeometryMeasurement(measurementKey);
       if (postRenderFrame) cancelAnimationFrame(postRenderFrame);
-      scheduledFrame = 0;
+      if (containerResizeTimer) clearTimeout(containerResizeTimer);
       postRenderFrame = 0;
+      containerResizeTimer = 0;
       pendingPhase = "";
       measureFrameRef.current = 0;
     };
@@ -5934,44 +6234,58 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
         phase,
         stepId,
         chunkId: safeChunk.id,
-        coalesced: Boolean(scheduledFrame),
+        coalesced: Boolean(measureFrameRef.current),
         previousRevision: measurementRevisionRef.current,
       });
-      if (scheduledFrame) return;
-      scheduledFrame = requestAnimationFrame(() => {
+      if (measureFrameRef.current) return;
+      measureFrameRef.current = 1;
+      scheduleMathGeometryMeasurement(measurementKey, () => {
         const framePhase = pendingPhase || phase;
-        scheduledFrame = 0;
         pendingPhase = "";
         measureFrameRef.current = 0;
         if (!disposed) measureSemanticTargets(framePhase);
       });
-      measureFrameRef.current = scheduledFrame;
     };
+    const requestScheduledMeasurement = (phase = "pointer-request") => {
+      if (disposed) return false;
+      scheduleMeasure(phase);
+      return true;
+    };
+    scheduleSemanticMeasurementRef.current = requestScheduledMeasurement;
     const windowResizeSignature = () => (
       typeof window === "undefined"
         ? ""
         : `${window.innerWidth}x${window.innerHeight}@${window.devicePixelRatio || 1}`
     );
-    const initialPhase = measurementRevisionRef.current === 0 ? "initial" : "semantic-change";
-    replaceGeometrySnapshot("render-commit");
-    measuredTargetCleanupRef.current?.();
-    measuredTargetCleanupRef.current = null;
-    hoverDiagnosticsRef.current = null;
-    hoverPhaseLoggedRef.current = false;
-    dragPhaseLoggedRef.current = false;
-    setOverlayTargets([]);
+    const currentSnapshot = geometrySnapshotRef.current;
+    const requiresRenderMeasurement = !currentSnapshot?.valid
+      || currentSnapshot.renderRevision !== renderRevision
+      || currentSnapshot.chunkId !== safeChunk.id
+      || currentSnapshot.stepId !== stepId
+      || currentSnapshot.domOwner !== tokenRef.current;
+    if (requiresRenderMeasurement) {
+      const initialPhase = measurementRevisionRef.current === 0 ? "initial" : "semantic-change";
+      replaceGeometrySnapshot("render-commit");
+      measuredTargetCleanupRef.current?.();
+      measuredTargetCleanupRef.current = null;
+      hoverDiagnosticsRef.current = null;
+      hoverPhaseLoggedRef.current = false;
+      dragPhaseLoggedRef.current = false;
+      updateOverlayTargets([]);
 
-    measureSemanticTargets(initialPhase);
-    postRenderFrame = requestAnimationFrame(() => {
-      postRenderFrame = 0;
-      const currentSnapshot = geometrySnapshotRef.current;
-      if (
-        !disposed
-        && (!currentSnapshot?.valid || safeList(currentSnapshot?.childTargets).length === 0)
-      ) {
-        measureSemanticTargets("explicit-fallback");
-      }
-    });
+      scheduleMeasure(initialPhase);
+      postRenderFrame = requestAnimationFrame(() => {
+        postRenderFrame = 0;
+        const latestSnapshot = geometrySnapshotRef.current;
+        if (
+          !disposed
+          && !measureFrameRef.current
+          && (!latestSnapshot?.valid || safeList(latestSnapshot?.childTargets).length === 0)
+        ) {
+          scheduleMeasure("explicit-fallback");
+        }
+      });
+    }
 
     const resizeObserver = typeof ResizeObserver !== "undefined" && tokenRef.current
       ? new ResizeObserver((entries) => {
@@ -5980,15 +6294,66 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
             entryCount: entries.length,
           })
           : null;
-        const contentRect = entries[0]?.contentRect;
-        const signature = contentRect
-          ? `${Math.round(contentRect.width * 100) / 100}x${Math.round(contentRect.height * 100) / 100}`
-          : "";
-        scheduleMeasure("resize", signature);
-        if (import.meta.env.DEV) endOmniMeasure(observerPerfToken, { signature });
+        for (const entry of entries) {
+          const owner = entry.target === tokenRef.current;
+          const role = owner ? "owner" : "container";
+          const width = entry.contentRect.width;
+          const height = entry.contentRect.height;
+          // Workspace height grows as solution content and semantic overlays
+          // settle, but that does not change target-local geometry. Width does
+          // matter for sidebar reflow. The token owner still tracks both axes.
+          const signature = owner
+            ? `${role}:${Math.round(width * 100) / 100}x${Math.round(height * 100) / 100}`
+            : `${role}:${Math.round(width * 100) / 100}`;
+          if (owner) {
+            scheduleMeasure("resize-owner", signature);
+            continue;
+          }
+          if (shouldIgnoreUnchangedInvalidation("resize-container", signature)) continue;
+          // Sidebar width transitions emit a container resize on nearly every
+          // frame. Keep cached root-local geometry aligned during the motion,
+          // then publish one new authoritative revision after it settles.
+          if (!geometrySnapshotRef.current?.valid) continue;
+          translateSemanticGeometry({ changedTargets: [entry.target] });
+          if (containerResizeTimer) clearTimeout(containerResizeTimer);
+          containerResizeTimer = setTimeout(() => {
+            containerResizeTimer = 0;
+            if (disposed || !geometrySnapshotRef.current?.valid) return;
+            translateSemanticGeometry({ changedTargets: [entry.target] });
+            const nextRevision = measurementRevisionRef.current + 1;
+            measurementRevisionRef.current = nextRevision;
+            geometrySnapshotRef.current = {
+              ...geometrySnapshotRef.current,
+              revision: nextRevision,
+              phase: "resize-container-translation",
+            };
+            overlayGeometrySignatureRef.current = "";
+            setOverlayTargets((current) => current.map((target) => ({
+              ...target,
+              measurementRevision: nextRevision,
+            })));
+            recordSemanticHoverPerf("geometryReflowRevision", {
+              stepId,
+              chunkId: safeChunk.id,
+              measurementRevision: nextRevision,
+            });
+          }, 90);
+        }
+        if (import.meta.env.DEV) endOmniMeasure(observerPerfToken, {
+          signatures: entries.map((entry) => (
+            entry.target === tokenRef.current ? "owner" : "container"
+          )),
+        });
       })
       : null;
     resizeObserver?.observe(tokenRef.current);
+    // The math token can keep its intrinsic dimensions while its containing
+    // workspace changes width or moves. Observe that layout boundary as well
+    // so sidebar changes invalidate every dependent geometry snapshot.
+    const layoutContainer = tokenRef.current?.closest?.("[data-math-workspace]");
+    if (layoutContainer && layoutContainer !== tokenRef.current) {
+      resizeObserver?.observe(layoutContainer);
+    }
     const mutationObserver = typeof MutationObserver !== "undefined" && mathVisualRef.current
       ? new MutationObserver((entries) => {
         // Hover glow/underline updates on our presentation shell do not
@@ -6037,11 +6402,10 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       `${stepId}:${safeChunk.id}`,
     );
     window.addEventListener("resize", handleResize);
-    const handleFontsLoaded = () => scheduleMeasure("fonts-loaded");
-    document.fonts?.addEventListener?.("loadingdone", handleFontsLoaded);
-    document.fonts?.ready?.then(() => {
-      scheduleMeasure("resize");
-    }).catch(() => {});
+    const handleFontsLoaded = () => scheduleMeasure("fonts-loaded", "fonts-loaded");
+    if (document.fonts?.status === "loading") {
+      document.fonts.addEventListener?.("loadingdone", handleFontsLoaded, { once: true });
+    }
     const diagnosticWindow = import.meta.env.DEV && typeof window !== "undefined"
       ? /** @type {any} */ (window)
       : null;
@@ -6060,6 +6424,9 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
 
     return () => {
       disposed = true;
+      if (scheduleSemanticMeasurementRef.current === requestScheduledMeasurement) {
+        scheduleSemanticMeasurementRef.current = () => false;
+      }
       clearFrames();
       if (pointerResolveRetryFrameRef.current) {
         cancelAnimationFrame(pointerResolveRetryFrameRef.current);
@@ -6079,13 +6446,17 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
         }
       }
     };
-  }, [hasInteractiveTargets, measureSemanticTargets, replaceGeometrySnapshot, safeChunk.id, stepId, translateSemanticGeometry]);
+  }, [authoritativeSemanticRender, canonicalSemanticTree, hasInteractiveTargets, measureSemanticTargets, renderRevision, replaceGeometrySnapshot, safeChunk.id, semanticRenderReady, stepId, translateSemanticGeometry, updateOverlayTargets]);
 
   useEffect(() => () => {
     measuredTargetCleanupRef.current?.();
     measuredTargetCleanupRef.current = null;
   }, []);
 
+  if (import.meta.env.DEV) endOmniMeasure(renderPerfToken, {
+    semanticNodeCount: semanticNodes.length,
+    overlayTargetCount: overlayTargets.length,
+  });
   return (
     <span
       ref={tokenRef}
@@ -6096,7 +6467,10 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       data-source-dom-instance={sourceDomInstanceRef.current}
       data-token-latex={safeChunk.latex}
       data-token-role={safeChunk.role || (isOperator ? "operator" : "other")}
+      data-semantic-node-count={semanticNodes.length}
+      data-semantic-render-ready={!canonicalSemanticTree || semanticRenderReady ? "true" : "false"}
       data-hover-active="false"
+      data-pinned-target={isPinned || hasWindow ? "true" : undefined}
       tabIndex={0}
       aria-label={accessibleTitle}
       onMouseEnter={hasInteractiveTargets ? handleAnnotatedEnter : undefined}
@@ -6128,17 +6502,15 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       }}
       onClick={handleClick}
       className={cn(
-        "math-token explainable-token relative -mx-0.5 inline-block cursor-help select-none rounded-sm px-0.5 py-0 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-teal-300/45",
+        "math-token explainable-token relative -mx-0.5 inline-block cursor-help select-none rounded-sm px-0.5 py-0 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400",
         hasInteractiveTargets && "math-token-group",
         deferToSubTokens && "math-token-defer-subtokens cursor-default",
         isOperator && "math-token-operator",
         isSelected && "omni-token-selected",
-        isSiblingActive && !isPinned && !isConceptRelated && "opacity-45",
         (isConceptRelated || isExplicitlyRelated) && !isConceptActive && "omni-related-token"
       )}
       style={{
-        transitionProperty: "opacity, background-color, transform, box-shadow, color",
-        transform: isActive || isConceptActive || isPinned || hasWindow ? "translateY(-1px)" : "translateY(0)",
+        transitionProperty: "background-color, box-shadow",
         ...(isActive || isConceptActive || isPinned || hasWindow
           ? {
               backgroundColor: "transparent",
@@ -6150,10 +6522,9 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       <span
         ref={mathVisualRef}
         style={{
-          color: mathColor,
-          filter: isActive || isConceptActive || isPinned || hasWindow ? "drop-shadow(0 0 8px rgba(45, 212, 191, 0.38))" : "none",
-          textDecorationLine: isActive || isConceptActive || isPinned || hasWindow ? "underline" : "none",
-          textDecorationColor: "rgba(94, 234, 212, 0.55)",
+          color: "var(--omni-text-primary)",
+          filter: "none",
+          textDecorationLine: "none",
           textUnderlineOffset: "0.18em",
         }}
         className={cn("katex-chunk math-visual-layer", hasInteractiveTargets && "annotated-katex-chunk")}
@@ -6208,6 +6579,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
               data-hitbox-region={semanticTargetRectRegion(target, rect)}
               data-coverage-state={target.isRejectedGeometry ? "rejected" : target.isUncoveredGlyph ? "missing" : target.isLeafTarget ? "covered" : "structural"}
               data-rect-source={target.rectSource || "unknown"}
+              data-ownership-provenance={target.ownershipProvenance || undefined}
               data-geometry-quality={target.geometryQuality || undefined}
               data-geometry-valid={target.isRejectedGeometry ? "false" : target.geometryValid === false ? "false" : "true"}
               data-rejection-reason={safeList(target.geometryRejectionReasons).join(",") || undefined}
@@ -6225,6 +6597,9 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
                   }
                 : {})}
               data-active-target={activeChunkId === target.id ? "true" : undefined}
+              data-pinned-target={pinnedChunkIds.includes(target.id) || openReferenceIds.includes(target.id) ? "true" : undefined}
+              data-selected-target={selectedTokenIds.includes(target.id) ? "true" : undefined}
+              data-parent-target={activeChunkData?.parentId === target.id ? "true" : undefined}
               style={{
                 left: `${rect.left}px`,
                 top: `${rect.top}px`,
@@ -6249,7 +6624,7 @@ function MathChunkView({ chunk, stepId, hoverSemantic, hoverActions }) {
       )}
       {(isPinned || hasWindow) && (
         <span
-          className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-teal-200 shadow-[0_0_10px_rgba(94,234,212,0.8)]"
+          className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-neutral-500"
           aria-hidden="true"
         />
       )}

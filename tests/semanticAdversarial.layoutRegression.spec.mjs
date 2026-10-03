@@ -92,6 +92,9 @@ test("native hover and pin preserve repeated identities after scrolling, resize 
   await submitCurrentComposer(page, "Inspect repeated math.");
   const step = page.locator(".step-card").first();
   await expect(step).toBeVisible();
+  await expect.poll(() => step.locator(".katex-html [data-semantic-selectable='true']").count(), {
+    timeout: 60_000,
+  }).toBeGreaterThanOrEqual(30);
   const ids = await step.locator(".katex-html [data-semantic-selectable='true']").evaluateAll((owners) => owners
     .filter((owner) => owner.textContent === "x").map((owner) => owner.getAttribute("data-semantic-id")));
   expect(ids.length).toBeGreaterThanOrEqual(30);

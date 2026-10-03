@@ -123,57 +123,57 @@ export default function WorkspaceCompareView({ problem, selectedStep }) {
 
   return (
     <section className="grid gap-4 lg:grid-cols-2">
-      <article className="rounded-2xl border border-teal-300/[0.14] bg-white/[0.035] p-4 shadow-[0_18px_44px_rgba(0,0,0,0.2)]">
+      <article className="rounded-xl bg-neutral-50 p-4">
         <div className="mb-3 flex items-center gap-2">
-          <Columns2 className="h-4 w-4 text-teal-200/70" />
-          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-teal-200/62">
+          <Columns2 className="h-4 w-4 text-neutral-500" />
+          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-500">
             Method A
           </p>
         </div>
-        <h3 className="text-base font-semibold text-cyan-50">Current solution</h3>
+        <h3 className="text-base font-semibold text-neutral-900">Current solution</h3>
         {selectedStep?.math && (
-          <div className="mt-3 overflow-x-auto rounded-xl border border-teal-300/[0.12] bg-teal-300/[0.045] px-3 py-2 font-serif text-sm italic text-cyan-50/86 omni-scrollbar">
+          <div className="mt-3 overflow-x-auto border-l border-neutral-300 px-3 py-2 font-serif text-sm italic text-neutral-900 omni-scrollbar">
             <InlineMath math={selectedStep.math} />
           </div>
         )}
-        <p className="mt-3 text-sm leading-6 text-slate-300/68">
+        <p className="mt-3 text-sm leading-6 text-neutral-600">
           {selectedStep?.summary || selectedStep?.label || "Select a step to compare its role in the current solution."}
         </p>
       </article>
 
-      <article className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 shadow-[0_18px_44px_rgba(0,0,0,0.18)]">
+      <article className="rounded-xl bg-neutral-50 p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-amber-100/72" />
-            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-amber-100/62">
+            <Sparkles className="h-4 w-4 text-neutral-500" />
+            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-500">
               Method B
             </p>
           </div>
-          <span className="rounded-full border border-amber-300/[0.16] bg-amber-300/[0.06] px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-amber-100/72">
+          <span className="rounded-full bg-neutral-200 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-neutral-600">
             {alternative.status}
           </span>
         </div>
         {state.loading ? (
-          <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/[0.06] bg-black/12 px-3 py-2 text-sm leading-6 text-slate-300/68">
-            <Loader2 className="h-4 w-4 animate-spin text-teal-100/75" />
+          <div className="mt-3 flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm leading-6 text-neutral-600">
+            <Loader2 className="h-4 w-4 animate-spin text-neutral-500" />
             Loading compare methods...
           </div>
         ) : (
           <>
             {state.error && (
-              <p className="mt-3 rounded-xl border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-sm leading-6 text-rose-100/82">
+              <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-rose-700">
                 {state.error}
               </p>
             )}
             {state.warning && (
-              <p className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm leading-6 text-amber-50/86">
+              <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
                 {state.warning}
               </p>
             )}
-            <h3 className="text-base font-semibold text-cyan-50">{alternative.title}</h3>
+            <h3 className="text-base font-semibold text-neutral-900">{alternative.title}</h3>
             <div className="mt-3 space-y-2">
               {alternative.points.map((point) => (
-                <p key={point} className="rounded-xl border border-white/[0.06] bg-black/12 px-3 py-2 text-sm leading-6 text-slate-300/68">
+                <p key={point} className="border-l border-neutral-300 px-3 py-1 text-sm leading-6 text-neutral-600">
                   {point}
                 </p>
               ))}

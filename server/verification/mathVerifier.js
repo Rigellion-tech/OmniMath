@@ -150,7 +150,13 @@ function checkIntegral(claim, options) {
       const n = BigInt(degree + 1);
       value = addQ(value, mulQ(divQ(q, rational(n)), addQ(rational(hi.n ** n, hi.d ** n), negQ(rational(lo.n ** n, lo.d ** n)))));
     }
-    return { ...compareExpressions(num(value), right, options), method: "exact_polynomial_integration", exactIntegral: qText(value) };
+    const comparison = compareExpressions(num(value), right, options);
+    return {
+      ...comparison,
+      method: "exact_polynomial_integration",
+      comparisonMethod: comparison.method,
+      exactIntegral: qText(value),
+    };
   } catch { /* A bounded numerical method is a separate evidence level. */ }
   try {
     const estimates = quadrature(integrand, variable, lower, upper);

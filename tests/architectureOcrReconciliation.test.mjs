@@ -8,6 +8,7 @@ import {
 } from "../src/api/mathClient.js";
 import { createPendingReviewedProblemState } from "../src/lib/solutionState.js";
 import { assessOcrSolveDecision } from "../server/ocrSolvePolicy.js";
+import { recordExtraction, recordedSolvePayload } from "./helpers/recordedExtraction.mjs";
 
 const originalFetch = globalThis.fetch;
 
@@ -85,26 +86,40 @@ describe("architecture OCR reconciliation", () => {
     process.env.NODE_ENV = "test";
     try {
       const app = await import(`../server/app.js?architecture-ocr-${Date.now()}-${Math.random()}`);
+      const recorded = await recordExtraction({
+        problem,
+        latex: extraction.extractedProblemLatex,
+        imageHash: extraction.imageSource.imageHash,
+        extractionValidation: structuralReview,
+      });
       const req = {
         method: "POST",
         url: "/api/solve-extracted-problem",
         headers: { "content-type": "application/json", host: "localhost:8787" },
         socket: { remoteAddress: "127.8.0.1" },
-        body: { ...payload, debugRequestId: "canonical-solve-reviewed-unchanged" },
+        body: recordedSolvePayload(recorded, {
+          problem,
+          latex: extraction.extractedProblemLatex,
+          solveDecision: "confirmed",
+          canonicalProblem: payload.canonicalProblem,
+          body: { ...payload, debugRequestId: "canonical-solve-reviewed-unchanged" },
+        }),
       };
       const res = responseRecorder();
       await app.handleSolveExtractedProblemRequest(req, res);
       assert.equal(res.statusCode, 200);
       const response = res.json();
       assert.equal(response.requestId, "canonical-solve-reviewed-unchanged");
-      assert.deepEqual(response.reviewAction, payload.reviewAction);
-      assert.deepEqual(response.imageSource.reviewAction, payload.reviewAction);
+      // The server-bound action adds the authenticated extraction/revision
+      // identity that the earlier client-only contract did not yet possess.
+      assert.deepEqual(response.reviewAction, req.body.reviewAction);
+      assert.deepEqual(response.imageSource.reviewAction, req.body.reviewAction);
       assert.deepEqual(response.extractionValidation, structuralReview);
 
       const directReq = {
         ...req,
         body: {
-          ...payload,
+          ...req.body,
           solveDecision: "direct",
           reviewAction: null,
           debugRequestId: "canonical-solve-unreviewed-direct",

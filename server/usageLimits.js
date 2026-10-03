@@ -12,6 +12,11 @@ const DEFAULT_MONTHLY_TOKEN_LIMIT = 2000000;
 const DEFAULT_DAILY_SPEND_LIMIT_USD = 2;
 const DEFAULT_MONTHLY_SPEND_LIMIT_USD = 50;
 const METRICS = ["requests", "tokens", "costMicros"];
+const UNRECONCILED_USAGE_STATUSES = new Set([
+  "unknown_due_to_abort",
+  "unknown_unreconciled",
+  "partially_observed",
+]);
 const GLOBAL_USAGE_IDENTITY = {
   key: "global",
   tier: "global",
@@ -832,20 +837,74 @@ export async function checkAndReserveUsage({
   };
 }
 
+function cloneProviderAttempts(providerAttempts) {
+  if (!Array.isArray(providerAttempts)) return [];
+  const seen = new WeakSet();
+  try {
+    return JSON.parse(JSON.stringify(providerAttempts, (key, value) => {
+      if (typeof value === "undefined" || typeof value === "function") return undefined;
+      if (typeof value === "bigint") return value.toString();
+      if (value instanceof Error) {
+        return {
+          name: value.name || "Error",
+          message: value.message || "",
+          code: value.code || null,
+        };
+      }
+      if (value && typeof value === "object") {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
+      }
+      return value;
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export async function settleTokenUsage(reservation, actualTokens = 0, actualCostMicros = 0, {
   actualInputTokens = 0,
   actualOutputTokens = 0,
+  actualReasoningTokens = 0,
   providerCalls = 1,
   settlementReason = "success",
+  usageStatus = "observed",
+  providerDispatched = false,
+  providerAttempts = [],
 } = {}) {
   if (!reservation) return null;
 
   const normalizedActualTokens = Math.max(0, Math.ceil(Number(actualTokens) || 0));
   const normalizedActualCostMicros = Math.max(0, Math.ceil(Number(actualCostMicros) || 0));
-  const normalizedProviderCalls = Math.max(0, Math.ceil(Number(providerCalls) || 0));
+  const normalizedInputTokens = Math.max(0, Math.ceil(Number(actualInputTokens) || 0));
+  const normalizedOutputTokens = Math.max(0, Math.ceil(Number(actualOutputTokens) || 0));
+  const normalizedReasoningTokens = Math.max(0, Math.ceil(Number(actualReasoningTokens) || 0));
+  const normalizedProviderAttempts = cloneProviderAttempts(providerAttempts);
+  const dispatched = Boolean(
+    providerDispatched
+    || Number(providerCalls) > 0
+    || normalizedProviderAttempts.length > 0
+  );
+  const normalizedProviderCalls = Math.max(
+    0,
+    Math.ceil(Number(providerCalls) || 0),
+    normalizedProviderAttempts.length,
+    dispatched ? 1 : 0
+  );
+  const isUnreconciled = UNRECONCILED_USAGE_STATUSES.has(usageStatus);
+  const observedTokens = Math.max(
+    normalizedActualTokens,
+    normalizedInputTokens + normalizedOutputTokens
+  );
+  const settledTokens = isUnreconciled
+    ? Math.max(reservation.estimatedTokens, observedTokens)
+    : normalizedActualTokens;
+  const settledCostMicros = isUnreconciled
+    ? Math.max(reservation.estimatedCostMicros, normalizedActualCostMicros)
+    : normalizedActualCostMicros;
   const requestDelta = normalizedProviderCalls - 1;
-  const tokenDelta = normalizedActualTokens - reservation.estimatedTokens;
-  const costDelta = normalizedActualCostMicros - reservation.estimatedCostMicros;
+  const tokenDelta = settledTokens - reservation.estimatedTokens;
+  const costDelta = settledCostMicros - reservation.estimatedCostMicros;
   if (requestDelta !== 0) {
     await addUsage(
       reservation.keys.requests.daily,
@@ -902,19 +961,54 @@ export async function settleTokenUsage(reservation, actualTokens = 0, actualCost
   }
 
   const usage = await createCurrentUsage(reservation.identity, reservation.kind);
+  const normalizedSettlementReason = dispatched && settlementReason === "failure-before-provider"
+    ? "failure"
+    : settlementReason;
   usage.settlement = {
     reservedTokens: reservation.estimatedTokens,
-    actualInputTokens: Math.max(0, Math.ceil(Number(actualInputTokens) || 0)),
-    actualOutputTokens: Math.max(0, Math.ceil(Number(actualOutputTokens) || 0)),
-    actualTotalTokens: normalizedActualTokens,
+    actualInputTokens: isUnreconciled ? null : normalizedInputTokens,
+    actualOutputTokens: isUnreconciled ? null : normalizedOutputTokens,
+    actualReasoningTokens: isUnreconciled ? null : normalizedReasoningTokens,
+    actualTotalTokens: isUnreconciled ? null : normalizedActualTokens,
     estimatedTokens: reservation.estimatedTokens,
     providerCalls: normalizedProviderCalls,
-    settledTokens: normalizedActualTokens,
-    releasedTokens: Math.max(0, reservation.estimatedTokens - normalizedActualTokens),
+    settledTokens,
+    releasedTokens: isUnreconciled
+      ? 0
+      : Math.max(0, reservation.estimatedTokens - normalizedActualTokens),
     reservedCostMicros: reservation.estimatedCostMicros,
-    actualCostMicros: normalizedActualCostMicros,
-    settlementReason,
+    actualCostMicros: isUnreconciled ? null : normalizedActualCostMicros,
+    settlementReason: normalizedSettlementReason,
+    usageStatus,
+    providerDispatched: dispatched,
+    providerAttempts: normalizedProviderAttempts,
   };
+  if (isUnreconciled) {
+    usage.settlement.observedInputTokens = normalizedInputTokens || null;
+    usage.settlement.observedOutputTokens = normalizedOutputTokens || null;
+    usage.settlement.observedReasoningTokens = normalizedReasoningTokens || null;
+    usage.settlement.observedTotalTokens = observedTokens || null;
+    usage.settlement.observedCostMicros = normalizedActualCostMicros || null;
+    usage.settlement.settledCostMicros = settledCostMicros;
+    usage.settlement.releasedCostMicros = 0;
+    usage.settlement.costStatus = "unreconciled";
+    console.warn("[omnimath:usage-unreconciled]", {
+      subject: reservation.identity?.subject || reservation.identity?.key || "unknown",
+      kind: reservation.kind,
+      usageStatus,
+      settlementReason: normalizedSettlementReason,
+      providerCalls: normalizedProviderCalls,
+      providerDispatched: dispatched,
+      reservedTokens: reservation.estimatedTokens,
+      observedTokens: observedTokens || null,
+      settledTokens,
+      reservedCostMicros: reservation.estimatedCostMicros,
+      observedCostMicros: normalizedActualCostMicros || null,
+      settledCostMicros,
+      providerAttempts: normalizedProviderAttempts,
+      reconciliationAutomation: "not_configured",
+    });
+  }
   return usage;
 }
 

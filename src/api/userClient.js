@@ -1,3 +1,5 @@
+import { sanitizeProgressiveProblemForPersistence } from "../lib/progressiveSolve.js";
+
 async function parseResponse(response) {
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json")
@@ -78,15 +80,18 @@ export async function fetchUsageSnapshot({ getToken }) {
   return parseResponse(response);
 }
 
-function buildSessionPayload(session) {
+export function buildSessionPayload(session) {
+  const problem = sanitizeProgressiveProblemForPersistence(session.problem || null);
+  const problems = (session.problems || (problem ? [problem] : []))
+    .map(sanitizeProgressiveProblemForPersistence);
   return {
     id: session.id,
     title: session.title,
     demoKey: null,
     messages: session.messages || [],
-    problems: session.problems || (session.problem ? [session.problem] : []),
-    problem: session.problem || null,
-    steps: session.steps || session.problem?.steps || [],
+    problems,
+    problem,
+    steps: problem?.progressiveSolve ? problem.steps : session.steps || problem?.steps || [],
     pinnedWindows: session.pinnedWindows || [],
   };
 }
@@ -125,5 +130,14 @@ export async function updateUserSession({ getToken, session }) {
     body: JSON.stringify({ session: buildSessionPayload(session) }),
   });
 
+  return parseResponse(response);
+}
+
+export async function deleteUserSession({ getToken, sessionId }) {
+  const authHeaders = await getAuthHeaders(getToken, { fresh: true, endpoint: "/api/sessions:delete" });
+  const response = await fetch(`/api/sessions?id=${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+    headers: authHeaders,
+  });
   return parseResponse(response);
 }

@@ -15,6 +15,8 @@ function stableStringify(value) {
 export function createExplanationCacheKey({
   userId,
   problem,
+  canonicalInputHash = "",
+  context = null,
   reference = "",
   depth = "intermediate",
   type = "text",
@@ -22,7 +24,12 @@ export function createExplanationCacheKey({
 }) {
   const source = stableStringify({
     userId,
-    problem: String(problem || "").trim().toLowerCase(),
+    // Mathematical identifiers are case-sensitive: F and f, or A and a, can
+    // denote different objects. Preserve case so cache/dedup cannot merge
+    // distinct canonical inputs.
+    problem: String(problem || "").trim(),
+    canonicalInputHash,
+    context,
     reference,
     depth,
     type,

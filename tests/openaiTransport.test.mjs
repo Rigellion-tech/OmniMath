@@ -7,6 +7,7 @@ import {
   isRetryableOpenAiTransportError,
   normalizeOpenAiTransportError,
 } from "../server/openai.js";
+import { createSolveBudget } from "../server/solveBudget.js";
 
 const originalFetch = globalThis.fetch;
 const originalEnv = {
@@ -17,6 +18,8 @@ const originalEnv = {
   OMNIMATH_REPAIR_MODEL: process.env.OMNIMATH_REPAIR_MODEL,
   OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS:
     process.env.OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS,
+  OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS:
+    process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS,
 };
 
 function restore() {
@@ -80,6 +83,39 @@ function domTimeoutError(cause = undefined) {
 afterEach(() => restore());
 
 describe("OpenAI transport retry diagnostics", () => {
+  it("does not dispatch after the authoritative total deadline has expired", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    let current = 10_000;
+    let calls = 0;
+    const budget = createSolveBudget({
+      totalTimeoutMs: 90_000,
+      now: () => current,
+      setTimer: () => 1,
+      clearTimer: () => {},
+    });
+    current += 90_000;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return jsonResponse(responseBody());
+    };
+
+    try {
+      await assert.rejects(
+        () => createMathExplanation({
+          prompt: "Solve x+1=2",
+          originalProblem: "x+1=2",
+          debugContext: { requestId: "expired-before-dispatch", solveBudget: budget },
+        }),
+        (error) => error.code === "AI_SOLVE_TIMEOUT"
+          && error.timeoutSource === "total_solve_deadline",
+      );
+      assert.equal(calls, 0);
+      assert.equal(budget.providerAttempts.length, 0);
+    } finally {
+      budget.cleanup();
+    }
+  });
+
   it("classifies DOM TimeoutError code 23 as a non-retryable request timeout", async () => {
     const timeoutError = domTimeoutError();
     const normalized = normalizeOpenAiTransportError(timeoutError);
@@ -168,8 +204,8 @@ describe("OpenAI transport retry diagnostics", () => {
           assert.equal(diagnostics.model, "gpt-5.6-terra");
           assert.equal(diagnostics.modelRole, "repair");
           assert.equal(diagnostics.solveMode, "quality-repair");
-          assert.ok(diagnostics.timeoutMs <= 75000);
-          assert.ok(diagnostics.timeoutMs >= 74000);
+          assert.ok(diagnostics.timeoutMs <= 65500);
+          assert.ok(diagnostics.timeoutMs >= 64500);
           assert.equal(diagnostics.maxAttempts, 2);
           assert.equal(
             diagnostics.timeoutSource,
@@ -194,8 +230,8 @@ describe("OpenAI transport retry diagnostics", () => {
     assert.equal(exceptionLogs[0].model, "gpt-5.6-terra");
     assert.equal(exceptionLogs[0].modelRole, "repair");
     assert.equal(exceptionLogs[0].solveMode, "quality-repair");
-    assert.ok(exceptionLogs[0].timeoutMs <= 75000);
-    assert.ok(exceptionLogs[0].timeoutMs >= 74000);
+    assert.ok(exceptionLogs[0].timeoutMs <= 65500);
+    assert.ok(exceptionLogs[0].timeoutMs >= 64500);
     assert.equal(
       exceptionLogs[0].timeoutSource,
       "OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS",

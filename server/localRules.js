@@ -110,6 +110,15 @@ function asksForDerivativeOrRule(value = "") {
     .test(String(value || ""));
 }
 
+const ADVANCED_DERIVATIVE_PROMPT_PATTERN = /(?:\\int|[∫∬∭]|\bintegral\b|\bvariational\b|\bnewton\b|\bquasi[-\s]?newton\b|\bpde\b|partial\s+differential|\bconstraint(?:ed|s)?\b|lagrange\s+multiplier|\bfunctional\b|weak\s+form|fr[eé]chet|\bjacobian\b|\bhessian\b|boundary\s+(?:condition|value)|\bsystem\b)/iu;
+const EXPLICIT_ELEMENTARY_DERIVATIVE_PATTERN = /^(?:please\s+)?(?:(?:differentiate|derive)\b|(?:use|apply|find|compute|calculate|evaluate|explain|identify|name|state)\b[^\n]{0,80}\b(?:derivative|rule)\b|(?:what|which)\b[^\n]{0,80}\b(?:derivative|rule)\b)/iu;
+
+function isExplicitElementaryDerivativeRequest(value = "") {
+  const text = String(value || "").trim();
+  if (!text || text.length > 240 || ADVANCED_DERIVATIVE_PROMPT_PATTERN.test(text)) return false;
+  return EXPLICIT_ELEMENTARY_DERIVATIVE_PATTERN.test(text);
+}
+
 function isStokesParaboloidCurlProblem(value = "") {
   const text = String(value);
   return /(?:stokes|curl|\\nabla\s*\\times|∇\s*×|\\iint|∬)/iu.test(text)
@@ -325,6 +334,13 @@ export function createLocalRuleExplanation(problem, { source = "text" } = {}) {
 
   const stokesExplanation = createStokesParaboloidCurlExplanation(problem);
   if (stokesExplanation) return stokesExplanation;
+
+  // Generic teaching cards are intentionally limited to short, explicit
+  // elementary derivative questions. Advanced prompts often contain words
+  // such as "derivative" and a nested sine/cosine while asking for a full
+  // variational, PDE, or Newton solve; treating those incidental terms as the
+  // whole problem returns a plausible-looking answer to a different question.
+  if (!isExplicitElementaryDerivativeRequest(problem)) return null;
 
   const rule = explainLocalRule(problem);
   if (!rule) return null;

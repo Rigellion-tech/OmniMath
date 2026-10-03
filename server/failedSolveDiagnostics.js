@@ -95,15 +95,37 @@ function relevantResponseMetadata(diagnostics = {}) {
   };
 }
 
-function summarizeUsageSettlement({ result = null, error = null, diagnostics = {} } = {}) {
+function summarizeUsageSettlement({ result = null, error = null, diagnostics = {}, validation = {} } = {}) {
   const usage = error?._aiUsage || result?._aiUsage || diagnostics.usage || null;
-  const providerCalls = Number.isFinite(error?._aiCallCount)
+  const providerAttempts = error?._aiProviderAttempts
+    || result?._aiProviderAttempts
+    || diagnostics.providerAttempts
+    || error?.openAiTransportDiagnostics?.providerAttempts
+    || error?._omniOpenAiDiagnostics?.providerAttempts
+    || result?._omniOpenAiDiagnostics?.providerAttempts
+    || validation.providerAttempts
+    || [];
+  const explicitProviderDispatched = error?._aiProviderDispatched
+    ?? result?._aiProviderDispatched
+    ?? diagnostics.providerDispatched
+    ?? validation.providerDispatched;
+  const countedProviderCalls = Number.isFinite(error?._aiCallCount)
     ? Math.max(0, Number(error._aiCallCount))
     : Number.isFinite(result?._aiCallCount)
       ? Math.max(0, Number(result._aiCallCount))
       : usage
         ? 1
         : 0;
+  const providerDispatched = Boolean(
+    explicitProviderDispatched
+    || countedProviderCalls > 0
+    || (Array.isArray(providerAttempts) && providerAttempts.length > 0)
+  );
+  const providerCalls = Math.max(
+    countedProviderCalls,
+    Array.isArray(providerAttempts) ? providerAttempts.length : 0,
+    providerDispatched ? 1 : 0
+  );
   const inputTokens = Number(usage?.input_tokens || usage?.prompt_tokens || 0);
   const outputTokens = Number(usage?.output_tokens || usage?.completion_tokens || 0);
   const reasoningTokens = Number(
@@ -113,7 +135,41 @@ function summarizeUsageSettlement({ result = null, error = null, diagnostics = {
     || 0
   );
   const totalTokens = Number(usage?.total_tokens || 0) || inputTokens + outputTokens;
-  if (!usage && providerCalls === 0) return null;
+  if (!usage && !providerDispatched) return null;
+  const explicitUsageStatus = error?._aiUsageStatus
+    || result?._aiUsageStatus
+    || diagnostics.usageStatus
+    || validation.usageStatus
+    || null;
+  const unobservedAttempts = Array.isArray(providerAttempts)
+    ? providerAttempts.filter((attempt) => attempt?.usageStatus !== "observed")
+    : [];
+  const usageStatus = explicitUsageStatus
+    || (unobservedAttempts.length > 0
+      ? usage
+        ? "partially_observed"
+        : unobservedAttempts.some((attempt) => attempt?.abortAt || attempt?.abortedAt)
+          ? "unknown_due_to_abort"
+          : "unknown_unreconciled"
+      : usage ? "observed" : "unknown_unreconciled");
+  if (["unknown_due_to_abort", "unknown_unreconciled", "partially_observed"].includes(usageStatus)) {
+    return {
+      providerCalls,
+      actualInputTokens: null,
+      actualOutputTokens: null,
+      actualReasoningTokens: null,
+      actualTotalTokens: null,
+      observedInputTokens: inputTokens > 0 ? Math.max(0, Math.ceil(inputTokens)) : null,
+      observedOutputTokens: outputTokens > 0 ? Math.max(0, Math.ceil(outputTokens)) : null,
+      observedReasoningTokens: reasoningTokens > 0 ? Math.max(0, Math.ceil(reasoningTokens)) : null,
+      observedTotalTokens: totalTokens > 0 ? Math.max(0, Math.ceil(totalTokens)) : null,
+      usageStatus,
+      costStatus: "unreconciled",
+      providerDispatched,
+      providerAttempts: safeJsonClone(Array.isArray(providerAttempts) ? providerAttempts : []),
+      settlementReason: error ? "failure" : "unknown",
+    };
+  }
   return {
     providerCalls,
     actualInputTokens: Math.max(0, Math.ceil(inputTokens || 0)),
@@ -167,7 +223,12 @@ function buildArtifact({
   const exactFailedRule = solutionIssues[0] || error?.code || error?.message || null;
   const responseFailureType = error?.responseFailureType || validation.responseFailureType || diagnostics.responseFailureType || null;
   const validationContext = error?.solutionValidationContext || validation.validationContext || {};
-  const usageSettlement = validation.usageSettlement || summarizeUsageSettlement({ result, error, diagnostics });
+  const usageSettlement = validation.usageSettlement || summarizeUsageSettlement({
+    result,
+    error,
+    diagnostics,
+    validation,
+  });
   const validationIssueCodes = [
     ...(Array.isArray(validation.repairFeedback?.issueCodes) ? validation.repairFeedback.issueCodes : []),
     ...(Array.isArray(validation.issueCodes) ? validation.issueCodes : []),

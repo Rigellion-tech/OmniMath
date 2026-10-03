@@ -17,13 +17,13 @@ export default class ErrorBoundary extends React.Component {
   render() {
     if (this.state.error) {
       return (
-        <div className="min-h-screen bg-[#061116] p-6 text-slate-100">
-          <div className="mx-auto mt-16 max-w-xl rounded-xl border border-rose-300/20 bg-rose-400/10 p-5">
-            <h1 className="text-lg font-semibold text-rose-100">OmniMath hit a rendering error</h1>
-            <p className="mt-2 text-sm leading-6 text-slate-200/75">
+        <div className="min-h-screen bg-white p-6 text-neutral-900">
+          <div className="mx-auto mt-16 max-w-xl rounded-xl border border-rose-200 bg-rose-50 p-5 shadow-sm">
+            <h1 className="text-lg font-semibold text-rose-900">OmniMath hit a rendering error</h1>
+            <p className="mt-2 text-sm leading-6 text-neutral-700">
               The app stayed alive, but one view failed to render. Check the browser console for the full stack.
             </p>
-            <pre className="mt-4 max-h-56 overflow-auto rounded-lg bg-black/30 p-3 text-xs text-rose-50/80">
+            <pre className="mt-4 max-h-56 overflow-auto rounded-lg border border-rose-200 bg-white p-3 text-xs text-rose-800">
               {this.state.error?.message || String(this.state.error)}
             </pre>
           </div>

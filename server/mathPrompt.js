@@ -44,7 +44,7 @@ export function buildMathExplanationPrompt({ problem, history = [], image = fals
 - steps[].equationLatex must be the displayed equation for that step in pure valid LaTeX only.
 - steps[].explanation must explain that step in one concise sentence.
 - steps[].tokens must be an array. Use [] if token/subtoken extraction is not useful.
-- finalAnswerLatex must obey the standalone-final-expression contract below.
+- finalAnswerLatex must obey the concise-result-summary contract below.
 - Do not return prose-only content. Do not solve the generic prompt text.`
     : `Text output contract:
 - The problemLatex field must be the original problem in clean pure valid LaTeX only.
@@ -91,6 +91,9 @@ Quality rules:
 - Do not introduce undefined placeholder functions or refer to a definition that was not actually provided.
 - finalAnswerLatex must contain the actual final integral expression or a numeric/exact value. It must not depend on undefined placeholder functions.
 - finalAnswerLatex must give the complete final mathematical result in renderable LaTeX.
+  - It is a result summary, not a second derivation. Do not repeat the sequence of steps, intermediate Newton/KKT systems, substitutions, or proof.
+  - For optimization give the requested optimizer/correction, objective or residual as needed. For proofs give the conclusion. For multi-part questions retain concise labelled results for every part.
+  - Preserve mathematically necessary domain restrictions, branches, parameter conditions, assumptions and non-uniqueness; brevity must not erase qualifications.
   - A single value or equation is preferred when it states the whole answer.
   - Keep related equations together when the answer is a system, a boundary/initial-value problem, a piecewise result, a parameterized family, or a result with conditions.
   - Aligned, cases, array, and other KaTeX-compatible multiline forms are allowed when they clarify the final result.
@@ -130,6 +133,7 @@ Extraction rules:
 - Keep these distinct: e^{x^2}, e^{x^3}, x^3z, x^{10}, y^2z^2, and \\cos(xy).
 - confidence must be an integer from 0 to 100 for the extraction only.
 - issues must list any ambiguity that could change the solved problem, including unclear superscripts/subscripts, dropped parentheses, changed function arguments, vector component count uncertainty, unclear integral bounds, or theorem-sensitive boundary/orientation structure.
+- If the image cannot reasonably be read, return empty extraction strings, confidence 0, and exactly one high-severity issue with type image_unreadable. Do not use image_unreadable for a readable but ambiguous problem.
 - Return JSON only. Do not include markdown, comments, code fences, or prose outside JSON.`;
 }
 

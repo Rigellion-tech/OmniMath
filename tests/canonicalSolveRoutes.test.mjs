@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { it } from "node:test";
 import { createCanonicalProblemPayload } from "../src/lib/canonicalProblem.js";
+import { recordExtraction, recordedSolvePayload } from "./helpers/recordedExtraction.mjs";
 
 function responseRecorder() {
   return {
@@ -43,11 +44,11 @@ it("typed and OCR canonical input enter one solve orchestration while OCR proven
   process.env.NODE_ENV = "test";
   process.env.OMNIMATH_DEBUG_SOLVE = "1";
   process.env.USAGE_LOCAL_STORE_PATH = join(storeDir, "usage.json");
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.CLERK_SECRET_KEY;
-  delete process.env.CLERK_JWT_KEY;
-  delete process.env.DATABASE_URL;
-  delete process.env.POSTGRES_URL;
+  process.env.OPENAI_API_KEY = "";
+  process.env.CLERK_SECRET_KEY = "";
+  process.env.CLERK_JWT_KEY = "";
+  process.env.DATABASE_URL = "";
+  process.env.POSTGRES_URL = "";
 
   const solveEvents = [];
   const originalInfo = console.info;
@@ -69,23 +70,22 @@ it("typed and OCR canonical input enter one solve orchestration while OCR proven
       source: "ocr-reviewed",
       extractionConfidence: 93,
     });
-    const ocr = await invoke(app.handleSolveExtractedProblemRequest, "/api/solve-extracted-problem", {
+    const recorded = await recordExtraction({
       problem,
-      problemText: problem,
-      canonicalProblem: ocrCanonicalProblem,
-      extraction: {
-        imageHash: "image-provenance-hash",
-        extractedProblemText: problem,
-        confidence: 93,
-        ocrConfidence: 91,
-        mathIntegrityScore: 94,
-        confidenceTier: "high",
-        issues: [],
+      latex: "",
+      imageHash: "image-provenance-hash",
+      extractionValidation: {
+        status: "success", tier: "high", critical: false, confidence: 93,
+        ocrConfidence: 91, mathIntegrityScore: 94, issues: [], metrics: {},
       },
+    });
+    const ocr = await invoke(app.handleSolveExtractedProblemRequest, "/api/solve-extracted-problem", recordedSolvePayload(recorded, {
+      problem,
+      latex: "",
       solveDecision: "edited",
-      reviewAction: { kind: "edited", canonicalInputHash: ocrCanonicalProblem.hash },
-      debugRequestId: "canonical-ocr",
-    }, "127.3.0.2");
+      canonicalProblem: ocrCanonicalProblem,
+      body: { debugRequestId: "canonical-ocr" },
+    }), "127.3.0.2");
 
     assert.equal(typed.statusCode, 200);
     assert.equal(ocr.statusCode, 200);
@@ -109,6 +109,16 @@ it("typed and OCR canonical input enter one solve orchestration while OCR proven
     assert.equal(routing[0].routingDecision, routing[1].routingDecision);
     assert.equal(routing[0].solveTimeoutMs, routing[1].solveTimeoutMs);
     assert.ok(routing[0].solveTimeoutMs > 0);
+
+    const advancedProblem = String.raw`Given F(u,\lambda)=0 from \int_\Omega \frac12|\nabla u|^2+\sin(u(x))\,dx, compute the derivative and constrained Newton system.`;
+    const advanced = await invoke(app.handleExplainRequest, "/api/explain", {
+      problem: advancedProblem,
+      debugRequestId: "canonical-advanced-local-rule-boundary",
+    }, "127.3.0.3");
+
+    assert.equal(advanced.statusCode, 500);
+    assert.equal(advanced.json().code, "SERVER_CONFIG_ERROR");
+    assert.equal(advanced.json().runtime, undefined);
   } finally {
     console.info = originalInfo;
     process.env = originalEnv;

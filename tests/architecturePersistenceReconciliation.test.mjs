@@ -122,6 +122,15 @@ it("reproduces typed session payload fallback when the local app_users schema is
     problem: { originalProblem: "x+7=9", steps: [{ id: "step-one" }] },
     steps: [{ id: "step-one", latex: "x=2" }],
     pinnedWindows: [{ id: "pin-one", token: "x" }],
+    workspaceConversation: {
+      revision: "solution-one",
+      draft: "Why does the sign change?",
+      status: "streaming",
+      messages: [
+        { role: "user", text: "Check the whole solution", requestId: "followup-one" },
+        { role: "assistant", text: "The first step is valid.", requestId: "followup-one", partial: true },
+      ],
+    },
   };
 
   const created = await userData.createUserSessionForRequest(req, payload);
@@ -132,6 +141,10 @@ it("reproduces typed session payload fallback when the local app_users schema is
   assert.deepEqual(created.session.problem, payload.problem);
   assert.deepEqual(created.session.steps, payload.steps);
   assert.deepEqual(created.session.pinnedWindows, payload.pinnedWindows);
+  assert.deepEqual(created.session.workspaceConversation, {
+    ...payload.workspaceConversation,
+    status: "idle",
+  });
 
   const updatedPayload = { ...payload, title: "Updated session", messages: [...payload.messages, { role: "assistant", text: "x=2" }] };
   const updated = await userData.updateUserSessionForRequest(req, payload.id, updatedPayload);
@@ -140,6 +153,63 @@ it("reproduces typed session payload fallback when the local app_users schema is
   assert.equal(updated.session.id, payload.id);
   assert.equal(updated.session.title, updatedPayload.title);
   assert.deepEqual(updated.session.messages, updatedPayload.messages);
+  assert.deepEqual(updated.session.workspaceConversation, created.session.workspaceConversation);
+
+  const deleted = await userData.deleteUserSessionForRequest(req, payload.id);
+  assert.equal(deleted.databaseConfigured, false);
+  assert.equal(deleted.fallback, "missing_local_schema");
+  assert.equal(deleted.deleted, true);
+  assert.equal(deleted.id, payload.id);
+});
+
+it("persists workspace conversation through session create, list, and update", async (t) => {
+  const { app, session } = await fixture(t);
+  const sessionId = "4eaf5c2a-a398-4e70-aab3-9ee1554d2a1e";
+  const now = new Date().toISOString();
+  let saved = null;
+  t.mock.method(pg.Pool.prototype, "query", async (sql, params) => {
+    if (sql.includes("insert into app_users")) return { rows: [{ id: "user-a", clerk_user_id: "user_persistence_reconciliation", tier: "free" }] };
+    if (sql.includes("insert into user_sessions")) {
+      saved = { id: params[0], title: params[2], payload: params[3], created_at: now, updated_at: now };
+      return { rows: [saved] };
+    }
+    if (sql.includes("select id, title, payload")) return { rows: saved ? [saved] : [] };
+    if (sql.includes("update user_sessions")) {
+      saved = { ...saved, title: params[2], payload: params[3], updated_at: now };
+      return { rows: [saved] };
+    }
+    throw new Error(`Unexpected persistence query: ${sql.slice(0, 100)}`);
+  });
+  const conversation = {
+    revision: "solution-a",
+    draft: "Can we verify this?",
+    status: "streaming",
+    messages: [
+      { role: "user", text: "Why does this work?", requestId: "followup-a" },
+      { role: "assistant", text: "Because both sides remain equal.", requestId: "followup-a", partial: true },
+    ],
+  };
+  const body = { id: sessionId, title: "Workspace proof", workspaceConversation: conversation };
+  const createReq = { ...request(body, session.token), url: "/api/sessions" };
+  const createdRes = responseRecorder();
+  await app.handleSessionsRequest(createReq, createdRes);
+  assert.equal(createdRes.statusCode, 201, createdRes.body);
+  const expected = { ...conversation, status: "idle" };
+  assert.deepEqual(createdRes.json().session.workspaceConversation, expected);
+
+  const listRes = responseRecorder();
+  await app.handleSessionsRequest({ ...createReq, method: "GET", body: undefined }, listRes);
+  assert.equal(listRes.statusCode, 200, listRes.body);
+  assert.deepEqual(listRes.json().sessions[0].workspaceConversation, expected);
+
+  const updateRes = responseRecorder();
+  await app.handleSessionsRequest({
+    ...createReq, method: "PUT", url: `/api/sessions?id=${sessionId}`,
+    body: { ...body, workspaceConversation: { ...conversation, draft: "Continue the check", status: "complete" } },
+  }, updateRes);
+  assert.equal(updateRes.statusCode, 200, updateRes.body);
+  assert.equal(updateRes.json().session.workspaceConversation.draft, "Continue the check");
+  assert.equal(updateRes.json().session.workspaceConversation.status, "idle");
 });
 
 it("keeps a typed provider explanation successful while background persistence reports missing app_users", async (t) => {

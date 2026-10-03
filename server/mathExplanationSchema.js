@@ -117,7 +117,7 @@ export const fastSolveSchema = {
       maxItems: 10,
       items: fastSolveStepSchema,
     },
-    finalAnswerLatex: { type: "string" },
+    finalAnswerLatex: { type: "string", description: "Concise complete result summary, not a second derivation. Related results, labelled parts, matrices, conditions, branches and assumptions may require multiple equations or a multiline environment. Preserve necessary qualifications; omit intermediate systems and repeated solution steps." },
     numericCheck: { type: "string" },
   },
 };
@@ -159,7 +159,7 @@ export const imageSolveSchema = {
       maxItems: 10,
       items: imageSolveStepSchema,
     },
-    finalAnswerLatex: { type: "string" },
+    finalAnswerLatex: { type: "string", description: "Concise complete result summary, not a second derivation. Preserve related results, labelled parts, matrices and necessary conditions; omit repeated intermediate work." },
     numericCheck: { type: "string" },
   },
 };
@@ -454,6 +454,7 @@ export const mathExplanationSchema = {
 
 const SUPPORTED_SCHEMA_KEYS = new Set([
   "type",
+  "description",
   "additionalProperties",
   "required",
   "properties",
@@ -481,6 +482,9 @@ function collectSchemaErrors(schema, path = "root", errors = []) {
   }
 
   const type = schema.type;
+  if (schema.description !== undefined && typeof schema.description !== "string") {
+    errors.push(`${formatSchemaPath(path)} description must be a string`);
+  }
   if (type === "object") {
     if (!schema.properties || typeof schema.properties !== "object" || Array.isArray(schema.properties)) {
       errors.push(`${formatSchemaPath(path)} object must define properties`);
@@ -1552,25 +1556,64 @@ export function assertImageSolveResponse(value) {
 }
 
 export function assertImageExtractionResponse(value) {
-  if (!value || typeof value !== "object") {
+  const requiredKeys = ["confidence", "extractedProblemLatex", "extractedProblemText", "issues"];
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join("\u0000") !== requiredKeys.join("\u0000")
+    || typeof value.extractedProblemLatex !== "string"
+    || typeof value.extractedProblemText !== "string"
+    || typeof value.confidence !== "number"
+    || !Number.isFinite(value.confidence)
+    || value.confidence < 0
+    || value.confidence > 100
+    || !Array.isArray(value.issues)
+    || value.issues.length > 8) {
     throw createInvalidResponseError("Model returned an invalid image extraction response.");
+  }
+
+  const validIssue = (issue) => {
+    const issueKeys = ["message", "severity", "type"];
+    return issue && typeof issue === "object" && !Array.isArray(issue)
+      && Object.keys(issue).sort().join("\u0000") === issueKeys.join("\u0000")
+      && typeof issue.type === "string"
+      && typeof issue.message === "string"
+      && typeof issue.severity === "string"
+      && ["low", "medium", "high"].includes(issue.severity);
+  };
+  if (!value.issues.every(validIssue)) {
+    throw createInvalidResponseError("Model returned an invalid image extraction issue.");
+  }
+
+  const unreadableIssues = value.issues.filter((issue) => issue.type === "image_unreadable");
+  if (unreadableIssues.length > 0) {
+    const validUnreadable = value.issues.length === 1
+      && unreadableIssues[0].severity === "high"
+      && value.extractedProblemLatex.length === 0
+      && value.extractedProblemText.length === 0
+      && value.confidence === 0;
+    if (!validUnreadable) {
+      throw createInvalidResponseError("Image unreadable marker does not match the extraction contract.");
+    }
+    throw Object.assign(new Error("The image extraction model explicitly marked the image unreadable."), {
+      statusCode: 422,
+      code: "OCR_IMAGE_UNREADABLE",
+      compactRetryable: false,
+      responseFailureType: "unreadable_image",
+      publicMessage: "The image could not be read clearly. Try a sharper image or crop to one problem.",
+    });
   }
 
   const extractedProblemLatex = sanitizeGeneratedLatex(value.extractedProblemLatex);
   const extractedProblemText = safeString(value.extractedProblemText);
+  const confidence = Math.round(value.confidence);
+  const issues = value.issues.map((issue) => ({
+    type: safeString(issue.type),
+    message: safeString(issue.message),
+    severity: issue.severity,
+  }));
   if (!extractedProblemLatex || !extractedProblemText) {
     throw createInvalidResponseError("Image extraction response is missing extracted problem fields.");
   }
   assertGeneratedLatexFields([{ fieldPath: "extractedProblemLatex", value: extractedProblemLatex }]);
-
-  const confidence = Math.max(0, Math.min(100, Math.round(Number(value.confidence) || 0)));
-  const issues = Array.isArray(value.issues)
-    ? value.issues.map((issue) => ({
-        type: safeString(issue?.type) || "ocr_unclear",
-        message: safeString(issue?.message) || "Review this extracted problem.",
-        severity: ["low", "medium", "high"].includes(issue?.severity) ? issue.severity : "medium",
-      })).filter((issue) => issue.message).slice(0, 8)
-    : [];
 
   return {
     extractedProblemLatex,

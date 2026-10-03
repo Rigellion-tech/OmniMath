@@ -1,5 +1,5 @@
 import React, { createContext, useContext } from "react";
-import { useAuth } from "@clerk/react";
+import { useAuth, useUser } from "@clerk/react";
 
 const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 const authMode = import.meta.env.VITE_AUTH_MODE;
@@ -29,9 +29,10 @@ export const CLERK_AFTER_AUTH_URL = "/";
 
 export function ClerkTokenBridge({ children }) {
   const { getToken, isLoaded, isSignedIn } = useAuth();
+  const { user } = useUser();
 
   return (
-    <AuthTokenContext.Provider value={{ getToken, isLoaded, isSignedIn, isMock: false, user: null }}>
+    <AuthTokenContext.Provider value={{ getToken, isLoaded, isSignedIn, isMock: false, user: user || null }}>
       {children}
     </AuthTokenContext.Provider>
   );

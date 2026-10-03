@@ -120,25 +120,47 @@ function apiResponse() {
 }
 
 async function visibleTextRect(owner) {
-  return owner.evaluate((element) => {
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  return owner.evaluateAll((elements) => {
     const rects = [];
-    let textNode = walker.nextNode();
-    while (textNode) {
-      if ((textNode.textContent || "").trim()) {
-        const range = document.createRange();
-        range.selectNodeContents(textNode);
-        rects.push(...Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0));
+    for (const element of elements) {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      let textNode = walker.nextNode();
+      while (textNode) {
+        if ((textNode.textContent || "").trim()) {
+          const range = document.createRange();
+          range.selectNodeContents(textNode);
+          rects.push(...Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0));
+        }
+        textNode = walker.nextNode();
       }
-      textNode = walker.nextNode();
     }
     if (rects.length === 0) return null;
-    const left = Math.min(...rects.map((rect) => rect.left));
-    const right = Math.max(...rects.map((rect) => rect.right));
-    const top = Math.min(...rects.map((rect) => rect.top));
-    const bottom = Math.max(...rects.map((rect) => rect.bottom));
-    return { x: left, y: top, width: right - left, height: bottom - top };
+    const semanticId = elements.find((element) => element.getAttribute("data-semantic-id"))
+      ?.getAttribute("data-semantic-id");
+    const hitboxRects = [...(elements[0]?.closest(".step-card")?.querySelectorAll(".math-semantic-hitbox[data-semantic-id][data-geometry-valid='true']") || [])]
+      .filter((hitbox) => hitbox.getAttribute("data-semantic-id") === semanticId)
+      .map((hitbox) => hitbox.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    const overlapArea = (left, right) => Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left))
+      * Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+    const selected = rects
+      .map((rect) => ({ rect, overlap: Math.max(0, ...hitboxRects.map((hitboxRect) => overlapArea(rect, hitboxRect))) }))
+      .sort((left, right) => right.overlap - left.overlap || (right.rect.width * right.rect.height) - (left.rect.width * left.rect.height))[0];
+    if (!selected || selected.overlap <= 0) return null;
+    return { x: selected.rect.left, y: selected.rect.top, width: selected.rect.width, height: selected.rect.height };
   });
+}
+
+async function scrollStableSemanticOwner(owner, hitbox = owner.first()) {
+  await expect.poll(async () => {
+    try {
+      await hitbox.scrollIntoViewIfNeeded();
+      return (await visibleTextRect(owner)) !== null;
+    } catch (error) {
+      if (/not attached to the DOM/i.test(String(error?.message || error))) return false;
+      throw error;
+    }
+  }).toBe(true);
 }
 
 test("grammar-sensitive TeX preserves render layout and end-to-end semantic ownership", async ({ page }) => {
@@ -167,6 +189,7 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
   await page.goto("/?mockAuth=1");
   await submitCurrentComposer(page, "Inspect TeX grammar ownership.");
   await expect(page.locator(".step-card")).toHaveCount(CASES.length);
+  await page.evaluate(() => document.fonts?.ready);
 
   const browserPlanner = await page.evaluate(async (fixtures) => {
     const [{ buildSemanticTree: build }, { serializeSemanticTreeToLatex: serialize }] = await Promise.all([
@@ -198,12 +221,19 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
     const visualDifference = await step.locator(".katex-html").first().evaluate((semanticHtml, plainHtml) => {
       const reference = document.createElement("span");
       const shell = semanticHtml.closest("[data-math-shell]") || semanticHtml.parentElement;
-      reference.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden";
+      reference.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;display:flex;align-items:flex-start;gap:10px;width:max-content;max-width:none;white-space:nowrap";
       reference.style.fontSize = getComputedStyle(shell).fontSize;
-      reference.innerHTML = plainHtml;
+      const semanticContainer = semanticHtml.closest(".katex").cloneNode(true);
+      const semanticReference = semanticContainer.querySelector(".katex-html");
+      semanticReference.style.cssText = "display:inline-block;width:max-content;max-width:none;white-space:nowrap";
+      const plainReference = document.createElement("span");
+      plainReference.innerHTML = plainHtml;
+      const plainKatex = plainReference.querySelector(".katex-html");
+      plainKatex.style.cssText = "display:inline-block;width:max-content;max-width:none;white-space:nowrap";
+      reference.append(semanticContainer, plainReference);
       shell.append(reference);
-      const semanticRect = semanticHtml.getBoundingClientRect();
-      const plainRect = reference.querySelector(".katex-html").getBoundingClientRect();
+      const semanticRect = semanticReference.getBoundingClientRect();
+      const plainRect = plainKatex.getBoundingClientRect();
       const result = {
         width: Math.abs(semanticRect.width - plainRect.width),
         height: Math.abs(semanticRect.height - plainRect.height),
@@ -218,12 +248,12 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
     expect(visualDifference.width, `${fixture.key} width changed: ${JSON.stringify(visualDifference)}`).toBeLessThan(0.75);
     expect(visualDifference.height, `${fixture.key} height changed: ${JSON.stringify(visualDifference)}`).toBeLessThan(0.75);
 
-    const owner = step.locator(`.katex-html [data-semantic-id="${fixture.target.id}"]`).first();
+    const owner = step.locator(`.katex-html [data-semantic-id="${fixture.target.id}"]`);
     const hitbox = step.locator(`.math-semantic-hitbox[data-semantic-id="${fixture.target.id}"]`).first();
-    await expect(owner).toBeVisible();
+    await expect(owner.first()).toBeVisible();
     await expect(hitbox).toBeVisible();
     await expect(hitbox).toHaveAttribute("data-geometry-valid", "true");
-    await owner.scrollIntoViewIfNeeded();
+    await scrollStableSemanticOwner(owner, hitbox);
     const box = await visibleTextRect(owner);
     expect(box, `${fixture.key} has no visible glyph rectangle`).not.toBeNull();
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -245,8 +275,9 @@ test("grammar-sensitive TeX preserves render layout and end-to-end semantic owne
 
   const pinned = CASES[0];
   const pinnedStep = page.locator(".step-card").filter({ hasText: pinned.label });
-  const pinnedOwner = pinnedStep.locator(`.katex-html [data-semantic-id="${pinned.target.id}"]`).first();
-  await pinnedOwner.scrollIntoViewIfNeeded();
+  const pinnedOwner = pinnedStep.locator(`.katex-html [data-semantic-id="${pinned.target.id}"]`);
+  const pinnedHitbox = pinnedStep.locator(`.math-semantic-hitbox[data-semantic-id="${pinned.target.id}"]`).first();
+  await scrollStableSemanticOwner(pinnedOwner, pinnedHitbox);
   const pinBox = await visibleTextRect(pinnedOwner);
   await page.mouse.click(pinBox.x + pinBox.width / 2, pinBox.y + pinBox.height / 2, { button: "right" });
   await expect.poll(() => requests.filter((request) => request.mode === "pin").at(-1)?.body?.semanticId).toBe(pinned.target.id);

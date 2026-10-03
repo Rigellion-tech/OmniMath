@@ -36,11 +36,12 @@ export function aggregateBenchmarkResults(records = []) {
     byOutcome.set(outcome, (byOutcome.get(outcome) || 0) + 1);
   }
   const acceptable = (byOutcome.get("valid_correct_answer") || 0) + (byOutcome.get("correct_rejection") || 0);
-  const totalCostUsd = sum(attemptedRecords.map((record) => Number(record.costUsd)));
+  const totalCostUsd = attemptedRecords.some((record) => record.costUsd === null)
+    ? null : sum(attemptedRecords.map((record) => Number(record.costUsd)));
   const latencies = attemptedRecords.map((record) => Number(record.latencyMs));
-  const inputTokens = attemptedRecords.map((record) => Number(record.inputTokens));
-  const outputTokens = attemptedRecords.map((record) => Number(record.outputTokens));
-  const reasoningTokens = attemptedRecords.map((record) => Number(record.reasoningTokens));
+  const inputTokens = attemptedRecords.map((record) => record.inputTokens === null ? NaN : Number(record.inputTokens));
+  const outputTokens = attemptedRecords.map((record) => record.outputTokens === null ? NaN : Number(record.outputTokens));
+  const reasoningTokens = attemptedRecords.map((record) => record.reasoningTokens === null ? NaN : Number(record.reasoningTokens));
   const transportAttempts = attemptedRecords.map((record) => Number(record.transportAttempts));
   const successfulProviderResponses = attemptedRecords.map((record) => Number(record.successfulProviderResponses));
   const billedProviderCalls = attemptedRecords.map((record) => Number(record.billedProviderCalls ?? record.providerCalls));
@@ -59,20 +60,21 @@ export function aggregateBenchmarkResults(records = []) {
     finalSuccessRate: attempts ? (byOutcome.get("valid_correct_answer") || 0) / attempts : 0,
     correctRejectionRate: attempts ? (byOutcome.get("correct_rejection") || 0) / attempts : 0,
     acceptableOutcomeRate: attempts ? acceptable / attempts : 0,
-    averageInputTokens: avg(inputTokens),
-    averageOutputTokens: avg(outputTokens),
-    averageReasoningTokens: avg(reasoningTokens),
+    averageInputTokens: attemptedRecords.some((record) => record.inputTokens === null) ? null : avg(inputTokens),
+    averageOutputTokens: attemptedRecords.some((record) => record.outputTokens === null) ? null : avg(outputTokens),
+    averageReasoningTokens: attemptedRecords.some((record) => record.reasoningTokens === null) ? null : avg(reasoningTokens),
     totalTransportAttempts: sum(transportAttempts),
     totalSuccessfulProviderResponses: sum(successfulProviderResponses),
-    totalBilledProviderCalls: sum(billedProviderCalls),
+    totalBilledProviderCalls: attemptedRecords.some((record) => record.billedProviderCalls === null)
+      ? null : sum(billedProviderCalls),
     averageTransportAttempts: avg(transportAttempts),
     averageSuccessfulProviderResponses: avg(successfulProviderResponses),
     averageLatencyMs: avg(latencies),
     p50LatencyMs: percentile(latencies, 0.5),
     p95LatencyMs: percentile(latencies, 0.95),
     totalCostUsd,
-    costPerValidCorrectAnswer: byOutcome.get("valid_correct_answer") ? totalCostUsd / byOutcome.get("valid_correct_answer") : null,
-    costPerValidatedAcceptableOutcome: acceptable ? totalCostUsd / acceptable : null,
+    costPerValidCorrectAnswer: totalCostUsd !== null && byOutcome.get("valid_correct_answer") ? totalCostUsd / byOutcome.get("valid_correct_answer") : null,
+    costPerValidatedAcceptableOutcome: totalCostUsd !== null && acceptable ? totalCostUsd / acceptable : null,
   };
 }
 

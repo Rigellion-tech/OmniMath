@@ -1,13 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Code2, Loader2, Pencil, RotateCcw, Sparkles } from "lucide-react";
+import { ChevronDown, Code2, ImagePlus, Loader2, Pencil, RotateCcw, Sparkles, Send, SlidersHorizontal } from "lucide-react";
 import katex from "katex";
 import { explainProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { createCanonicalProblemPayload } from "@/lib/canonicalProblem";
+import { progressiveIdentityForOperation, providerStreamingEnabled } from "@/lib/progressiveProviderMode";
 import { MATH_SYMBOL_REGISTRY } from "@/lib/mathSymbolRegistry";
 import { restorePrimaryComposerSource, serializePrimaryComposer } from "@/lib/primaryComposerSerialization";
 import MathInputPalette from "@/components/math/MathInputPalette";
+import SymbolPreview from "@/components/math/SymbolPreview";
 import VisualMathField from "@/components/math/VisualMathField";
+import WorkspaceConversation from "@/components/math/WorkspaceConversation";
 
 const STRUCTURE_IDS = [
   "fraction", "power", "subscript", "subsup", "sqrt", "nthRoot", "derivative", "partialDerivative",
@@ -31,34 +34,32 @@ function renderLatex(latex, displayMode = false) {
 }
 
 function StructureButton({ item, onInsert, disabled }) {
-  const markup = renderLatex(item.displayLatex || item.display || item.insertion);
   return (
-    <button type="button" disabled={disabled} title={disabled ? "Switch to the visual editor to insert structures" : item.name} aria-label={`Insert ${item.name} structure`} onPointerDown={(event) => event.preventDefault()} onClick={() => onInsert(item)} className="omni-structure-button group flex min-h-11 min-w-[4.25rem] flex-col items-center justify-center rounded-xl border border-white/[0.07] bg-white/[0.025] px-2 py-1 text-cyan-50 transition hover:border-teal-300/35 hover:bg-teal-300/[0.08] focus:outline-none focus:ring-2 focus:ring-teal-300/20 disabled:cursor-not-allowed disabled:opacity-35">
-      {markup ? <span className="omni-structure-symbol" aria-hidden="true" dangerouslySetInnerHTML={{ __html: markup }} /> : <span className="text-xs" aria-hidden="true">{item.name}</span>}
-      <span className="mt-0.5 max-w-20 truncate text-[9px] text-slate-500 group-hover:text-slate-300">{item.name}</span>
+    <button type="button" disabled={disabled} title={disabled ? "Switch to the visual editor to insert structures" : item.name} aria-label={`Insert ${item.name} structure`} onPointerDown={(event) => event.preventDefault()} onClick={() => onInsert(item)} className="omni-structure-button group flex min-h-10 min-w-[3.75rem] flex-col items-center justify-center rounded-lg border border-neutral-200 bg-white px-1.5 py-0.5 text-neutral-900 transition hover:bg-neutral-100 focus:outline-none focus:ring-2 focus:ring-neutral-300 disabled:cursor-not-allowed disabled:opacity-35">
+      <SymbolPreview item={item} />
     </button>
   );
 }
 
-function CompactProblem({ snapshot, onEdit, onActivate }) {
+function CompactProblem({ snapshot, prose, onProseChange, onEdit, onSubmit, loading }) {
   const markup = renderLatex(snapshot?.canonicalLatex, false);
-  if (!snapshot) {
+  if (!snapshot || !snapshot.submitted) {
     return (
-      <button type="button" onClick={onActivate} className="flex min-h-12 w-full items-center justify-between gap-3 px-4 text-left" data-testid="primary-composer-activate">
-        <span className="min-w-0">
-          <span className="block text-sm font-medium text-cyan-50">Compose a math problem</span>
-          <span className="block truncate text-xs text-slate-400">Visual fractions, matrices, calculus, tensors, and more</span>
-        </span>
-        <ChevronRight className="h-4 w-4 shrink-0 text-teal-200/70" />
-      </button>
+      <div className="omni-compact-entry">
+        <textarea rows={2} aria-label="Type a math problem" placeholder="Ask a math question or describe what you want to solve…" value={prose} onChange={(event) => onProseChange(event.target.value)} disabled={loading} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); onSubmit(); } }} />
+        <div className="omni-compact-entry-tools">
+          <button type="button" onClick={onEdit} data-testid="primary-composer-activate" aria-label="Open visual math editor"><SlidersHorizontal className="h-4 w-4" /><span>Math tools</span></button>
+          <button type="button" onClick={onSubmit} disabled={loading || !snapshot} aria-label="Solve problem" className="omni-compact-send">{loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button>
+        </div>
+      </div>
     );
   }
 
   return (
-    <div className="flex min-h-12 items-center gap-3 px-3 py-2" data-testid="primary-composer-compact-problem">
+    <div className="flex min-h-10 items-center gap-2 px-3 py-1.5" data-testid="primary-composer-compact-problem">
       <button type="button" onClick={onEdit} className="flex min-w-0 flex-1 items-center gap-3 text-left" aria-label="Edit submitted problem">
-        {snapshot.displayText && <span className="max-w-[45%] truncate text-xs text-slate-300/70">{snapshot.displayText}</span>}
-        {markup ? <span className="min-w-0 flex-1 truncate text-cyan-50" dangerouslySetInnerHTML={{ __html: markup }} /> : <span className="min-w-0 flex-1 truncate text-sm text-cyan-50">{snapshot.displayText || "Custom mathematical expression"}</span>}
+        {snapshot.displayText && <span className="max-w-[45%] truncate text-xs text-neutral-500">{snapshot.displayText}</span>}
+        {markup ? <span className="min-w-0 flex-1 truncate text-neutral-900" dangerouslySetInnerHTML={{ __html: markup }} /> : <span className="min-w-0 flex-1 truncate text-sm text-neutral-900">{snapshot.displayText || "Custom mathematical expression"}</span>}
       </button>
       <button type="button" onClick={onEdit} className="omni-button flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold"><Pencil className="h-3.5 w-3.5" />Edit</button>
     </div>
@@ -76,6 +77,8 @@ function PrimaryComposerSession({
   onProblemGenerated,
   onGenerationStart,
   onGenerationError,
+  onGenerationCancelled,
+  onProgressiveEvent,
   canApplyOperation,
 }) {
   const restored = useMemo(() => restorePrimaryComposerSource(problem), []);
@@ -83,6 +86,7 @@ function PrimaryComposerSession({
   const [visualLatex, setVisualLatex] = useState(restored.visualLatex);
   const [rawLatex, setRawLatex] = useState(restored.rawLatex);
   const [sourceMode, setSourceMode] = useState(restored.sourceMode);
+  const progressiveMode = providerStreamingEnabled();
   const [modeError, setModeError] = useState("");
   const [inputError, setInputError] = useState("");
   const [submitted, setSubmitted] = useState(restored.submitted);
@@ -188,13 +192,34 @@ function PrimaryComposerSession({
     logSolutionState("visual submit", { canonicalText: source.canonicalText, canonicalLatex: source.canonicalLatex, requestSessionId });
 
     try {
-      const result = await explainProblem({ problem: source.canonicalText, canonicalLatex: source.canonicalLatex, history, getToken, signal: controller.signal });
+      const streamIdentity = progressiveMode ? progressiveIdentityForOperation(operationContext, requestSessionId) : null;
+      const result = await explainProblem({
+        problem: source.canonicalText, canonicalLatex: source.canonicalLatex, history, getToken, signal: controller.signal,
+        progressive: streamIdentity ? {
+          identity: streamIdentity,
+          onEvent: (solveEvent) => {
+            const decision = onProgressiveEvent?.(solveEvent);
+            if (!decision?.accepted) throw new Error(`Progressive solve event rejected: ${decision?.reason || "missing owner"}`);
+          },
+        } : null,
+      });
       if (activeRequestRef.current !== request || canApplyOperation?.(operationContext) === false) return;
-      setHistory([...newHistory, { role: "tutor", text: result.title || "Updated explanation" }], { operationContext, targetSessionId: requestSessionId });
+      if (result.progressiveStream) {
+        if (result.status === "solve_completed") {
+          setHistory([...newHistory, { role: "tutor", text: "Completed progressive explanation" }], { operationContext, targetSessionId: requestSessionId });
+        }
+        if (mountedRef.current) {
+          setSubmitted(source);
+          setExpanded(false);
+        }
+        return;
+      }
+      const canonicalResult = /** @type {Record<string, any>} */ (result);
+      setHistory([...newHistory, { role: "tutor", text: canonicalResult.title || "Updated explanation" }], { operationContext, targetSessionId: requestSessionId });
       onProblemGenerated({
-        ...result,
+        ...canonicalResult,
         canonicalProblem: {
-          ...(result.canonicalProblem || createCanonicalProblemPayload({ ...source, source: "typed" })),
+          ...(canonicalResult.canonicalProblem || createCanonicalProblemPayload({ ...source, source: "typed" })),
           composerSourceMode: source.sourceMode,
         },
         _requestSessionId: requestSessionId,
@@ -225,36 +250,50 @@ function PrimaryComposerSession({
     setSourceMode("visual"); setSubmitted(null); setExpanded(false); onReset?.();
   };
 
+  const handleCancelGeneration = () => {
+    const request = activeRequestRef.current;
+    if (!request) return;
+    activeRequestRef.current = null;
+    request.controller.abort();
+    setLoading(false);
+    onGenerationCancelled?.(request.operationContext);
+  };
+
   const compactSnapshot = submitted || (!serialized.isEmpty ? serialized : null);
 
   return (
     <>
-      {!expanded ? <CompactProblem snapshot={compactSnapshot} onActivate={activate} onEdit={activate} /> : (
-        <form onSubmit={handleSubmit} className="omni-composer-workspace" data-testid="primary-composer-workspace">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] px-3 py-2">
-            <div>
-              <p className="text-sm font-semibold text-cyan-50">Problem composer</p>
-              <p className="text-[11px] text-slate-400">Write the prompt in words, then build its mathematics visually.</p>
-            </div>
-            <div className="flex items-center gap-1 rounded-lg border border-white/[0.07] bg-black/15 p-0.5" role="tablist" aria-label="Math source mode">
-              <button type="button" disabled={loading} role="tab" aria-selected={sourceMode === "visual"} onClick={() => handleModeChange("visual")} className={`rounded-md px-2.5 py-1 text-[11px] disabled:opacity-40 ${sourceMode === "visual" ? "bg-teal-300/15 text-teal-100" : "text-slate-400"}`}>Visual</button>
-              <button type="button" disabled={loading} role="tab" aria-selected={sourceMode === "raw"} onClick={() => handleModeChange("raw")} className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] disabled:opacity-40 ${sourceMode === "raw" ? "bg-teal-300/15 text-teal-100" : "text-slate-400"}`}><Code2 className="h-3 w-3" />Advanced LaTeX</button>
+      <div hidden={expanded} aria-hidden={expanded}>
+      <CompactProblem snapshot={submitted ? { ...submitted, submitted: true } : compactSnapshot} prose={prose} onProseChange={setProse} onEdit={activate} onSubmit={handleSubmit} loading={loading} />
+      </div>
+      <form
+        onSubmit={handleSubmit}
+        className="omni-composer-workspace"
+        data-testid="primary-composer-workspace"
+        hidden={!expanded}
+        aria-hidden={!expanded}
+      >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200 px-3 py-2">
+            <p className="text-xs font-medium text-neutral-500">Compose your problem</p>
+            <div className="flex items-center gap-1 rounded-lg bg-neutral-100 p-0.5" role="tablist" aria-label="Math source mode">
+              <button type="button" disabled={loading} role="tab" aria-selected={sourceMode === "visual"} onClick={() => handleModeChange("visual")} className={`rounded-md px-2.5 py-1 text-[11px] disabled:opacity-40 ${sourceMode === "visual" ? "bg-white text-neutral-900 shadow-sm" : "text-neutral-500"}`}>Visual</button>
+              <button type="button" disabled={loading} role="tab" aria-selected={sourceMode === "raw"} onClick={() => handleModeChange("raw")} className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] disabled:opacity-40 ${sourceMode === "raw" ? "bg-white text-neutral-900 shadow-sm" : "text-neutral-500"}`}><Code2 className="h-3 w-3" />Advanced LaTeX</button>
             </div>
           </div>
 
           <div className="omni-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
             <label className="block">
-              <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.14em] text-slate-400">Problem context (optional)</span>
-              <textarea value={prose} onChange={(event) => setProse(event.target.value)} disabled={loading} rows={1} placeholder="Describe assumptions, boundary conditions, or what should be found…" className="omni-composer-prose w-full resize-y rounded-xl border border-white/[0.08] bg-black/15 px-3 py-2 text-sm leading-5 text-slate-100 outline-none placeholder:text-slate-500 focus:border-teal-300/30" />
+              <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.14em] text-neutral-500">Problem context (optional)</span>
+              <textarea value={prose} onChange={(event) => setProse(event.target.value)} disabled={loading} rows={1} placeholder="Describe assumptions, boundary conditions, or what should be found…" className="omni-composer-prose w-full resize-y rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm leading-5 text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-neutral-400" />
             </label>
 
             <div className="mt-3">
               <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="block font-mono text-[9px] uppercase tracking-[0.14em] text-slate-400">Mathematics</span>
-                {sourceMode === "visual" && <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                <span className="block font-mono text-[9px] uppercase tracking-[0.14em] text-neutral-500">Mathematics</span>
+                {sourceMode === "visual" && <div className="flex items-center gap-1 text-[10px] text-neutral-500">
                   <span className="mr-1 hidden sm:inline">Space adds math spacing</span>
-                  <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand(["switchMode", "text"])} className="rounded-md border border-white/[0.07] px-2 py-1 hover:bg-white/5 disabled:opacity-35" title="Type words and spaces in the math expression">Text mode</button>
-                  <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand(["switchMode", "math"])} className="rounded-md border border-white/[0.07] px-2 py-1 hover:bg-white/5 disabled:opacity-35" title="Continue typing mathematics">Math mode</button>
+                  <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand(["switchMode", "text"])} className="rounded-md border border-neutral-200 px-2 py-1 hover:bg-neutral-100 disabled:opacity-35" title="Type words and spaces in the math expression">Text mode</button>
+                  <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand(["switchMode", "math"])} className="rounded-md border border-neutral-200 px-2 py-1 hover:bg-neutral-100 disabled:opacity-35" title="Continue typing mathematics">Math mode</button>
                 </div>}
               </div>
               <div className={sourceMode === "visual" ? "block" : "hidden"} aria-hidden={sourceMode !== "visual"}>
@@ -262,21 +301,21 @@ function PrimaryComposerSession({
               </div>
               {sourceMode === "raw" && (
                 <div>
-                  <textarea ref={rawInputRef} aria-label="Advanced raw LaTeX source" data-testid="primary-raw-latex" value={rawLatex} onChange={(event) => setRawLatex(event.target.value)} disabled={loading} rows={5} spellCheck={false} placeholder="Enter specialist or custom LaTeX source" className="omni-scrollbar min-h-28 w-full resize-y rounded-xl border border-amber-200/[0.16] bg-black/25 px-3 py-2 font-mono text-sm leading-6 text-amber-50 outline-none focus:border-amber-200/35" />
-                  <p className="mt-1 text-[10px] text-slate-500">Advanced source is preserved as entered. Its preview may be unavailable for custom commands.</p>
-                  {modeError && <p role="alert" className="mt-1 text-[10px] text-amber-200/85">{modeError}</p>}
+                  <textarea ref={rawInputRef} aria-label="Advanced raw LaTeX source" data-testid="primary-raw-latex" value={rawLatex} onChange={(event) => setRawLatex(event.target.value)} disabled={loading} rows={5} spellCheck={false} placeholder="Enter specialist or custom LaTeX source" className="omni-source-editor omni-scrollbar min-h-28 w-full resize-y rounded-lg border px-3 py-2 font-mono text-sm leading-6" />
+                  <p className="mt-1 text-[10px] text-neutral-500">Advanced source is preserved as entered. Its preview may be unavailable for custom commands.</p>
+                  {modeError && <p role="alert" className="mt-1 text-[10px] text-amber-700">{modeError}</p>}
                 </div>
               )}
-              {inputError && <p role="alert" className="mt-2 text-xs text-amber-200">{inputError}</p>}
+              {inputError && <p role="alert" className="mt-2 text-xs text-amber-700">{inputError}</p>}
             </div>
 
             <div className="mt-3">
               <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-slate-400">Common structures</span>
+                <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-neutral-500">Common structures</span>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {sourceMode === "visual" && <>
-                    <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand("addRowAfter")} className="rounded-lg border border-white/[0.07] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/5 disabled:opacity-35">Add row</button>
-                    <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand("addColumnAfter")} className="rounded-lg border border-white/[0.07] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/5 disabled:opacity-35">Add column</button>
+                    <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand("addRowAfter")} className="rounded-lg border border-neutral-200 px-2 py-1.5 text-[10px] text-neutral-600 hover:bg-neutral-100 disabled:opacity-35">Add row</button>
+                    <button type="button" disabled={loading} onPointerDown={(event) => event.preventDefault()} onClick={() => mathfieldRef.current?.executeCommand("addColumnAfter")} className="rounded-lg border border-neutral-200 px-2 py-1.5 text-[10px] text-neutral-600 hover:bg-neutral-100 disabled:opacity-35">Add column</button>
                   </>}
                   <MathInputPalette disabled={loading} structuresEnabled={sourceMode === "visual"} recent={recentSymbols} onRecent={(id) => setRecentSymbols((items) => [id, ...items.filter((item) => item !== id)].slice(0, 16))} onInsert={insertItem} />
                 </div>
@@ -286,15 +325,15 @@ function PrimaryComposerSession({
               </div>
             </div>
           </div>
-        </form>
-      )}
+      </form>
 
-      <div className="omni-composer-actions flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] px-3 py-2">
+      <div className="omni-composer-actions flex flex-wrap items-center justify-between gap-2 border-t border-neutral-200 px-3 py-2">
         <div className="ml-auto flex items-center gap-2">
-          {(submitted || prose || visualLatex || rawLatex) && <button type="button" disabled={loading} onClick={handleReset} className="flex min-h-9 items-center gap-1.5 rounded-xl px-2.5 text-xs text-slate-400 hover:bg-rose-400/10 hover:text-rose-100"><RotateCcw className="h-3.5 w-3.5" />Reset</button>}
+          {loading && progressiveMode && <button type="button" onClick={handleCancelGeneration} className="min-h-9 rounded-lg px-2.5 text-xs font-medium text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900">Cancel generation</button>}
+          {(submitted || prose || visualLatex || rawLatex) && <button type="button" disabled={loading} onClick={handleReset} className="flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs text-neutral-500 hover:bg-rose-50 hover:text-rose-700"><RotateCcw className="h-3.5 w-3.5" />Reset</button>}
           {expanded && <>
-            <button type="button" disabled={loading} onClick={() => setExpanded(false)} className="min-h-9 rounded-xl px-3 text-xs font-semibold text-slate-400 hover:bg-white/5 hover:text-slate-100 disabled:opacity-40">Collapse</button>
-            <button type="button" disabled={loading || serialized.isEmpty} onClick={handleSubmit} className="omni-button flex min-h-10 min-w-[108px] items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold" data-testid="primary-composer-solve">{loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{loading ? "Solving…" : "Solve"}</button>
+            <button type="button" disabled={loading} onClick={() => setExpanded(false)} className="min-h-9 rounded-lg px-3 text-xs font-semibold text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900 disabled:opacity-40">Collapse</button>
+            <button type="button" disabled={loading || serialized.isEmpty} onClick={handleSubmit} className="flex min-h-10 min-w-[108px] items-center justify-center gap-2 rounded-lg border border-neutral-900 bg-neutral-900 px-4 text-sm font-semibold text-white transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-45" data-testid="primary-composer-solve">{loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{loading ? "Solving…" : "Solve"}</button>
           </>}
         </div>
       </div>
@@ -307,11 +346,54 @@ function PrimaryComposerSession({
 // its origin session, cancellation controller, and review state.
 export default function PrimaryMathComposer(props) {
   const [expanded, setExpanded] = useState(false);
+  const [imageInstructionsBySession, setImageInstructionsBySession] = useState({});
+  const uploadSlotRef = useRef(null);
   useEffect(() => { setExpanded(false); }, [props.activeSessionId]);
+  const imageInstructions = imageInstructionsBySession[props.activeSessionId] || "";
+  const imageUpload = React.isValidElement(props.imageUpload)
+    ? React.cloneElement(props.imageUpload, { instructions: imageInstructions })
+    : props.imageUpload;
+  const updateImageInstructions = (value) => {
+    setImageInstructionsBySession((current) => {
+      const next = { ...current, [props.activeSessionId]: String(value || "").slice(0, 1000) };
+      const removableSessionIds = Object.keys(next).filter((sessionId) => sessionId !== props.activeSessionId);
+      while (Object.keys(next).length > 32 && removableSessionIds.length) {
+        delete next[removableSessionIds.shift()];
+      }
+      return next;
+    });
+  };
+  const tools = [
+    { label: "Edit problem", onClick: () => setExpanded(true) },
+    { label: "Upload image", onClick: () => uploadSlotRef.current?.querySelector("button")?.click() },
+  ];
   return (
-    <section className={`omni-primary-composer ${expanded ? "is-expanded" : "is-collapsed"}`} data-testid="primary-math-composer" data-composer-state={expanded ? "expanded" : "collapsed"}>
-      <PrimaryComposerSession key={props.activeSessionId} {...props} expanded={expanded} setExpanded={setExpanded} />
-      <div className="omni-primary-upload" data-testid="primary-image-upload-slot">{props.imageUpload}</div>
-    </section>
+    <div className="omni-composer-stack">
+      {props.isWorkspaceEmpty && <div className="omni-empty-greeting"><Sparkles className="h-5 w-5" aria-hidden="true" /><h2>{props.userName ? `What are we solving today, ${props.userName}?` : "What are we solving today?"}</h2></div>}
+      {props.showWorkspaceConversation && <WorkspaceConversation sessionId={props.activeSessionId || "default"} problem={props.problem} conversation={props.conversation} onConversationChange={props.onConversationChange} presentationDepth={props.presentationDepth} tools={tools} />}
+      <section className={`omni-primary-composer ${expanded && !props.isImageTaskActive ? "is-expanded" : "is-collapsed"} ${props.showWorkspaceConversation && !expanded && !props.isImageTaskActive ? "is-solved-collapsed" : ""} ${props.isImageTaskActive ? "is-image-task" : ""}`} data-testid="primary-math-composer" data-composer-state={props.isImageTaskActive ? "image" : expanded ? "expanded" : "collapsed"}>
+        <div className="omni-primary-session" hidden={props.isImageTaskActive} aria-hidden={props.isImageTaskActive}>
+          <PrimaryComposerSession key={props.activeSessionId} {...props} expanded={expanded} setExpanded={setExpanded} />
+        </div>
+        {props.isImageTaskActive && (
+          <div className="omni-image-task-composer" data-testid="image-aware-composer">
+            <div className="omni-image-task-label">
+              <span><ImagePlus className="h-4 w-4" aria-hidden="true" />Image selected</span>
+              {expanded && <button type="button" onClick={() => setExpanded(false)} aria-label="Collapse" title="Collapse image composer"><ChevronDown className="h-4 w-4" /></button>}
+            </div>
+            <textarea
+              rows={2}
+              aria-label="Instructions for the selected image"
+              placeholder="Add instructions or describe what you want solved…"
+              maxLength={1000}
+              value={imageInstructions}
+              onChange={(event) => updateImageInstructions(event.target.value)}
+            />
+            <p>Add any context you want the solution to consider.</p>
+          </div>
+        )}
+        <div ref={uploadSlotRef} className="omni-primary-upload" data-testid="primary-image-upload-slot">{imageUpload}</div>
+      </section>
+    </div>
   );
 }

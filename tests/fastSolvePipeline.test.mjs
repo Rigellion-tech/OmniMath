@@ -65,6 +65,20 @@ describe("fast solve pipeline", () => {
     assert.ok(createLocalRuleExplanation("Differentiate x^2"));
   });
 
+  it("does not turn a constrained variational Newton prompt into a chain-rule card", () => {
+    const problem = String.raw`Given F(u,\lambda)=0 from \int_\Omega \frac12|\nabla u|^2+\sin(u(x))\,dx, compute the derivative and constrained Newton system.`;
+
+    assert.equal(createLocalRuleExplanation(problem), null);
+  });
+
+  it("keeps the local chain-rule card for a bounded explicit elementary request", () => {
+    const result = createLocalRuleExplanation("Differentiate sin(x^2) using the chain rule.");
+
+    assert.equal(result?.title, "Chain rule");
+    assert.equal(result?.expression, "f(g(x))");
+    assert.equal(result?.steps?.length, 1);
+  });
+
   it("preserves function command boundaries while converting provider output", () => {
     const commandLatex = "\\int_0^{\\pi/2}2t(-\\ln \\cos t)\\cot t\\,dt=-2\\int_0^{\\pi/2}t\\ln(\\cos t)\\cot t\\,dt";
     const explanation = convertFastSolveToMathExplanation({

@@ -105,12 +105,19 @@ export function buildProvenanceSnapshot({ item = {}, problem = {} } = {}) {
   const ancestors = (item.ancestors || item.semanticAncestors || selectedToken.ancestors || selectedToken.semanticAncestors || [])
     .slice(0, 32)
     .map(cloneNode);
-  const evidenceSteps = selectBoundedEvidence(steps, selectedIndex);
+  const workspaceTarget = identity.semanticType === "workspace" || identity.role === "workspace";
+  const evidenceSteps = workspaceTarget && steps.length > MAX_EVIDENCE_STEPS
+    ? [...steps.slice(0, MAX_EVIDENCE_STEPS / 2).map((step, index) => stepEvidence(step, index)),
+      ...steps.slice(-MAX_EVIDENCE_STEPS / 2).map((step, index) => stepEvidence(step, steps.length - MAX_EVIDENCE_STEPS / 2 + index))]
+    : selectBoundedEvidence(steps, selectedIndex);
   const canonicalProblemText = problemText(context.problem || problem);
   const problemId = context.problem?.id || problem.id || context.problem?.sessionId || problem.sessionId || "problem";
   const solutionRevision = stableHash(JSON.stringify({
     problem: canonicalProblemText,
-    steps: evidenceSteps,
+    // A whole-solution thread must change revision even when a changed step
+    // falls outside its bounded request evidence. Lens-local rules stay intact.
+    steps: workspaceTarget ? steps.map(stepEvidence) : evidenceSteps,
+    ...(workspaceTarget ? { finalAnswer: solution?.finalAnswerLatex || solution?.finalAnswer || "" } : {}),
   }));
   const snapshot = {
     version: 1,

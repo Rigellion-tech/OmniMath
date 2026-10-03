@@ -1,4 +1,6 @@
 import { getRenderableSolutionSteps } from "../lib/solutionSteps.js";
+import { consumeProgressiveSolveStream } from "./progressiveStreamClient.js";
+import { consumeFollowupStream } from "./followupStreamClient.js";
 import { inspectReasoningCandidate } from "../lib/reasoningLatexDiagnostics.js";
 import {
   canonicalProblemFromExtraction,
@@ -7,6 +9,7 @@ import {
   getCanonicalSolverInput,
   logCanonicalProblem,
 } from "../lib/canonicalProblem.js";
+import { assertMatchingIngestionIdentity, createReviewRevisionId } from "../lib/imageIngestionLifecycle.js";
 
 async function parseResponse(response) {
   const contentType = response.headers.get("content-type") || "";
@@ -263,7 +266,7 @@ async function getAuthHeaders(getToken, endpoint, { fresh = false } = {}) {
   }
 }
 
-/** @param {{ canonicalProblem?: any, history?: any[], sourceMetadata?: any, getToken?: any, signal?: AbortSignal, endpoint?: string }} options */
+/** @param {{ canonicalProblem?: any, history?: any[], sourceMetadata?: any, getToken?: any, signal?: AbortSignal, endpoint?: string, progressive?: any }} options */
 export async function solveCanonicalProblem({
   canonicalProblem,
   history = [],
@@ -271,13 +274,14 @@ export async function solveCanonicalProblem({
   getToken,
   signal,
   endpoint = "/api/solve-extracted-problem",
+  progressive = null,
 }) {
   const safeCanonicalProblem = canonicalProblem || createCanonicalProblemPayload({
     canonicalText: sourceMetadata.problem || "",
     source: "typed",
   });
   const canonicalInput = getCanonicalSolverInput(safeCanonicalProblem);
-  const debugRequestId = createClientRequestId("canonical-solve");
+  const debugRequestId = progressive?.identity?.requestId || createClientRequestId("canonical-solve");
   const source = safeCanonicalProblem.source === "typed" ? "typed" : "ocr";
   logCanonicalProblem("solve request", safeCanonicalProblem, { endpoint, source });
   logSolutionDebug("api canonical-solve payload", {
@@ -291,6 +295,7 @@ export async function solveCanonicalProblem({
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(progressive ? { Accept: "text/event-stream" } : {}),
       ...authHeaders,
     },
     body: JSON.stringify({
@@ -304,12 +309,23 @@ export async function solveCanonicalProblem({
       canonicalProblem: safeCanonicalProblem,
       history,
       extraction: sourceMetadata.extraction || {},
+      extractionReceipt: sourceMetadata.extractionReceipt || sourceMetadata.extraction?.extractionReceipt || null,
       solveDecision: sourceMetadata.solveDecision || "direct",
       reviewAction: sourceMetadata.reviewAction || null,
+      reviewRevision: sourceMetadata.reviewRevision ?? sourceMetadata.extraction?.reviewRevision ?? 0,
+      reviewRevisionId: sourceMetadata.reviewRevisionId || sourceMetadata.extraction?.reviewRevisionId || null,
       debugRequestId,
+      ...(progressive ? {
+        progressiveMode: "provider-stream",
+        progressiveIdentity: progressive.identity,
+      } : {}),
     }),
     signal,
   });
+
+  if (progressive && response.ok && (response.headers.get("content-type") || "").includes("text/event-stream")) {
+    return consumeProgressiveSolveStream(response, progressive.onEvent);
+  }
 
   const parsed = await parseResponse(response);
   logSolutionDebug("api canonical-solve response", {
@@ -323,7 +339,7 @@ export async function solveCanonicalProblem({
   return normalizeSolveResponse(parsed, { endpoint, requestId: debugRequestId });
 }
 
-export async function explainProblem({ problem, canonicalLatex = "", history, getToken, signal }) {
+export async function explainProblem({ problem, canonicalLatex = "", history, getToken, signal, progressive = null }) {
   const canonicalProblem = createCanonicalProblemPayload({
     canonicalText: problem,
     canonicalLatex,
@@ -335,6 +351,7 @@ export async function explainProblem({ problem, canonicalLatex = "", history, ge
     sourceMetadata: { problem, canonicalLatex },
     getToken,
     signal,
+    progressive,
     endpoint: "/api/explain",
   });
 }
@@ -356,12 +373,18 @@ export async function explainImageProblem({ file, prompt, history = [], getToken
   return solveExtractedProblem({ ...payload, history, getToken, signal });
 }
 
-export async function extractImageProblem({ file, prompt, getToken, quality, signal }) {
+/** @param {{ file: Blob, prompt?: string, getToken?: any, quality?: any, signal?: AbortSignal, ingestion?: Record<string, any> }} options */
+export async function extractImageProblem({ file, prompt, getToken, quality, signal, ingestion = {} }) {
   const debugRequestId = createClientRequestId("image-extract");
   const formData = new FormData();
   formData.append("file", file);
   formData.append("prompt", prompt);
   formData.append("debugRequestId", debugRequestId);
+  for (const field of ["ingestionRequestId", "uploadId", "ingestionScopeId", "uploadRevision"]) {
+    if (ingestion[field] !== undefined && ingestion[field] !== null) {
+      formData.append(field, String(ingestion[field]));
+    }
+  }
   if (Number.isFinite(quality?.metrics?.ocrConfidence)) {
     formData.append("ocrConfidence", String(quality.metrics.ocrConfidence));
   }
@@ -375,6 +398,7 @@ export async function extractImageProblem({ file, prompt, getToken, quality, sig
   });
 
   const parsed = await parseResponse(response);
+  if (ingestion.ingestionRequestId) assertMatchingIngestionIdentity(ingestion, parsed?.ingestion || {});
   logSolutionDebug("api extract-image response", {
     requestId: parsed?.requestId || debugRequestId,
     status: response.status,
@@ -448,6 +472,61 @@ export function normalizeOcrTextForSubmission(value = "") {
   return normalizeSpacedRelationalOperators(joined);
 }
 
+function sanitizePreviewSegments(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 200).map((segment) => ({
+    type: segment?.type || "text",
+    text: String(segment?.text || ""),
+    latex: String(segment?.latex || ""),
+    ...(segment?.renderIssue ? { renderIssue: String(segment.renderIssue) } : {}),
+  }));
+}
+
+export function extractionMetadataForSolve(extraction = {}) {
+  const imageSource = extraction?.imageSource && typeof extraction.imageSource === "object"
+    ? extraction.imageSource
+    : {};
+  const displaySegments = sanitizePreviewSegments(extraction?.displaySegments || imageSource.displaySegments);
+  const ingestion = extraction?.ingestion && typeof extraction.ingestion === "object"
+    ? Object.fromEntries([
+        "ingestionRequestId", "uploadId", "ingestionScopeId", "scopeId", "uploadRevision",
+        "imageHash", "extractionId", "state", "reviewRevision",
+      ].filter((field) => extraction.ingestion[field] !== undefined).map((field) => [field, extraction.ingestion[field]]))
+    : null;
+  const safeImageSource = {
+    imageHash: ingestion?.imageHash || imageSource.imageHash || extraction?.imageHash || null,
+    filename: imageSource.filename || null,
+    contentType: imageSource.contentType || null,
+    bytes: imageSource.bytes || null,
+    displaySegments,
+  };
+  return {
+    extractionReceipt: extraction?.extractionReceipt || null,
+    ingestion,
+    extractionId: ingestion?.extractionId || extraction?.extractionId || null,
+    imageHash: safeImageSource.imageHash,
+    filename: safeImageSource.filename,
+    contentType: safeImageSource.contentType,
+    bytes: safeImageSource.bytes,
+    imageSource: safeImageSource,
+    confidence: extraction?.confidence ?? null,
+    ocrConfidence: extraction?.ocrConfidence ?? null,
+    mathIntegrityScore: extraction?.mathIntegrityScore ?? null,
+    confidenceTier: extraction?.confidenceTier || null,
+    issues: Array.isArray(extraction?.issues) ? extraction.issues : [],
+    extractionValidation: extraction?.extractionValidation || null,
+    ocrTextCleanup: extraction?.ocrTextCleanup || null,
+    rawExtractedText: String(extraction?.rawExtractedText || extraction?.rawOcrText || ""),
+    rawOcrText: String(extraction?.rawOcrText || extraction?.rawExtractedText || ""),
+    extractedProblemText: String(extraction?.extractedProblemText || ""),
+    cleanedPlainText: String(extraction?.cleanedPlainText || extraction?.extractedProblemText || ""),
+    extractedProblemLatex: String(extraction?.extractedProblemLatex || ""),
+    rawExtractedLatex: String(extraction?.rawExtractedLatex || extraction?.extractedProblemLatex || ""),
+    displaySegments,
+    ocrSolveDecision: extraction?.ocrSolveDecision || null,
+  };
+}
+
 export function buildExtractionSubmissionPayload(options = {}) {
   const extraction = options.extraction;
   const displayText = options.displayText;
@@ -455,19 +534,32 @@ export function buildExtractionSubmissionPayload(options = {}) {
   const solveDecision = options.solveDecision;
   const exactRawText = normalizeLineBreaks(rawText || extraction?.rawExtractedText || extraction?.rawOcrText || extraction?.extractedProblemText || "");
   const editableDisplayText = normalizeLineBreaks(displayText || extraction?.displayText || extraction?.cleanedPlainText || extraction?.extractedProblemText || exactRawText);
-  const normalizedText = normalizeOcrTextForSubmission(editableDisplayText || exactRawText);
+  // Initial model text may need deterministic OCR cleanup. Once the user edits
+  // the review field, its canonical value must not be silently rewritten.
+  const normalizedText = solveDecision === "edited" || solveDecision === "confirmed"
+    ? editableDisplayText
+    : normalizeOcrTextForSubmission(editableDisplayText || exactRawText);
   const source = options.source || (solveDecision === "direct" && normalizedText === normalizeOcrTextForSubmission(extraction?.extractedProblemText || exactRawText)
     ? "ocr-direct"
     : "ocr-reviewed");
-  const canonicalProblem = canonicalProblemFromExtraction({
-    extraction,
-    canonicalText: normalizedText,
-    source,
-  });
+  const canonicalProblem = solveDecision === "edited"
+    ? createCanonicalProblemPayload({
+        canonicalText: normalizedText,
+        canonicalLatex: "",
+        source,
+        extractionWarnings: extraction?.issues || extraction?.extractionValidation?.issues || [],
+        extractionConfidence: extraction?.confidence ?? extraction?.extractionValidation?.confidence,
+      })
+    : canonicalProblemFromExtraction({ extraction, canonicalText: normalizedText, source });
+  const safeReviewRevision = Number.isInteger(options.reviewRevision) && options.reviewRevision >= 0
+    ? options.reviewRevision
+    : 0;
+  const extractionId = extraction?.ingestion?.extractionId || extraction?.extractionId || "";
+  const reviewRevisionId = options.reviewRevisionId || createReviewRevisionId(extractionId, safeReviewRevision);
   const reviewAction = solveDecision === "confirmed"
-    ? { kind: "confirmed_unchanged", canonicalInputHash: canonicalProblem.hash }
+    ? { kind: "confirmed_unchanged", canonicalInputHash: canonicalProblem.hash, extractionId, reviewRevision: safeReviewRevision, reviewRevisionId }
     : solveDecision === "edited"
-      ? { kind: "edited", canonicalInputHash: canonicalProblem.hash }
+      ? { kind: "edited", canonicalInputHash: canonicalProblem.hash, extractionId, reviewRevision: safeReviewRevision, reviewRevisionId }
       : null;
   if (extraction?.canonicalProblem?.hash && extraction.canonicalProblem.hash !== canonicalProblem.hash) {
     logCanonicalProblem("hash divergence", canonicalProblem, {
@@ -480,13 +572,10 @@ export function buildExtractionSubmissionPayload(options = {}) {
     solveDecision,
     path: "buildExtractionSubmissionPayload",
   });
-  const previewMath = Array.isArray(extraction?.displaySegments)
-    ? extraction.displaySegments
-    : Array.isArray(extraction?.imageSource?.displaySegments)
-      ? extraction.imageSource.displaySegments
-      : [];
+  const safeExtractionMetadata = extractionMetadataForSolve(extraction);
+  const previewMath = safeExtractionMetadata.displaySegments;
   const payloadExtraction = {
-    ...(extraction || {}),
+    ...safeExtractionMetadata,
     rawText: exactRawText,
     displayText: editableDisplayText,
     normalizedText,
@@ -494,6 +583,8 @@ export function buildExtractionSubmissionPayload(options = {}) {
     previewMath,
     submittedProblemSource: "ocr-review-state",
     canonicalProblem,
+    reviewRevision: safeReviewRevision,
+    reviewRevisionId,
   };
 
   return {
@@ -503,6 +594,9 @@ export function buildExtractionSubmissionPayload(options = {}) {
     extraction: payloadExtraction,
     solveDecision,
     reviewAction,
+    extractionReceipt: extraction?.extractionReceipt || null,
+    reviewRevision: safeReviewRevision,
+    reviewRevisionId,
   };
 }
 
@@ -517,6 +611,7 @@ export async function solveExtractedProblem({
   history = [],
   getToken,
   signal,
+  progressive = null,
 }) {
   const safeExtraction = objectOrEmpty(extraction);
   const frozenCanonicalProblem = canonicalProblem || safeExtraction.canonicalProblem || createCanonicalProblemPayload({
@@ -535,27 +630,35 @@ export async function solveExtractedProblem({
       },
       solveDecision,
       reviewAction,
+      extractionReceipt: safeExtraction.extractionReceipt || null,
+      reviewRevision: safeExtraction.reviewRevision ?? 0,
+      reviewRevisionId: safeExtraction.reviewRevisionId || null,
       problemLatex,
       problemText,
     },
     history,
     getToken,
     signal,
+    progressive,
   });
 }
 
-export async function explainFollowup({ payload, getToken, signal }) {
+export async function explainFollowup({ payload, getToken, signal, onEvent = null }) {
   const authHeaders = await getAuthHeaders(getToken, "/api/explain-followup");
   const response = await fetch("/api/explain-followup", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(onEvent ? { Accept: "text/event-stream" } : {}),
       ...authHeaders,
     },
-    body: JSON.stringify(payload || {}),
+    body: JSON.stringify({ ...(payload || {}), ...(onEvent ? { stream: true } : {}) }),
     signal,
   });
 
+  if (onEvent && response.ok && response.headers.get("Content-Type")?.includes("text/event-stream")) {
+    return consumeFollowupStream(response, payload, onEvent, signal);
+  }
   return parseResponse(response);
 }
 

@@ -12,7 +12,7 @@ function objectOrEmpty(value) {
  *
  * @param {any} step
  */
-function isRenderableSolutionStep(step) {
+export function isRenderableSolutionStep(step) {
   if (!step || typeof step !== "object" || Array.isArray(step)) return false;
 
   const directValues = [step.math, step.latex, step.equationLatex, step.display];

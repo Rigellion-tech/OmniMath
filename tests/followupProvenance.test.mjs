@@ -4,6 +4,7 @@ import {
   buildProvenanceFollowupPrompt,
   createGeneralFollowupFallback,
   followupCorrelation,
+  normalizeFollowupScope,
   normalizeProvenanceSnapshot,
 } from "../server/followupProvenance.js";
 
@@ -114,6 +115,70 @@ describe("follow-up provenance snapshots", () => {
     assert.match(evidenceText, /step-36/);
     assert.match(evidenceText, /step-1/);
     assert.match(prompt, /z=987654321/);
+  });
+
+  it("retains an origin-centered entry after the former 48-step server cutoff", () => {
+    const snapshot = matrixSnapshot();
+    snapshot.origin.stepIndex = 55;
+    snapshot.origin.stepId = "step-56";
+    snapshot.origin.currentStep = { id: "step-56", math: "w=314159", reasoning: "Use the selected dependency." };
+    snapshot.target.stepId = "step-56";
+    snapshot.evidence.steps = Array.from({ length: 64 }, (_, index) => ({
+      index,
+      id: `step-${index + 1}`,
+      math: index === 55 ? "w=314159" : `w_${index}=${index}`,
+      reasoning: `Evidence ${index}`,
+    }));
+
+    const { prompt, snapshot: normalized } = buildProvenanceFollowupPrompt({
+      provenanceSnapshot: snapshot,
+      stepId: "step-56",
+      question: "where did this come from?",
+    }, []);
+
+    assert.equal(normalized.evidence.steps.length, 64);
+    assert.match(prompt.match(/ORDERED COMPACT STEP EVIDENCE\n([^\n]+)/)?.[1] || "", /step-56/);
+  });
+
+  it("keeps workspace scope explicit and rejects lens/workspace target mismatches", () => {
+    const workspace = matrixSnapshot();
+    workspace.target = {
+      semanticId: "workspace:solution-r4",
+      targetId: "workspace:solution-r4",
+      stepId: "",
+      sourceRange: null,
+      sourceText: "Current solution",
+      role: "workspace",
+      type: "workspace",
+      parentExpression: "",
+      selectedNode: null,
+      ancestors: [],
+    };
+    workspace.origin = { ...workspace.origin, stepId: "", stepIndex: null, currentStep: null };
+
+    const result = buildProvenanceFollowupPrompt({
+      scope: "workspace",
+      presentationDepth: "detailed",
+      provenanceSnapshot: workspace,
+      question: "Can you summarize the approach?",
+    }, []);
+    assert.equal(result.scope, "workspace");
+    assert.equal(result.presentationDepth, "detailed");
+    assert.match(result.prompt, /whole current solution workspace/);
+    assert.match(result.prompt, /WORKSPACE TARGET/);
+    assert.doesNotMatch(result.prompt, /tracing one exact selected mathematical occurrence/);
+
+    assert.equal(normalizeFollowupScope({}), "lens");
+    assert.throws(() => buildProvenanceFollowupPrompt({
+      scope: "workspace",
+      provenanceSnapshot: matrixSnapshot(),
+      question: "summarize",
+    }), /explicit workspace provenance target/);
+    assert.throws(() => buildProvenanceFollowupPrompt({
+      scope: "lens",
+      provenanceSnapshot: workspace,
+      question: "summarize",
+    }), /cannot use a workspace provenance target/);
   });
 
   it("validates version, range, confidence, evidence shape, and step consistency", () => {

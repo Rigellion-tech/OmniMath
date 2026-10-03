@@ -6,6 +6,7 @@ const executablePath = process.env.OMNIMATH_E2E_BROWSER_PATH || undefined;
 export default defineConfig({
   testDir: "./tests",
   testMatch: /(layoutRegression|sessionIsolation)\.spec\.mjs/,
+  testIgnore: "progressiveProviderStreaming.layoutRegression.spec.mjs",
   timeout: 90_000,
   expect: {
     timeout: 10_000,

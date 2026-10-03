@@ -12,40 +12,40 @@ import {
 
 const clerkAppearance = {
   variables: {
-    colorPrimary: "#5eead4",
-    colorBackground: "#08151b",
-    colorText: "#e6fbff",
-    colorTextSecondary: "rgba(203, 213, 225, 0.72)",
-    colorInputBackground: "rgba(255, 255, 255, 0.045)",
-    colorInputText: "#e6fbff",
+    colorPrimary: "#171717",
+    colorBackground: "#ffffff",
+    colorText: "#171717",
+    colorTextSecondary: "#666666",
+    colorInputBackground: "#ffffff",
+    colorInputText: "#171717",
     borderRadius: "0.9rem",
     fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
   },
   elements: {
     cardBox: "shadow-none",
-    card: "border border-white/[0.08] bg-[#07141a]",
-    headerTitle: "text-cyan-50",
-    headerSubtitle: "text-slate-300/70",
-    socialButtonsBlockButton: "border-white/[0.1] bg-white/[0.04] text-slate-100",
-    formButtonPrimary: "bg-teal-300 text-slate-950 hover:bg-teal-200",
-    footerActionLink: "text-teal-200 hover:text-teal-100",
+    card: "border border-neutral-200 bg-white",
+    headerTitle: "text-neutral-900",
+    headerSubtitle: "text-neutral-600",
+    socialButtonsBlockButton: "border-neutral-200 bg-neutral-50 text-neutral-800",
+    formButtonPrimary: "bg-neutral-900 text-white hover:bg-neutral-800",
+    footerActionLink: "text-neutral-700 hover:text-neutral-900",
   },
 };
 
 function AuthFrame({ children, eyebrow, title }) {
   return (
     <div className="omni-shell min-h-screen w-full overflow-x-hidden text-foreground">
-      <header className="border-b border-white/[0.06] bg-[#061116]/80 backdrop-blur-xl">
+      <header className="border-b border-neutral-200/80 bg-white/90 backdrop-blur-xl">
         <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-4 px-5 py-4">
           <Link to="/" className="flex min-w-0 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-teal-300/20 bg-teal-300/10 shadow-[0_12px_32px_rgba(0,0,0,0.28)]">
-              <BrainCircuit className="h-5 w-5 text-teal-200" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-50">
+              <BrainCircuit className="h-5 w-5 text-neutral-700" />
             </div>
             <div className="min-w-0">
-              <h1 className="truncate font-sans text-xl font-semibold tracking-normal text-cyan-50">
+              <h1 className="truncate font-sans text-xl font-semibold tracking-normal text-neutral-900">
                 OmniMath
               </h1>
-              <p className="mt-0.5 truncate text-sm text-slate-300/60">
+              <p className="mt-0.5 truncate text-sm text-neutral-500">
                 Guided math explanations with inspectable steps.
               </p>
             </div>
@@ -56,13 +56,13 @@ function AuthFrame({ children, eyebrow, title }) {
       <main className="mx-auto flex min-h-[calc(100vh-73px)] max-w-[1500px] items-center justify-center px-5 py-10">
         <section className="grid w-full max-w-5xl items-center gap-8 lg:grid-cols-[minmax(0,0.85fr)_auto]">
           <div className="max-w-xl">
-            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-200/70">
+            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-neutral-500">
               {eyebrow}
             </p>
-            <h1 className="mt-3 text-3xl font-semibold tracking-normal text-cyan-50 sm:text-4xl">
+            <h1 className="mt-3 text-3xl font-semibold tracking-normal text-neutral-900 sm:text-4xl">
               {title}
             </h1>
-            <p className="mt-4 text-sm leading-6 text-slate-300/65">
+            <p className="mt-4 text-sm leading-6 text-neutral-600">
               Save explanations, keep your history private, and continue your math work from any session.
             </p>
           </div>
@@ -76,8 +76,8 @@ function AuthFrame({ children, eyebrow, title }) {
 function AuthLoading() {
   return (
     <AuthFrame eyebrow="Authentication" title="Checking your session">
-      <div className="flex min-w-[280px] items-center gap-3 rounded-2xl border border-teal-300/15 bg-teal-300/[0.06] p-4 text-sm text-teal-50/75">
-        <Loader2 className="h-4 w-4 animate-spin text-teal-200" />
+      <div className="flex min-w-[280px] items-center gap-3 rounded-2xl border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-600">
+        <Loader2 className="h-4 w-4 animate-spin text-neutral-500" />
         Loading secure sign-in...
       </div>
     </AuthFrame>
@@ -87,7 +87,7 @@ function AuthLoading() {
 function AuthUnavailable() {
   return (
     <AuthFrame eyebrow="Setup required" title="Clerk is not configured">
-      <div className="max-w-sm rounded-2xl border border-amber-300/20 bg-amber-300/10 p-5 text-sm leading-6 text-amber-100/80">
+      <div className="max-w-sm rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm leading-6 text-amber-800">
         <div className="flex items-start gap-3">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>Set VITE_CLERK_PUBLISHABLE_KEY and restart the dev server to enable sign-in.</span>

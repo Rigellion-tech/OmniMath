@@ -11,7 +11,7 @@ import {
   resolveOpenAiRequestTimeout,
   selectOpenAiModel,
 } from "../server/openaiModels.js";
-import { estimateOpenAiCost } from "../server/openai.js";
+import { estimateOpenAiCost, getSolveTotalTimeoutMs } from "../server/openai.js";
 
 const ENV_KEYS = [
   "OPENAI_MODEL",
@@ -44,6 +44,7 @@ const ENV_KEYS = [
   "OMNIMATH_OPENAI_IMAGE_EXTRACTION_TIMEOUT_MS",
   "OMNIMATH_OPENAI_EXTRACTION_REVIEW_TIMEOUT_MS",
   "OMNIMATH_OPENAI_LAZY_TIMEOUT_MS",
+  "OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS",
 ];
 
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -373,10 +374,19 @@ describe("OpenAI role-specific request deadlines", () => {
     });
 
     assert.equal(initial.role, "solver");
-    assert.equal(initial.timeoutMs, 60000);
+    assert.equal(initial.timeoutMs, 90000);
     assert.equal(compact.role, "solver");
-    assert.equal(compact.timeoutMs, 60000);
+    assert.equal(compact.timeoutMs, 90000);
     assert.equal(compact.timeoutSource, "role_default");
+  });
+
+  it("uses a 90-second canonical solve budget without waiting for the deadline", () => {
+    clearEnv();
+
+    assert.equal(getSolveTotalTimeoutMs(), 90000);
+
+    process.env.OMNIMATH_SOLVE_TOTAL_TIMEOUT_MS = "45000";
+    assert.equal(getSolveTotalTimeoutMs(), 45000);
   });
 
   it("uses the repair deadline when modelPath remains solver", () => {

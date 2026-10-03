@@ -88,6 +88,28 @@ function serializeSession(row) {
     problem: payload.problem || (Array.isArray(payload.problems) ? payload.problems[payload.problems.length - 1] : null),
     steps: Array.isArray(payload.steps) ? payload.steps : payload.problem?.steps || [],
     pinnedWindows: Array.isArray(payload.pinnedWindows) ? payload.pinnedWindows : [],
+    workspaceConversation: normalizeWorkspaceConversationPayload(payload.workspaceConversation),
+  };
+}
+
+function normalizeWorkspaceConversationPayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    messages: (Array.isArray(value.messages) ? value.messages : []).slice(-80).map((message) => {
+      if (!message || typeof message !== "object") return null;
+      const text = String(message.text || "").slice(0, 12_000);
+      if (!text) return null;
+      return {
+        role: message.role === "assistant" || message.role === "tutor" ? "assistant" : "user",
+        text,
+        ...(message.requestId ? { requestId: String(message.requestId).slice(0, 240) } : {}),
+        ...(message.partial ? { partial: true } : {}),
+      };
+    }).filter(Boolean),
+    draft: String(value.draft || "").slice(0, 12_000),
+    revision: String(value.revision || "").slice(0, 240),
+    // A restored request is no longer in flight, even if it was saved mid-stream.
+    status: "idle",
   };
 }
 
@@ -106,6 +128,7 @@ function normalizeSessionPayload(session = {}) {
     problem,
     steps: Array.isArray(session.steps) ? session.steps : problem?.steps || [],
     pinnedWindows: Array.isArray(session.pinnedWindows) ? session.pinnedWindows : [],
+    workspaceConversation: normalizeWorkspaceConversationPayload(session.workspaceConversation),
   };
 }
 
@@ -355,6 +378,43 @@ export async function updateUserSessionForRequest(req, sessionId, session) {
         databaseConfigured: false,
         fallback: "missing_local_schema",
         session: serializeSession({ id: sessionId, title, payload, created_at: session.createdAt || now, updated_at: now }),
+      };
+    }
+    throw error;
+  }
+}
+
+export async function deleteUserSessionForRequest(req, sessionId) {
+  try {
+    const user = await requireCurrentUser(req);
+    const result = await query(
+      `
+        delete from user_sessions
+        where id = $2
+          and user_id = $1
+        returning id
+      `,
+      [user.id, sessionId]
+    );
+
+    if (result.rows.length === 0) {
+      throw Object.assign(new Error("Session not found."), {
+        statusCode: 404,
+        code: "NOT_FOUND",
+        publicMessage: "That session could not be found.",
+      });
+    }
+
+    return { user, deleted: true, id: result.rows[0].id };
+  } catch (error) {
+    if (canUseDevUserDataFallback(error)) {
+      logDevUserDataFallback("sessions:delete", error);
+      return {
+        user: null,
+        databaseConfigured: false,
+        fallback: "missing_local_schema",
+        deleted: true,
+        id: sessionId,
       };
     }
     throw error;

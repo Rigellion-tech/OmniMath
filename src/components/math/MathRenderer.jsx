@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
 import { splitEquationChainLatex } from "@/lib/equationChains";
 import { canonicalLatexForKatex, createMathNode, mathNodeToLatex, normalizeLatexTransport, safeMathString, traceMathStage } from "@/lib/mathNode";
-import { measureOmniSync } from "@/lib/performanceDiagnostics";
+import { endOmniMeasure, measureOmniSync, startOmniMeasure } from "@/lib/performanceDiagnostics";
 import { createSemanticKatexTrust } from "@/lib/semanticMathRenderer";
 
 const LATEX_COMMAND_PATTERN = /\\(?:iiint|iint|int|nabla|cdot|times|mathbf|frac|left|right|sqrt|sum|lim|sin|cos|tan|ln|log|rho|phi|theta|pi|alpha|beta|gamma|delta|lambda|mu|sigma|omega)\b/;
@@ -408,6 +408,9 @@ export default function MathRenderer({
   diagnosticReasoningStepIndex = null,
   diagnosticReasoningSpanIndex = null,
 }) {
+  const renderPerfToken = import.meta.env.DEV
+    ? startOmniMeasure("react.render.math-renderer", { componentName, displayMode, interactive })
+    : null;
   const hostRef = useRef(null);
   const rawMath = safeMathString(math);
   const fallback = safeMathString(fallbackText || math, rawMath);
@@ -423,9 +426,11 @@ export default function MathRenderer({
   const renderMath = hasAuthoritativeSemanticLatex ? authoritativeSemanticLatex : plainRenderMath;
   const [renderError, setRenderError] = useState("");
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const host = hostRef.current;
     if (!host) return undefined;
+    let validationFrame = 0;
+    let disposed = false;
     host.replaceChildren();
     host.removeAttribute("data-semantic-render-fallback");
     host.removeAttribute("data-math-render-outcome");
@@ -529,12 +534,6 @@ export default function MathRenderer({
       };
       const renderWithKatex = (latex, options) => {
         if (import.meta.env.DEV) {
-          measureOmniSync("katex.renderToString.render-path", () => katex.renderToString(latex, options), {
-            componentName,
-            displayMode,
-            interactive,
-            latexLength: latex.length,
-          });
           measureOmniSync("katex.render.dom", () => katex.render(latex, host, options), {
             componentName,
             displayMode,
@@ -543,7 +542,6 @@ export default function MathRenderer({
           });
           return;
         }
-        katex.renderToString(latex, options);
         katex.render(latex, host, options);
       };
 
@@ -564,22 +562,40 @@ export default function MathRenderer({
           displayMode,
         });
       }
-      const renderedObservation = inspectMathRenderDom(host);
-      if (!renderedObservation.visible && renderedObservation.measurable !== false) {
-        throw Object.assign(new Error("KaTeX produced no visible glyphs or shapes."), {
-          renderOutcome: "rendered_empty",
-          renderedObservation,
-        });
-      }
+      // KaTeX has just mutated this host. Reading layout here would force the
+      // browser to recalculate the growing solution once per equation. Defer
+      // visual validation until all sibling KaTeX writes in this commit have
+      // completed; the first validation read can then satisfy the rest.
       host.removeAttribute("data-math-fallback");
-      host.setAttribute("data-math-render-outcome", renderedObservation.visible ? "rendered" : "render_unobservable");
-      if (renderedObservation.measurable === false && import.meta.env.DEV && import.meta.env.VITE_DEBUG_MATH_RENDER === "true") {
-        console.warn("[omnimath:math-render-boundary]", {
-          outcome: "render_unobservable",
-          ...renderBoundaryContext(host, componentName),
-          renderedObservation,
-        });
-      }
+      host.setAttribute("data-math-render-outcome", "rendered_pending_validation");
+      validationFrame = requestAnimationFrame(() => {
+        validationFrame = 0;
+        if (disposed || !host.isConnected) return;
+        const renderedObservation = inspectMathRenderDom(host);
+        if (!renderedObservation.visible && renderedObservation.measurable !== false) {
+          const message = "KaTeX produced no visible glyphs or shapes.";
+          setRenderError(message);
+          host.textContent = "Equation could not be rendered.";
+          host.setAttribute("data-math-error-placeholder", "true");
+          host.setAttribute("data-math-render-outcome", "rendered_empty");
+          console.error("[omnimath:math-render-boundary]", {
+            outcome: "rendered_empty",
+            ...renderBoundaryContext(host, componentName),
+            componentName,
+            renderedObservation,
+            message,
+          });
+          return;
+        }
+        host.setAttribute("data-math-render-outcome", renderedObservation.visible ? "rendered" : "render_unobservable");
+        if (renderedObservation.measurable === false && import.meta.env.DEV && import.meta.env.VITE_DEBUG_MATH_RENDER === "true") {
+          console.warn("[omnimath:math-render-boundary]", {
+            outcome: "render_unobservable",
+            ...renderBoundaryContext(host, componentName),
+            renderedObservation,
+          });
+        }
+      });
     } catch (error) {
       const message = error?.message || "Unknown KaTeX error";
       logMathRender({
@@ -620,18 +636,21 @@ export default function MathRenderer({
     }
 
     return () => {
+      disposed = true;
+      if (validationFrame) cancelAnimationFrame(validationFrame);
       host.replaceChildren();
     };
   }, [componentName, diagnosticReasoningSpanIndex, diagnosticReasoningStepIndex, displayMode, fallback, hasAuthoritativeSemanticLatex, interactive, normalizedMath, plainRenderMath, rawMath, renderMath, sanitizedMath, semanticAnnotatedNodeCount, shouldRenderKatex]);
 
   const Tag = displayMode ? "div" : "span";
 
+  if (import.meta.env.DEV) endOmniMeasure(renderPerfToken, { latexLength: renderMath.length });
   return (
     <Tag
       ref={hostRef}
       className={[
         className,
-        renderError ? "font-mono not-italic text-sm leading-6 text-amber-100/90 whitespace-pre-wrap break-words" : "",
+        renderError ? "font-mono not-italic text-sm leading-6 text-amber-800 whitespace-pre-wrap break-words" : "",
       ].filter(Boolean).join(" ")}
       data-math-renderer="katex"
       data-math-render-error={renderError ? "true" : undefined}

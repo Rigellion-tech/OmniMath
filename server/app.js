@@ -10,24 +10,36 @@ import { parseMultipartForm } from "./multipart.js";
 import {
   createMathExplanation,
   createImageProblemExtraction,
+  estimateImageExtractionReservation,
   createFollowupAnswer,
+  streamFollowupAnswer,
   createCompareMethods,
   createLazyTokenExplanation,
   debugOpenAiConnection,
   estimateOpenAiCost,
   estimateOpenAiCostBudget,
   estimateOpenAiTokenBudget,
-  getOpenAiModel,
   getOpenAiRuntimeConfig,
   getLazyMaxOutputTokens,
-  getImageExtractionMaxOutputTokens,
   isOpenAiConfigured,
   normalizeOpenAiUsage,
   getSolveMaxOutputTokens,
   getSolveOutputTokenBudget,
   getSolveTotalTimeoutMs,
   logSolveCandidateOutcome,
+  normalizeProviderSolveCandidate,
+  streamMathExplanation,
 } from "./openai.js";
+import { createSolveBudget } from "./solveBudget.js";
+import { createProgressiveJsonFramer } from "./progressiveJsonFramer.js";
+import { createProgressiveStepValidator } from "./progressiveStepValidation.js";
+import { classifyProgressiveFailure, decideProgressiveRecovery } from "./progressiveRecoveryPolicy.js";
+import { decideOrdinaryRecovery } from "./ordinaryRecoveryPolicy.js";
+import {
+  buildModelExecutionConfig,
+  isMeaningfullyDifferentEscalationConfig,
+} from "./modelExecutionConfig.js";
+import { progressiveProviderEnabled } from "./progressiveCanaryConfig.js";
 import {
   checkAndReserveUsage,
   createUsageHeaders,
@@ -38,10 +50,16 @@ import {
 import { getClerkAuthRuntimeConfig, requireClerkIdentity } from "./usageIdentity.js";
 import { throttleRequest } from "./requestThrottle.js";
 import { runDeduplicatedRequest } from "./duplicateRequests.js";
+import { imageIngestionRegistry, ingestionDigest } from "./imageIngestionRegistry.js";
 import { applyLocalRulesToExplanation, createLocalRuleExplanation } from "./localRules.js";
 import { annotateMathExplanation } from "./mathAnnotator.js";
 import { validateExtraction } from "./extractionValidation.js";
-import { getOpenAiModelForPath, getOpenAiSamplingForPath, resolveOpenAiRequestTimeout } from "./openaiModels.js";
+import {
+  getOpenAiModelForPath,
+  getOpenAiSamplingForPath,
+  resolveOpenAiRequestTimeout,
+  selectOpenAiModel,
+} from "./openaiModels.js";
 import {
   buildProvenanceFollowupPrompt,
   createGeneralFollowupFallback,
@@ -54,6 +72,7 @@ import { analyzeSymbolOrigins } from "./symbolInventory.js";
 import { captureFailedSolveDiagnostic } from "./failedSolveDiagnostics.js";
 import { assertSolveCandidateStructure as acceptStructurallyParsedSolve, inspectSolveCandidateStructure } from "./solveCandidateStructure.js";
 import { finalizeSolveCandidate } from "./solveCandidateLifecycle.js";
+import { decideAssuranceRecovery, finalizeAssuranceSelection, selectAssuranceCandidate } from "./mathAssurancePolicy.js";
 import { decideCandidateAcceptance } from "./solveAcceptancePolicy.js";
 import { assessOcrSolveDecision, assertOcrSolveAllowed } from "./ocrSolvePolicy.js";
 import { getSolveDiagnosticContext, withSolveDiagnosticContext } from "./solveDiagnosticContext.js";
@@ -72,6 +91,7 @@ import {
 import { stripTerminalControlSequences } from "../src/lib/textSanitization.js";
 import {
   createUserSessionForRequest,
+  deleteUserSessionForRequest,
   getCurrentUserData,
   getCurrentUserHistory,
   getCurrentUserSessions,
@@ -100,6 +120,24 @@ const ALLOWED_IMAGE_TYPES = new Set([
 // Private, server-owned context used by source adapters. Public request fields
 // cannot select quota or persistence policy.
 const canonicalSolveRequestContexts = new WeakMap();
+const activeFollowupStreams = new Set();
+
+function imageSolveTelemetry(sourceMetadata) {
+  const ingestion = sourceMetadata?.ingestion;
+  if (!ingestion) return {};
+  return {
+    logicalImageIngestionRequestId: ingestion.ingestionRequestId,
+    ingestionRequestId: ingestion.ingestionRequestId,
+    imageHash: ingestion.imageHash,
+    uploadId: ingestion.uploadId,
+    extractionId: ingestion.extractionId,
+    selectedExtractionId: ingestion.extractionId,
+    reviewRevision: ingestion.reviewRevision,
+    reviewRevisionId: ingestion.reviewRevisionId,
+    canonicalProblemId: sourceMetadata.canonicalProblemId,
+    canonicalSolveRequestId: sourceMetadata.canonicalSolveRequestId,
+  };
+}
 
 function isSolveDebugEnabled() {
   return process.env.NODE_ENV !== "production" && (
@@ -153,16 +191,73 @@ function logSolveDebug(event, details = {}) {
   });
 }
 
+function logSolveRecovery(event, details = {}) {
+  console.info("[omnimath:solve-recovery]", {
+    event,
+    eventTimestamp: new Date().toISOString(),
+    ...details,
+  });
+}
+
+function logAssuranceChecks({ requestId, endpoint, assurance, attemptId = null }) {
+  for (const check of assurance?.checks || []) {
+    logSolveRecovery("verification_check", {
+      requestId, endpoint, attemptId,
+      routeAttemptId: assurance.routeAttemptId,
+      candidateId: assurance.candidateId,
+      verificationAttemptId: assurance.verificationAttemptId,
+      checkId: check.checkId, applicability: check.applicability,
+      classification: check.classification, scope: check.scope,
+      outcome: check.outcome, contradictionCategory: check.category,
+      assuranceStatus: assurance.status,
+    });
+  }
+}
+
 export function resolveInitialSolveRouting(input = {}) {
   const decision = chooseSolverRoleForProblem(input);
   const routeSource = decision.role === "solver" ? "default" : "difficulty-based";
+  const selectedInitialModelPath = decision.role === "solver" ? "canonicalSolve" : decision.role;
+  const selection = selectOpenAiModel({
+    modelPath: selectedInitialModelPath,
+    debugContext: { attemptType: "initial" },
+  });
   return {
     routingDecision: decision.tier,
     routingReason: decision.reason,
     selectedInitialModelRole: decision.role,
-    selectedInitialModel: getOpenAiModelForPath("canonicalSolve"),
+    selectedInitialModelPath,
+    selectedInitialModel: selection.modelId,
+    selectedInitialReasoningEffort: selection.reasoningEffort,
+    selectedInitialTimeoutMs: selection.timeoutMs,
+    structuredOutputPolicy: selection.structuredOutput ? "strict_json_schema" : "provider_default",
+    recoveryEligible: decision.tier !== "standard",
     routeSource,
   };
+}
+
+function solveExecutionConfig({
+  modelPath = "canonicalSolve",
+  attemptType = "initial",
+  recoveryPurpose = "initial_generation",
+  promptStrategy = "canonical_problem",
+  responseMode = "full_response_json",
+  compact = false,
+} = {}) {
+  const debugContext = { attemptType, retryPurpose: compact ? "compact" : recoveryPurpose };
+  return buildModelExecutionConfig({
+    modelPath,
+    debugContext,
+    responseMode,
+    structuredOutputPolicy: {
+      type: "json_schema",
+      schema: compact ? "math_compact_solve" : "math_fast_solve",
+      strict: true,
+    },
+    recoveryPurpose,
+    promptStrategy,
+    maxOutputTokens: getSolveOutputTokenBudget({ compact, modelPath, debugContext }),
+  });
 }
 
 function logInitialSolveRouting({ requestId = "", endpoint = "", routing = {} } = {}) {
@@ -172,7 +267,12 @@ function logInitialSolveRouting({ requestId = "", endpoint = "", routing = {} } 
     routingDecision: routing.routingDecision || null,
     routingReason: routing.routingReason || null,
     selectedInitialModelRole: routing.selectedInitialModelRole || null,
+    selectedInitialModelPath: routing.selectedInitialModelPath || null,
     selectedInitialModel: routing.selectedInitialModel || null,
+    selectedInitialReasoningEffort: routing.selectedInitialReasoningEffort || null,
+    selectedInitialTimeoutMs: routing.selectedInitialTimeoutMs || null,
+    structuredOutputPolicy: routing.structuredOutputPolicy || null,
+    recoveryEligible: Boolean(routing.recoveryEligible),
     routeSource: routing.routeSource || null,
   });
 }
@@ -788,7 +888,7 @@ General repair requirements:
 - Do not repeat the previous method or preserve invalid identities, unsupported antiderivatives, or unsupported special-function shortcuts.
 - Do not output placeholders such as "Recognized rule", "f g x", or a one-step rule summary.
 - Do not use undefined placeholder functions such as G(r,\theta), H(x), "symmetric function", or "defined above"; write the actual integral/formula or a numeric value.
-- Keep finalAnswerLatex structurally valid as one standalone final expression.
+- Keep finalAnswerLatex structurally valid as a concise complete result summary.
 
 Output contract:
 - Return JSON only. Do not include markdown, comments, code fences, or explanatory prose outside JSON.
@@ -804,8 +904,8 @@ Output contract:
 - Use proper LaTeX function names such as \\ln, \\arctan, \\sin, and \\cos.
 - Use LaTeX commands instead of Unicode math symbols: \\int, \\infty, \\frac{}{}, \\le, \\ge, and so on.
 - Preserve spacing commands for differentials, such as \\,dx.
-- finalAnswerLatex must be exactly one standalone mathematical expression or one equation assigning the original expression to the final value.
-- finalAnswerLatex must contain no prose, intermediate derivation, \\Rightarrow, multiline content, display separators, or multiple unrelated equations.
+- finalAnswerLatex must be a concise complete result summary, not a repeated derivation or intermediate system dump.
+- Related equations, labelled multi-part results and valid multiline environments are allowed. Preserve necessary domain restrictions, branches, assumptions, residuals and parameter conditions. Put explanatory step sequences in the derivation.
 - numericCheck should be a decimal approximation when applicable, or an empty string.
 - Keep each reasoning field to 1-2 concise sentences, maximum 35 words.
 - Do not restate the entire original problem inside step 1; start with the first meaningful transformation or theorem setup.
@@ -947,6 +1047,9 @@ function candidateCompleteness(result = {}) {
   };
 }
 
+// Legacy candidate-analysis exports are retained for offline diagnostics and
+// compatibility tests only. They are not the ordinary production recovery
+// state machine; ordinary recovery is governed by ordinaryRecoveryPolicy.js.
 export function classifySolveCandidate({
   source = "initial",
   result = null,
@@ -1085,19 +1188,6 @@ export function selectBestSafeSolveCandidate(candidates = []) {
   return candidates
     .filter((candidate) => candidate?.fallbackEligible)
     .sort(compareSafeSolveCandidates)[0] || null;
-}
-
-function claimQualityRepairAttempt(attemptedCandidateIds, result) {
-  const candidateKey = result?._omniCandidateProvenance?.candidateId || result;
-  if (!candidateKey || (typeof candidateKey !== "string" && typeof candidateKey !== "object")) return;
-  if (attemptedCandidateIds.has(candidateKey)) {
-    throw Object.assign(new Error("A solve candidate cannot receive more than one quality-repair attempt."), {
-      statusCode: 500,
-      code: "SOLVE_REPAIR_INVARIANT_VIOLATION",
-      publicMessage: "The solve retry policy could not complete this request.",
-    });
-  }
-  attemptedCandidateIds.add(candidateKey);
 }
 
 export function decideSolveEscalation(error, { alreadyEscalated = false, afterRepairAttempt = false } = {}) {
@@ -1408,6 +1498,17 @@ function sendError(res, error) {
     error: isServerError ? "Server error" : error.message,
     message,
   };
+  if (error.ingestionStage) payload.ingestionStage = error.ingestionStage;
+  if (error.responseFailureType) payload.failureClassification = error.responseFailureType;
+  if (error.accountingStatus) payload.accountingStatus = error.accountingStatus;
+  if (error.timeoutSource) payload.timeoutSource = error.timeoutSource;
+  if (error.timeoutScope) payload.timeoutScope = error.timeoutScope;
+  if (error.code === "AI_SOLVE_TIMEOUT") payload.retryable = true;
+  if (error.omniDebugContext?.requestId) payload.requestId = error.omniDebugContext.requestId;
+  if (error.limitBytes) {
+    payload.limitBytes = error.limitBytes;
+    payload.actualBytes = error.actualBytes;
+  }
 
   if (error.code === "AI_SOLUTION_QUALITY_INVALID") {
     const solutionIssues = [...new Set((Array.isArray(error.solutionIssues) ? error.solutionIssues : [])
@@ -1496,10 +1597,7 @@ function sendError(res, error) {
 async function readBody(req, maxBytes) {
   if (Buffer.isBuffer(req.body)) {
     if (req.body.length > maxBytes) {
-      throw Object.assign(new Error("Request body is too large."), {
-        statusCode: 413,
-        code: "BAD_INPUT",
-      });
+      throw bodySizeError(req.body.length, maxBytes);
     }
     return req.body;
   }
@@ -1507,10 +1605,7 @@ async function readBody(req, maxBytes) {
   if (typeof req.body === "string") {
     const body = Buffer.from(req.body);
     if (body.length > maxBytes) {
-      throw Object.assign(new Error("Request body is too large."), {
-        statusCode: 413,
-        code: "BAD_INPUT",
-      });
+      throw bodySizeError(body.length, maxBytes);
     }
     return body;
   }
@@ -1521,10 +1616,7 @@ async function readBody(req, maxBytes) {
   for await (const chunk of req) {
     total += chunk.length;
     if (total > maxBytes) {
-      throw Object.assign(new Error("Request body is too large."), {
-        statusCode: 413,
-        code: "BAD_INPUT",
-      });
+      throw bodySizeError(total, maxBytes);
     }
     chunks.push(chunk);
   }
@@ -1532,8 +1624,17 @@ async function readBody(req, maxBytes) {
   return Buffer.concat(chunks);
 }
 
+function bodySizeError(actualBytes, limitBytes) {
+  return Object.assign(new Error("Request body is too large."), {
+    statusCode: 413, code: "REQUEST_BODY_TOO_LARGE", actualBytes, limitBytes,
+    ingestionStage: "request_body",
+  });
+}
+
 async function readJson(req) {
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
+    const bytes = Buffer.byteLength(JSON.stringify(req.body), "utf8");
+    if (bytes > MAX_JSON_BYTES) throw bodySizeError(bytes, MAX_JSON_BYTES);
     return req.body;
   }
 
@@ -1697,8 +1798,9 @@ async function resolveFollowupIdentity(req) {
 }
 
 async function reserveFollowupUsage(req, identity, prompt) {
-  const estimatedTokens = estimateOpenAiTokenBudget({ prompt });
-  const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt }));
+  const maxOutputTokens = 900;
+  const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens });
+  const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens }));
   try {
     return await checkAndReserveUsage({
       req,
@@ -1830,6 +1932,69 @@ function dollarsToMicros(value) {
   return Math.ceil(Math.max(0, Number(value) || 0) * 1000000);
 }
 
+function progressiveUsageDiagnostics(usage = null, model = null) {
+  if (!usage) {
+    return {
+      usageReported: false,
+      inputTokens: null,
+      outputTokens: null,
+      reasoningTokens: null,
+      totalTokens: null,
+      estimatedCostUsd: null,
+    };
+  }
+  const normalized = normalizeOpenAiUsage(usage, 0);
+  return {
+    usageReported: true,
+    inputTokens: normalized.inputTokens,
+    outputTokens: normalized.outputTokens,
+    reasoningTokens: normalized.reasoningTokens,
+    totalTokens: normalized.totalTokens,
+    estimatedCostUsd: Number(estimateOpenAiCost(usage, { model: model || "" }).toFixed(6)),
+  };
+}
+
+function progressiveRecoverySummary(attempts = [], aggregateUsage = null, providerCallCount = attempts.length) {
+  const recoveryAttempts = attempts.slice(1);
+  const sum = (items, field) => {
+    if (items.length === 0) return 0;
+    if (items.some((item) => !item?.usage?.usageReported)) return null;
+    return Number(items.reduce(
+      (total, item) => total + (Number(item.usage[field]) || 0), 0
+    ).toFixed(6));
+  };
+  const reportedProviderCalls = attempts.filter((attempt) => attempt.usage?.usageReported).length;
+  const usageComplete = reportedProviderCalls === providerCallCount;
+  const aggregate = progressiveUsageDiagnostics(aggregateUsage);
+  const aggregateUsageDiagnostics = {
+    ...aggregate,
+    usageComplete,
+    reportedProviderCalls,
+    expectedProviderCalls: providerCallCount,
+    reportedTotalTokens: aggregate.totalTokens,
+    reportedEstimatedCostUsd: aggregate.estimatedCostUsd,
+    totalTokens: usageComplete ? aggregate.totalTokens : null,
+    estimatedCostUsd: usageComplete ? aggregate.estimatedCostUsd : null,
+  };
+  return {
+    initialAttemptSucceeded: attempts.length === 1 && attempts[0]?.decision === "authoritative",
+    initialAttemptPublishedPrefix: Boolean(attempts[0]?.authoritativePrefixPublished),
+    retryCount: attempts.filter((attempt) => attempt.attemptType === "retry").length,
+    repairCount: attempts.filter((attempt) => attempt.attemptType === "repair").length,
+    escalationCount: attempts.filter((attempt) => attempt.attemptType === "escalation").length,
+    recoveryDurationMs: recoveryAttempts.reduce(
+      (total, attempt) => total + Math.max(0, attempt.endedAt - attempt.startedAt), 0
+    ),
+    recoveryTokens: sum(recoveryAttempts, "totalTokens"),
+    recoveryEstimatedCostUsd: sum(recoveryAttempts, "estimatedCostUsd"),
+    escalationTokens: sum(attempts.filter((attempt) => attempt.attemptType === "escalation"), "totalTokens"),
+    escalationEstimatedCostUsd: sum(
+      attempts.filter((attempt) => attempt.attemptType === "escalation"), "estimatedCostUsd"
+    ),
+    aggregateUsage: aggregateUsageDiagnostics,
+  };
+}
+
 function mergeOpenAiUsageValues(...usages) {
   const present = usages.filter(Boolean);
   if (present.length === 0) return null;
@@ -1887,8 +2052,18 @@ function attachHiddenUsageValue(target, key, value) {
 async function settleAiUsageReservation(reservation, usage = null, {
   providerCalls = 0,
   settlementReason = "success",
+  providerAttempts = [],
 } = {}) {
   if (!reservation) return null;
+  // The canonical ledger records each fetch once, including transport retries.
+  if (providerAttempts.length) providerCalls = providerAttempts.length;
+  const unobservedAttempts = providerAttempts.filter((attempt) => attempt.usageStatus !== "observed");
+  const providerDispatched = providerCalls > 0 || providerAttempts.length > 0;
+  const unknownUsage = unobservedAttempts.length > 0 || (providerDispatched && !usage);
+  const usageStatus = !unknownUsage ? "observed"
+    : usage ? "partially_observed"
+    : unobservedAttempts.some((attempt) => attempt.abortAt || attempt.abortedAt)
+      ? "unknown_due_to_abort" : "unknown_unreconciled";
   const normalizedUsage = normalizeOpenAiUsage(usage, 0);
   return settleTokenUsage(
     reservation,
@@ -1900,20 +2075,29 @@ async function settleAiUsageReservation(reservation, usage = null, {
       actualReasoningTokens: normalizedUsage.reasoningTokens,
       providerCalls,
       settlementReason,
+      providerDispatched,
+      usageStatus,
+      providerAttempts,
     }
   );
 }
 
-async function settleFailureUsageOrRelease(reservation, error = null, result = null) {
+async function settleFailureUsageOrRelease(reservation, error = null, result = null, providerAttempts = []) {
   if (!reservation) return null;
   const errorUsage = aiUsageFrom(error);
   const resultUsage = aiUsageFrom(result);
   const usage = errorUsage || resultUsage || null;
-  const providerCalls = aiCallCountFrom(error) || aiCallCountFrom(result);
+  if (!providerAttempts.length) {
+    providerAttempts = error?._omniOpenAiDiagnostics?.providerAttempts
+      || error?.openAiTransportDiagnostics?.providerAttempts
+      || result?._omniOpenAiDiagnostics?.providerAttempts || [];
+  }
+  const providerCalls = Math.max(aiCallCountFrom(error), aiCallCountFrom(result), providerAttempts.length);
   if (usage || providerCalls > 0) {
     return settleAiUsageReservation(reservation, usage, {
       providerCalls: Math.max(providerCalls, usage ? 1 : 0),
       settlementReason: "failure",
+      providerAttempts,
     });
   }
   return releaseTokenReservation(reservation, { providerCalls: 0, settlementReason: "failure-before-provider" });
@@ -1941,7 +2125,18 @@ function createOpenAiRequiredError() {
   });
 }
 
-function logExplanationSource({ source, kind, endpoint, identity, prompt = "", aiUsage = null, model = "" }) {
+function logExplanationSource({
+  source,
+  kind,
+  endpoint,
+  identity,
+  requestId = null,
+  attemptId = null,
+  recoveryPurpose = null,
+  prompt = "",
+  aiUsage = null,
+  execution = null,
+}) {
   const normalizedUsage = normalizeOpenAiUsage(aiUsage, estimateTokens(prompt));
   const tokenUsage = aiUsage
     ? normalizedUsage
@@ -1952,14 +2147,40 @@ function logExplanationSource({ source, kind, endpoint, identity, prompt = "", a
         approximateInputTokens: estimateTokens(prompt),
       };
 
+  const diagnostics = execution && typeof execution === "object" ? execution : {};
+  const requestedModel = diagnostics.requestedModel || null;
+  const effectiveModel = diagnostics.effectiveModel || diagnostics.model || null;
+  const providerModel = diagnostics.providerModel ?? diagnostics.responseModel ?? null;
+  const accountingModel = diagnostics.accountingModel
+    || aiUsage?._omni_model_usage?.at(-1)?.accountingModel
+    || aiUsage?._omni_model_usage?.at(-1)?.model
+    || effectiveModel
+    || null;
   console.info("[omnimath:ai-request]", {
+    requestId,
+    attemptId,
+    routeAttemptId: diagnostics.routeAttemptId || null,
+    routeAttemptIndex: diagnostics.routeAttemptIndex ?? null,
+    candidateId: diagnostics.candidateId || null,
+    providerResponseId: diagnostics.responseId || diagnostics.providerResponseId || null,
+    providerTransportAttempt: diagnostics.attempt ?? null,
+    providerTransportAttempts: diagnostics.transportDiagnostics?.transportAttempts ?? null,
     userId: identity?.clerkUserId,
     endpoint,
     source,
     kind,
-    model: model || getOpenAiModel(),
+    role: diagnostics.modelRole || diagnostics.role || null,
+    requestedModel,
+    effectiveModel,
+    providerModel,
+    accountingModel,
+    reasoningEffort: diagnostics.reasoningEffort ?? null,
+    recoveryPurpose: recoveryPurpose || diagnostics.recoveryPurpose || null,
+    // Compatibility field now means observed provider identity only. It is
+    // deliberately null when the provider did not report a model.
+    model: providerModel,
     tokens: tokenUsage,
-    estimatedCostUsd: Number(estimateOpenAiCost(aiUsage).toFixed(6)),
+    estimatedCostUsd: Number(estimateOpenAiCost(aiUsage, { model: accountingModel || "" }).toFixed(6)),
   });
 }
 
@@ -2079,6 +2300,11 @@ async function runHandler(res, handler) {
   try {
     await handler();
   } catch (error) {
+    if (res.headersSent) {
+      console.error("[omnimath:handler-after-headers]", { code: error?.code || null, message: error?.message || "Unhandled error" });
+      if (!res.destroyed && !res.writableEnded) res.end();
+      return;
+    }
     sendError(res, error);
   }
 }
@@ -2156,6 +2382,13 @@ function validateSessionPayload(value) {
     throw createBadInputError("Pinned explanation windows must be an array.");
   }
 
+  const workspaceConversation = session.workspaceConversation;
+  if (workspaceConversation !== undefined && (workspaceConversation === null
+    || typeof workspaceConversation !== "object" || Array.isArray(workspaceConversation)
+    || (workspaceConversation.messages !== undefined && !Array.isArray(workspaceConversation.messages)))) {
+    throw createBadInputError("Workspace conversation must contain a messages array.");
+  }
+
   return {
     id: typeof session.id === "string" ? session.id.trim().slice(0, 80) : "",
     title,
@@ -2165,6 +2398,7 @@ function validateSessionPayload(value) {
     problems: Array.isArray(problems) ? problems : problem ? [problem] : [],
     steps: Array.isArray(session.steps) ? session.steps : problem?.steps || [],
     pinnedWindows: Array.isArray(pinnedWindows) ? pinnedWindows : [],
+    workspaceConversation: workspaceConversation || null,
   };
 }
 
@@ -2210,6 +2444,7 @@ export async function handleHealthRequest(req, res) {
   sendJson(res, 200, {
     ok: true,
     status: "healthy",
+    progressiveProviderEnabled: progressiveProviderEnabled(),
     demoMode: !isOpenAiConfigured(),
     aiEnabled: isAiEnabled(),
     openai: getOpenAiRuntimeConfig(),
@@ -2253,6 +2488,683 @@ export async function handleOpenAiDebugRequest(req, res) {
   }
 }
 
+function requireProgressiveIdentity(body, requestId) {
+  const raw = requireObject(body.progressiveIdentity, "Progressive identity");
+  const identity = Object.fromEntries(
+    ["requestId", "attemptId", "sessionId", "conversationId"]
+      .map((key) => [key, requireShortText(raw[key], `Progressive ${key}`, 120)])
+  );
+  if (identity.requestId !== requestId || !identity.attemptId.startsWith(`${requestId}:`)) {
+    throw createBadInputError("Progressive request and attempt identity do not match.");
+  }
+  if (raw.supersedesAttemptId !== undefined) {
+    const previous = requireShortText(raw.supersedesAttemptId, "Superseded attempt id", 120);
+    if (previous === identity.attemptId) throw createBadInputError("A solve cannot supersede itself.");
+  }
+  return identity;
+}
+
+function parseCompleteProgressiveRepairCandidate(outputText) {
+  if (typeof outputText !== "string" || outputText.length > 1_000_000) return null;
+  try {
+    const candidate = JSON.parse(outputText);
+    const keys = ["title", "problemLatex", "steps", "finalAnswerLatex", "numericCheck"];
+    return candidate && !Array.isArray(candidate) && typeof candidate === "object"
+      && keys.every((key) => Object.hasOwn(candidate, key)) && Array.isArray(candidate.steps)
+      ? candidate : null;
+  } catch { return null; }
+}
+
+async function handleProgressiveProviderSolve({
+  req, res, body, requestId, prompt, problem, canonicalProblem,
+  initialRouting, solveDeadlineAt, solveBudget, usageKind, persistenceSource, identity,
+  estimatedTokens, estimatedCostMicros, endpoint, inputSource, cacheKey, sourceMetadata,
+}) {
+  const progressiveStartedAt = Date.now();
+  const eventIdentity = requireProgressiveIdentity(body, requestId);
+  if (!isOpenAiConfigured()) throw createOpenAiRequiredError();
+  const { reservation } = await checkAndReserveUsage({
+    req, identity, kind: usageKind, estimatedTokens, estimatedCostMicros,
+  });
+  const abortController = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) abortController.abort(new DOMException("Client disconnected.", "AbortError"));
+  };
+  const onRequestError = (error) => {
+    if (error?.message === "aborted" || error?.code === "ECONNRESET") onClose();
+  };
+  res.on("close", onClose);
+  req.on?.("error", onRequestError);
+  if (req.aborted) onClose();
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+  let sequence = 0;
+  let terminal = false;
+  let settlementDone = false;
+  let settlementSucceeded = false;
+  let settlementStatus = "pending";
+  let providerResult = null;
+  const completedSteps = [];
+  let authoritativePrefixPublished = false;
+  let accumulatedUsage = null;
+  let providerCallCount = 0;
+  const recoveryAttempts = [];
+  const initialExecutionConfig = solveExecutionConfig({
+    modelPath: initialRouting.selectedInitialModelPath,
+    attemptType: "initial",
+    recoveryPurpose: "progressive_initial",
+    promptStrategy: "canonical_problem",
+    responseMode: "provider_stream_json",
+  });
+  const escalationExecutionConfig = solveExecutionConfig({
+    modelPath: "escalation",
+    attemptType: "escalation",
+    recoveryPurpose: "progressive_escalation",
+    promptStrategy: "canonical_problem",
+    responseMode: "provider_stream_json",
+  });
+  const initialSelectedModel = initialExecutionConfig.effectiveModel;
+  const escalationModelAvailable = isMeaningfullyDifferentEscalationConfig(
+    initialExecutionConfig,
+    escalationExecutionConfig,
+  );
+  let escalationReason = null;
+  let metadata = null;
+  let framedFinal = null;
+  let firstProviderEventAt = null;
+  let firstValidatedStepAt = null;
+  let authoritativeModel = null;
+  let authoritativeEffectiveModel = null;
+  const emit = (type, fields = {}) => {
+    if (terminal || res.destroyed || res.writableEnded) return false;
+    const event = { ...eventIdentity, sequence: sequence++, type, ...fields };
+    res.write(`event: solve\ndata: ${JSON.stringify(event)}\n\n`);
+    if (["solve_completed", "solve_failed", "solve_cancelled"].includes(type)) terminal = true;
+    return true;
+  };
+  const settle = async (usage, providerCalls, reason) => {
+    if (settlementDone) return null;
+    settlementDone = true;
+    try {
+      const result = usage || providerCalls > 0 || solveBudget.providerAttempts.length > 0
+        ? await settleAiUsageReservation(reservation, usage, {
+          providerCalls: Math.max(providerCalls, solveBudget.providerAttempts.length, usage ? 1 : 0), settlementReason: reason,
+          providerAttempts: solveBudget.providerAttempts,
+        })
+        : await releaseTokenReservation(reservation, { providerCalls: 0, settlementReason: "failure-before-provider" });
+      settlementSucceeded = true;
+      settlementStatus = "settled";
+      for (const attempt of recoveryAttempts) attempt.usageSettlementStatus = "settled";
+      console.info("[omnimath:progressive-recovery-settlement]", {
+        requestId, attemptId: eventIdentity.attemptId, providerCallCount,
+        settlementReason: reason,
+        providerAttempts: recoveryAttempts.map((attempt) => ({
+          index: attempt.index, model: attempt.model, usageReported: attempt.usage?.usageReported || false,
+          usageSettlementStatus: attempt.usageSettlementStatus,
+        })),
+      });
+      return result;
+    } catch (error) {
+      settlementStatus = "failed";
+      for (const attempt of recoveryAttempts) attempt.usageSettlementStatus = "failed";
+      throw error;
+    }
+  };
+  emit("solve_started", body.progressiveIdentity.supersedesAttemptId
+    ? { supersedesAttemptId: body.progressiveIdentity.supersedesAttemptId } : {});
+  try {
+    let activePrompt = prompt;
+    let attemptType = "initial";
+    let retryAttempted = false;
+    let repairAttempted = false;
+    let escalationAttempted = false;
+    let normalized;
+    while (true) {
+      if (abortController.signal.aborted) throw abortController.signal.reason;
+      if (Date.now() >= solveDeadlineAt) {
+        throw Object.assign(new Error("Interactive solve deadline exceeded."), {
+          code: "AI_SERVICE_UNAVAILABLE", responseFailureType: "interactive_deadline_exceeded",
+          publicMessage: "The AI service did not complete the explanation in time.",
+        });
+      }
+      const providerAttemptIndex = recoveryAttempts.length + 1;
+      const routeAttemptId = `${eventIdentity.attemptId}:route:${providerAttemptIndex}`;
+      const attemptStartedAt = Date.now();
+      const framer = createProgressiveJsonFramer();
+      const validator = createProgressiveStepValidator({ sourceHash: canonicalProblem.hash });
+      const deferPublication = attemptType === "repair";
+      const stagedSteps = [];
+      let candidateMetadata = null;
+      let candidateFinal = null;
+      let draftOutput = "";
+      let prePrefixError = null;
+      let callResult = null;
+      let counted = false;
+      const accountCall = (value) => {
+        if (counted) return;
+        counted = true;
+        accumulatedUsage = mergeOpenAiUsageValues(accumulatedUsage, aiUsageFrom(value) || value?.usage || null);
+        providerCallCount += aiCallCountFrom(value) || value?.providerCallCount || 0;
+      };
+      const attemptModelPath = attemptType === "repair"
+        ? "repair"
+        : attemptType === "escalation"
+          ? "escalation"
+          : initialRouting.selectedInitialModelPath;
+      const attemptRecoveryPurpose = attemptType === "repair"
+        ? "progressive_structured_repair"
+        : attemptType === "escalation"
+          ? "progressive_escalation"
+          : retryAttempted
+            ? "progressive_transport_retry"
+            : "progressive_initial";
+      const attemptPromptStrategy = attemptType === "repair"
+        ? "repair_complete_candidate"
+        : "canonical_problem";
+      const attemptExecutionConfig = solveExecutionConfig({
+        modelPath: attemptModelPath,
+        attemptType,
+        recoveryPurpose: attemptRecoveryPurpose,
+        promptStrategy: attemptPromptStrategy,
+        responseMode: "provider_stream_json",
+      });
+      const selectedModel = attemptExecutionConfig.effectiveModel;
+      logSolveRecovery("progressive_attempt_started", {
+        requestId,
+        endpoint,
+        attemptId: eventIdentity.attemptId,
+        routeAttemptId,
+        routeAttemptIndex: providerAttemptIndex,
+        recoveryPurpose: attemptRecoveryPurpose,
+        promptHash: hashDebugText(activePrompt),
+        executionConfig: attemptExecutionConfig,
+      });
+      const observeProviderEvent = (providerEvent = {}) => {
+        const elapsedMs = Number(providerEvent.elapsedMs);
+        const observedAt = Number.isFinite(elapsedMs) ? attemptStartedAt + elapsedMs : Date.now();
+        firstProviderEventAt ??= observedAt;
+      };
+      try {
+        callResult = await streamMathExplanation({
+          prompt: activePrompt,
+          originalProblem: problem,
+          modelPath: attemptModelPath,
+          maxProviderAttempts: 1,
+          debugContext: {
+                  ...imageSolveTelemetry(sourceMetadata),
+            requestId, attemptId: eventIdentity.attemptId, routeAttemptId, providerAttemptIndex,
+            recoveryPurpose: attemptRecoveryPurpose,
+            attemptType, endpoint, inputSource, normalizedProblem: problem,
+            promptHash: hashDebugText(activePrompt), solveDeadlineAt, solveBudget,
+            solveBudgetStage: providerAttemptIndex === 1 ? "primary" : "recovery", initialRouting,
+          },
+          signal: abortController.signal,
+          onTextDelta: async (delta, providerEvent) => {
+            observeProviderEvent(providerEvent);
+            if (abortController.signal.aborted) throw abortController.signal.reason;
+            draftOutput = (draftOutput + delta).slice(0, 1_000_001);
+            if (prePrefixError) return;
+            let records;
+            try { records = framer.push(delta); }
+            catch (error) {
+              if (authoritativePrefixPublished) throw error;
+              prePrefixError = error;
+              return;
+            }
+            for (const record of records) {
+              if (record.type === "metadata") {
+                candidateMetadata = {
+                  title: record.value.title, problemLatex: record.value.problemLatex,
+                  originalProblem: problem, canonicalProblem,
+                  canonicalInputHash: canonicalProblem.hash,
+                  source: inputSource, ...(sourceMetadata || {}),
+                  model: providerEvent.providerModel ?? providerEvent.model ?? null,
+                  providerModel: providerEvent.providerModel ?? providerEvent.model ?? null,
+                  effectiveModel: providerEvent.effectiveModel || selectedModel,
+                };
+              } else if (record.type === "step") {
+                const validationStartedAt = performance.now();
+                let accepted;
+                try {
+                  accepted = validator.accept(record.value, {
+                    stepIndex: record.index, sourceHash: canonicalProblem.hash,
+                  });
+                } catch (validationError) {
+                  console.warn("[omnimath:progressive-step]", {
+                    requestId, attemptId: eventIdentity.attemptId, providerAttemptIndex,
+                    providerResponseId: providerEvent.providerResponseId,
+                    model: providerEvent.model, stepIndex: record.index,
+                    validation: "rejected", reason: validationError?.reason || validationError?.code || null,
+                    validationDurationMs: Number((performance.now() - validationStartedAt).toFixed(3)),
+                  });
+                  if (authoritativePrefixPublished) throw validationError;
+                  prePrefixError = validationError;
+                  return;
+                }
+                if (abortController.signal.aborted) throw abortController.signal.reason;
+                const validationDurationMs = Number((performance.now() - validationStartedAt).toFixed(3));
+                const acceptedAt = Date.now();
+                if (deferPublication) {
+                  stagedSteps.push({ accepted, stepIndex: record.index, acceptedAt, validationDurationMs,
+                    providerResponseId: providerEvent.providerResponseId,
+                    providerModel: providerEvent.providerModel ?? providerEvent.model ?? null,
+                    effectiveModel: providerEvent.effectiveModel || selectedModel });
+                  continue;
+                }
+                if (!authoritativePrefixPublished) {
+                  if (!emit("solution_metadata", { metadata: candidateMetadata })) throw abortController.signal.reason || new Error("Client disconnected.");
+                  metadata = candidateMetadata;
+                }
+                if (!emit("step_completed", {
+                  stepId: accepted.step.id, stepIndex: record.index,
+                  step: accepted.step, validation: accepted.validation,
+                  acceptedAt, validationDurationMs,
+                })) throw abortController.signal.reason || new Error("Client disconnected.");
+                firstValidatedStepAt ??= acceptedAt;
+                completedSteps.push(accepted.step);
+                authoritativePrefixPublished = true;
+                authoritativeModel ??= providerEvent.providerModel ?? providerEvent.model ?? null;
+                authoritativeEffectiveModel ??= providerEvent.effectiveModel || selectedModel;
+                console.info("[omnimath:progressive-step]", {
+                  requestId, attemptId: eventIdentity.attemptId, providerAttemptIndex,
+                  providerResponseId: providerEvent.providerResponseId,
+                  model: providerEvent.model, sequence: sequence - 1,
+                  stepIndex: record.index, validation: "accepted",
+                  validationDurationMs, acceptedAt, elapsedMs: providerEvent.elapsedMs,
+                });
+              } else if (record.type === "final_answer") {
+                candidateFinal = record.value;
+              }
+            }
+          },
+          onProviderEvent: observeProviderEvent,
+        });
+        accountCall(callResult);
+        if (abortController.signal.aborted) throw abortController.signal.reason;
+        if (!draftOutput.trim()) {
+          throw Object.assign(new Error("Provider stream returned no solution text."), {
+            code: "AI_RESPONSE_INVALID", responseFailureType: "empty_response",
+            publicMessage: "The AI service returned an empty explanation.",
+          });
+        }
+        if (prePrefixError) throw prePrefixError;
+        const full = framer.finish();
+        validator.assertPrefix(full);
+        normalized = normalizeProviderSolveCandidate(full, { originalProblem: problem });
+        normalized.steps = deferPublication ? stagedSteps.map((item) => item.accepted.step) : completedSteps;
+        normalized.canonicalProblem = canonicalProblem;
+        normalized.canonicalInputHash = canonicalProblem.hash;
+        normalized.canonicalContentHash = canonicalProblem.contentHash;
+        normalized.model = callResult.providerModel ?? callResult.model ?? null;
+        normalized.providerModel = callResult.providerModel ?? callResult.model ?? null;
+        normalized.effectiveModel = callResult.effectiveModel || selectedModel;
+        finalizeSolveCandidate(normalized, {
+          problem, inputSource, requestId,
+          candidateId: `${routeAttemptId}:candidate:progressive`, routeAttemptId,
+        });
+        logAssuranceChecks({ requestId, endpoint, assurance: normalized.assurance,
+          attemptId: eventIdentity.attemptId });
+        finalizeAssuranceSelection({ result: normalized, assurance: normalized.assurance },
+          [{ result: normalized, assurance: normalized.assurance }], false, {
+            attempted: false, outcome: "not_attempted", reason: "authoritative_prefix_published",
+          });
+        logSolveRecovery("assurance_decision", {
+          requestId, endpoint, attemptId: eventIdentity.attemptId, routeAttemptId,
+          candidateId: normalized.assurance.candidateId,
+          assuranceStatus: normalized.assurance.status,
+          contradictionCategories: normalized.assurance.findings.map((finding) => finding.category),
+          recoveryDecision: normalized.assurance.status === "contradiction_detected"
+            ? "present_unresolved" : "present",
+          recoveryReason: authoritativePrefixPublished ? "authoritative_prefix_published" : "progressive_route_policy",
+        });
+        if (deferPublication) {
+          if (!candidateMetadata || !stagedSteps.length || typeof candidateFinal !== "string") {
+            throw Object.assign(new Error("Repair stream did not contain a complete solution."), {
+              code: "PROGRESSIVE_FRAME_INVALID",
+            });
+          }
+          if (abortController.signal.aborted) throw abortController.signal.reason;
+          candidateMetadata.model = callResult.providerModel ?? callResult.model ?? null;
+          candidateMetadata.providerModel = callResult.providerModel ?? callResult.model ?? null;
+          candidateMetadata.effectiveModel = callResult.effectiveModel || selectedModel;
+          if (!emit("solution_metadata", { metadata: candidateMetadata })) throw abortController.signal.reason || new Error("Client disconnected.");
+          metadata = candidateMetadata;
+          for (const item of stagedSteps) {
+            if (abortController.signal.aborted) throw abortController.signal.reason;
+            if (!emit("step_completed", {
+              stepId: item.accepted.step.id, stepIndex: item.stepIndex,
+              step: item.accepted.step, validation: item.accepted.validation,
+              acceptedAt: item.acceptedAt, validationDurationMs: item.validationDurationMs,
+            })) throw abortController.signal.reason || new Error("Client disconnected.");
+            firstValidatedStepAt ??= item.acceptedAt;
+            completedSteps.push(item.accepted.step);
+            authoritativePrefixPublished = true;
+            authoritativeModel ??= item.providerModel ?? callResult.providerModel ?? callResult.model ?? null;
+            authoritativeEffectiveModel ??= item.effectiveModel || callResult.effectiveModel || selectedModel;
+            console.info("[omnimath:progressive-step]", {
+              requestId, attemptId: eventIdentity.attemptId, providerAttemptIndex,
+              providerResponseId: item.providerResponseId, model: item.providerModel,
+              sequence: sequence - 1, stepIndex: item.stepIndex,
+              validation: "accepted", validationDurationMs: item.validationDurationMs,
+              acceptedAt: item.acceptedAt,
+            });
+          }
+        }
+        framedFinal = candidateFinal;
+        providerResult = callResult;
+        const attemptUsage = aiUsageFrom(callResult) || callResult?.usage || null;
+        const attemptDiagnostics = { index: providerAttemptIndex, routeAttemptId, attemptType,
+          role: attemptExecutionConfig.role,
+          requestedModel: attemptExecutionConfig.requestedModel,
+          effectiveModel: attemptExecutionConfig.effectiveModel,
+          providerModel: callResult.providerModel ?? callResult.model ?? null,
+          accountingModel: callResult.accountingModel || attemptExecutionConfig.effectiveModel,
+          reasoningEffort: attemptExecutionConfig.reasoningEffort,
+          executionConfig: attemptExecutionConfig,
+          model: callResult.providerModel ?? callResult.model ?? null,
+          classification: null, decision: "authoritative", escalationReason,
+          startedAt: attemptStartedAt, endedAt: Date.now(), authoritativePrefixPublished,
+          usage: progressiveUsageDiagnostics(
+            attemptUsage,
+            callResult.accountingModel || attemptExecutionConfig.effectiveModel,
+          ),
+          providerResponseId: callResult.responseId || null,
+          providerEventCount: callResult.providerEventCount ?? null,
+          firstProviderEventMs: callResult.firstProviderEventMs ?? null,
+          usageSettlementStatus: "pending" };
+        recoveryAttempts.push(attemptDiagnostics);
+        console.info(`[omnimath:progressive-recovery] ${JSON.stringify({
+          eventTimestamp: new Date().toISOString(), requestId, attemptId: eventIdentity.attemptId,
+          providerAttemptIndex, routeAttemptId, attemptType,
+          role: attemptDiagnostics.role,
+          requestedModel: attemptDiagnostics.requestedModel,
+          effectiveModel: attemptDiagnostics.effectiveModel,
+          providerModel: attemptDiagnostics.providerModel,
+          accountingModel: attemptDiagnostics.accountingModel,
+          reasoningEffort: attemptDiagnostics.reasoningEffort,
+          model: attemptDiagnostics.providerModel, classification: null, decision: "authoritative",
+          escalationReason, startedAt: attemptStartedAt, endedAt: attemptDiagnostics.endedAt,
+          durationMs: attemptDiagnostics.endedAt - attemptDiagnostics.startedAt,
+          authoritativePrefixPublished, providerResponseId: attemptDiagnostics.providerResponseId,
+          providerEventCount: attemptDiagnostics.providerEventCount,
+          firstProviderEventMs: attemptDiagnostics.firstProviderEventMs,
+          usage: attemptDiagnostics.usage,
+          usageSettlementStatus: attemptDiagnostics.usage.usageReported ? "pending" : "unavailable",
+        })}`);
+        break;
+      } catch (error) {
+        accountCall(callResult || error);
+        const classification = classifyProgressiveFailure(error, { cancelled: abortController.signal.aborted,
+          disconnected: res.destroyed });
+        const repairCandidate = parseCompleteProgressiveRepairCandidate(draftOutput || error?._omniFailedOutputText);
+        const decision = decideProgressiveRecovery({
+          classification, authoritativePrefixPublished, retryAttempted,
+          repairAttempted, escalationAttempted,
+          repairCandidateAvailable: Boolean(repairCandidate), escalationModelAvailable,
+          deadlineRemaining: solveBudget.canStartRecovery() && !abortController.signal.aborted,
+          providerAttemptCount: providerAttemptIndex,
+        });
+        if (!solveBudget.canStartRecovery() && !abortController.signal.aborted) {
+          decision.reason = "insufficient_recovery_budget";
+        }
+        const failedProviderModel = callResult?.providerModel
+          ?? error?._omniOpenAiDiagnostics?.providerModel
+          ?? error?._omniOpenAiDiagnostics?.responseModel
+          ?? null;
+        const failedModel = failedProviderModel;
+        const attemptUsage = aiUsageFrom(callResult || error) || callResult?.usage || null;
+        const attemptDiagnostics = { index: providerAttemptIndex, routeAttemptId, attemptType,
+          role: attemptExecutionConfig.role,
+          requestedModel: attemptExecutionConfig.requestedModel,
+          effectiveModel: attemptExecutionConfig.effectiveModel,
+          providerModel: failedProviderModel,
+          accountingModel: callResult?.accountingModel || attemptExecutionConfig.effectiveModel,
+          reasoningEffort: attemptExecutionConfig.reasoningEffort,
+          executionConfig: attemptExecutionConfig,
+          model: failedModel,
+          classification, decision: decision.action, escalationReason: decision.action === "escalate" ? decision.reason : null,
+          decisionReason: decision.reason || null,
+          startedAt: attemptStartedAt, endedAt: Date.now(), authoritativePrefixPublished,
+          usage: progressiveUsageDiagnostics(
+            attemptUsage,
+            callResult?.accountingModel || attemptExecutionConfig.effectiveModel,
+          ),
+          providerResponseId: callResult?.responseId || error?._omniOpenAiDiagnostics?.providerResponseId || null,
+          providerEventCount: callResult?.providerEventCount ?? error?._omniOpenAiDiagnostics?.providerEventCount ?? null,
+          firstProviderEventMs: callResult?.firstProviderEventMs
+            ?? error?._omniOpenAiDiagnostics?.firstProviderEventMs ?? null,
+          usageSettlementStatus: "pending" };
+        recoveryAttempts.push(attemptDiagnostics);
+        console.info(`[omnimath:progressive-recovery] ${JSON.stringify({
+          eventTimestamp: new Date().toISOString(), requestId, attemptId: eventIdentity.attemptId,
+          providerAttemptIndex, routeAttemptId, attemptType,
+          role: attemptDiagnostics.role,
+          requestedModel: attemptDiagnostics.requestedModel,
+          effectiveModel: attemptDiagnostics.effectiveModel,
+          providerModel: attemptDiagnostics.providerModel,
+          accountingModel: attemptDiagnostics.accountingModel,
+          reasoningEffort: attemptDiagnostics.reasoningEffort,
+          model: failedModel,
+          failureClassification: classification, recoveryDecision: decision.action,
+          recoveryReason: decision.reason || null,
+          escalationReason: decision.action === "escalate" ? decision.reason : null,
+          startedAt: attemptStartedAt, endedAt: attemptDiagnostics.endedAt,
+          durationMs: attemptDiagnostics.endedAt - attemptDiagnostics.startedAt,
+          authoritativePrefixPublished, providerResponseId: attemptDiagnostics.providerResponseId,
+          providerEventCount: attemptDiagnostics.providerEventCount,
+          firstProviderEventMs: attemptDiagnostics.firstProviderEventMs,
+          usage: attemptDiagnostics.usage,
+          usageSettlementStatus: attemptDiagnostics.usage.usageReported ? "pending" : "unavailable",
+        })}`);
+        if (decision.action === "retry") {
+          retryAttempted = true;
+          attemptType = "retry";
+          logSolveRecovery("progressive_recovery_selected", {
+            requestId,
+            endpoint,
+            attemptId: eventIdentity.attemptId,
+            priorRouteAttemptId: routeAttemptId,
+            nextRouteAttemptId: `${eventIdentity.attemptId}:route:${providerAttemptIndex + 1}`,
+            recoveryDecision: "retry",
+            recoveryReason: decision.reason,
+            expectedImprovement: "bounded_transport_retry_after_transient_or_request_timeout",
+            identicalExecutionConfigurationAllowed: true,
+          });
+          continue;
+        }
+        if (decision.action === "repair") {
+          repairAttempted = true;
+          activePrompt = buildRepairSolvePrompt(prompt, [error.reason || error.code || classification], {
+            problem, previousResult: repairCandidate, error,
+          });
+          attemptType = "repair";
+          logSolveRecovery("progressive_recovery_selected", {
+            requestId,
+            endpoint,
+            attemptId: eventIdentity.attemptId,
+            priorRouteAttemptId: routeAttemptId,
+            nextRouteAttemptId: `${eventIdentity.attemptId}:route:${providerAttemptIndex + 1}`,
+            recoveryDecision: "repair",
+            recoveryReason: decision.reason,
+            expectedImprovement: "complete_candidate_repair_with_changed_prompt_and_repair_route",
+            identicalExecutionConfigurationAllowed: false,
+          });
+          continue;
+        }
+        if (decision.action === "escalate") {
+          escalationAttempted = true;
+          escalationReason = decision.reason;
+          activePrompt = prompt;
+          attemptType = "escalation";
+          logSolveRecovery("progressive_recovery_selected", {
+            requestId,
+            endpoint,
+            attemptId: eventIdentity.attemptId,
+            priorRouteAttemptId: routeAttemptId,
+            nextRouteAttemptId: `${eventIdentity.attemptId}:route:${providerAttemptIndex + 1}`,
+            recoveryDecision: "escalate",
+            recoveryReason: decision.reason,
+            expectedImprovement: "materially_different_escalation_execution_configuration",
+            identicalExecutionConfigurationAllowed: false,
+            executionConfig: escalationExecutionConfig,
+          });
+          continue;
+        }
+        attachAccumulatedAiUsage(error, accumulatedUsage, providerCallCount);
+        throw error;
+      }
+    }
+    if (!metadata || !completedSteps.length || typeof framedFinal !== "string") {
+      throw Object.assign(new Error("Provider stream did not contain a complete solution."), {
+        code: "PROGRESSIVE_FRAME_INVALID",
+      });
+    }
+    // The published prefix is the durable source of step identity and content.
+    // A later whole-solution normalization cannot replace those steps.
+    normalized.progressiveRecovery = {
+      initialSelectedModel,
+      finalAuthoritativeModel: authoritativeModel,
+      finalAuthoritativeEffectiveModel: authoritativeEffectiveModel,
+      escalationReason,
+      providerCallCount,
+      providerAttempts: recoveryAttempts,
+    };
+    if (abortController.signal.aborted) throw abortController.signal.reason;
+    await settle(accumulatedUsage, providerCallCount, "success");
+    setCachedExplanation(cacheKey, structuredClone(normalized));
+    saveExplanationBestEffort(req, { source: persistenceSource, problem, result: normalized, identity })
+      .catch((error) => console.warn("[omnimath:progressive-save-warning]", { requestId, code: error?.code || null }));
+    emit("final_answer", { answer: {
+      finalAnswer: normalized.finalAnswer || "",
+      finalAnswerLatex: normalized.finalAnswerLatex || framedFinal,
+      finalAnswerPresentation: normalized.finalAnswerPresentation,
+      finalAnswerStepPresentations: normalized.finalAnswerStepPresentations,
+    }, assurance: normalized.assurance });
+    emit("solve_completed", {
+      model: providerResult.providerModel ?? providerResult.model ?? null,
+      providerModel: providerResult.providerModel ?? providerResult.model ?? null,
+      effectiveModel: providerResult.effectiveModel || null,
+      providerResponseId: providerResult.responseId,
+    });
+    const recoverySummary = progressiveRecoverySummary(recoveryAttempts, accumulatedUsage, providerCallCount);
+    console.info(`[omnimath:progressive-terminal] ${JSON.stringify({
+      eventTimestamp: new Date().toISOString(), requestId, attemptId: eventIdentity.attemptId,
+      providerResponseId: providerResult.responseId,
+      requestedModel: providerResult.requestedModel || null,
+      effectiveModel: providerResult.effectiveModel || null,
+      providerModel: providerResult.providerModel ?? providerResult.model ?? null,
+      accountingModel: providerResult.accountingModel || providerResult.effectiveModel || null,
+      reasoningEffort: providerResult.reasoningEffort ?? null,
+      model: providerResult.providerModel ?? providerResult.model ?? null,
+      steps: completedSteps.length, events: sequence,
+      firstProviderByteMs: providerResult.firstProviderByteMs,
+      firstProviderEventMs: firstProviderEventAt === null ? null : firstProviderEventAt - progressiveStartedAt,
+      firstValidatedStepMs: firstValidatedStepAt === null ? null : firstValidatedStepAt - progressiveStartedAt,
+      firstStepAcceptedAt: firstValidatedStepAt,
+      durationMs: Date.now() - progressiveStartedAt,
+      totalDurationMs: Date.now() - progressiveStartedAt,
+      terminalReason: "completed", usageSettled: settlementSucceeded, settlementStatus,
+      providerCallCount, initialSelectedModel,
+      finalAuthoritativeModel: authoritativeModel,
+      finalAuthoritativeEffectiveModel: authoritativeEffectiveModel,
+      finalFailureClassification: null, finalRecoveryDecision: null,
+      escalationReason, partialPrefixFailure: false,
+      ...recoverySummary,
+      providerAttempts: recoveryAttempts,
+    })}`);
+  } catch (error) {
+    const cancelled = abortController.signal.aborted;
+    try {
+      await settle(accumulatedUsage || error?._aiUsage || providerResult?.usage || null,
+        providerCallCount || error?._aiCallCount || providerResult?.providerCallCount || 0,
+        cancelled ? "cancelled" : "failure");
+    } catch (settlementError) {
+      console.warn("[omnimath:progressive-usage-warning]", {
+        requestId, code: settlementError?.code || null,
+      });
+    }
+    const finalFailure = recoveryAttempts.at(-1);
+    const preserveProviderReason = ["usage_rate_limit_error", "authentication_configuration_error", "bad_request", "refusal"]
+      .includes(finalFailure?.classification);
+    emit(cancelled ? "solve_cancelled" : "solve_failed", cancelled ? {} : {
+      reason: recoveryAttempts.length > 1 && !preserveProviderReason
+        ? "The AI service could not complete the explanation after recovery attempts."
+        : error.publicMessage || "The AI service could not complete the explanation.",
+      retryable: !["PROGRESSIVE_STEP_REJECTED", "PROGRESSIVE_FRAME_INVALID"].includes(error.code),
+      failureClassification: finalFailure?.classification || null,
+      recoveryDecision: finalFailure?.decision || null,
+    });
+    if (completedSteps.length) {
+      const partial = {
+        ...(metadata || {}),
+        steps: completedSteps,
+        progressiveSolve: {
+          ...eventIdentity,
+          status: cancelled ? "cancelled" : "failed",
+          completedStepIds: completedSteps.map((step) => step.id),
+          finalAnswer: null,
+          failure: cancelled ? null : {
+            message: "Generation stopped before completion.", retryable: true,
+          },
+          mode: "progressive",
+        },
+      };
+      saveExplanationBestEffort(req, { source: persistenceSource, problem, result: partial, identity })
+        .catch((saveError) => console.warn("[omnimath:progressive-save-warning]", {
+          requestId, code: saveError?.code || null,
+        }));
+    }
+    const recoverySummary = progressiveRecoverySummary(recoveryAttempts, accumulatedUsage, providerCallCount);
+    const finalExecution = recoveryAttempts.at(-1) || null;
+    console.warn(`[omnimath:progressive-terminal] ${JSON.stringify({
+      eventTimestamp: new Date().toISOString(), requestId, attemptId: eventIdentity.attemptId,
+      providerResponseId: providerResult?.responseId || error?._omniOpenAiDiagnostics?.providerResponseId || null,
+      requestedModel: finalExecution?.requestedModel
+        || error?._omniOpenAiDiagnostics?.requestedModel || null,
+      effectiveModel: finalExecution?.effectiveModel
+        || error?._omniOpenAiDiagnostics?.effectiveModel || null,
+      providerModel: finalExecution?.providerModel
+        ?? error?._omniOpenAiDiagnostics?.providerModel
+        ?? error?._omniOpenAiDiagnostics?.responseModel
+        ?? null,
+      accountingModel: finalExecution?.accountingModel
+        || error?._omniOpenAiDiagnostics?.accountingModel || null,
+      reasoningEffort: finalExecution?.reasoningEffort
+        ?? error?._omniOpenAiDiagnostics?.reasoningEffort
+        ?? null,
+      model: finalExecution?.providerModel
+        ?? error?._omniOpenAiDiagnostics?.providerModel
+        ?? error?._omniOpenAiDiagnostics?.responseModel
+        ?? null,
+      steps: completedSteps.length, events: sequence,
+      terminalReason: cancelled ? "cancelled" : error.code || "failure",
+      firstProviderEventMs: firstProviderEventAt === null ? null : firstProviderEventAt - progressiveStartedAt,
+      firstValidatedStepMs: firstValidatedStepAt === null ? null : firstValidatedStepAt - progressiveStartedAt,
+      firstStepAcceptedAt: firstValidatedStepAt,
+      durationMs: Date.now() - progressiveStartedAt,
+      totalDurationMs: Date.now() - progressiveStartedAt,
+      usageSettled: settlementSucceeded, settlementStatus, providerCallCount,
+      initialSelectedModel, finalAuthoritativeModel: authoritativeModel,
+      finalAuthoritativeEffectiveModel: authoritativeEffectiveModel,
+      finalFailureClassification: finalFailure?.classification || null,
+      finalRecoveryDecision: finalFailure?.decision || null,
+      recoveryReason: finalFailure?.decisionReason || null,
+      escalationReason, partialPrefixFailure: !cancelled && completedSteps.length > 0,
+      ...recoverySummary,
+      providerAttempts: recoveryAttempts,
+    })}`);
+  } finally {
+    res.off("close", onClose);
+    req.off?.("error", onRequestError);
+    if (!res.destroyed && !res.writableEnded) res.end();
+  }
+}
+
 export async function handleExplainRequest(req, res) {
   if (req.method !== "POST") {
     sendMethodNotAllowed(res, ["POST"]);
@@ -2290,6 +3202,7 @@ export async function handleExplainRequest(req, res) {
     const problem = problemInput.problemText;
     logCanonicalProblem("solve request", canonicalProblem, { endpoint, inputSource });
     logSolveDebug("shared_solver_entry", {
+      ...imageSolveTelemetry(sourceMetadata),
       requestId,
       endpoint,
       inputSource,
@@ -2307,6 +3220,11 @@ export async function handleExplainRequest(req, res) {
     const cacheKey = createExplanationCacheKey({
       userId: identity.clerkUserId,
       problem,
+      canonicalInputHash: canonicalProblem.hash,
+      context: {
+        inputSource,
+        history,
+      },
       reference,
       depth,
       type: "canonical-solve",
@@ -2314,6 +3232,10 @@ export async function handleExplainRequest(req, res) {
     const cachedBase = getCachedExplanation(cacheKey);
     if (cachedBase) {
       const cached = structuredClone(cachedBase);
+      const originEvidence = cached.assurance?.version === "bounded-assurance-v1"
+        ? { assurance: structuredClone(cached.assurance),
+          verification: structuredClone(cached.verification),
+          candidateAcceptance: structuredClone(cached.candidateAcceptance) } : null;
       // Cached local-rule teaching cards use a prose `finalAnswer` and do not
       // claim a provider-style `finalAnswerLatex`. Preserve the same
       // structural contract used on the initial local-rule path.
@@ -2322,6 +3244,7 @@ export async function handleExplainRequest(req, res) {
         inputSource,
         requireFinalAnswer: Boolean(String(cached.finalAnswerLatex || "").trim()),
       }));
+      if (originEvidence) Object.assign(cached, originEvidence);
       const usage = await getUsageForKind(req, usageKind, identity);
       cached.canonicalProblem = canonicalProblem;
       cached.canonicalInputHash = canonicalProblem.hash;
@@ -2332,7 +3255,7 @@ export async function handleExplainRequest(req, res) {
         kind: persistenceSource,
         endpoint,
         identity,
-        model: cached._aiUsage?._omni_model_usage?.at(-1)?.model || getOpenAiModelForPath("canonicalSolve"),
+        requestId,
       });
       sendJson(
         res,
@@ -2346,7 +3269,9 @@ export async function handleExplainRequest(req, res) {
     const prompt = buildMathExplanationPrompt({ problem, history });
     const promptHash = hashDebugText(prompt);
     const solveTimeoutMs = getSolveTotalTimeoutMs();
-    const solveDeadlineAt = Date.now() + solveTimeoutMs;
+    const solveBudget = createSolveBudget({ totalTimeoutMs: solveTimeoutMs });
+    const solveDeadlineAt = solveBudget.deadlineAt;
+    try {
     const initialRouting = resolveInitialSolveRouting({
       problem,
       // Routing consumes the same canonical solver text as the prompt. OCR-only
@@ -2370,17 +3295,35 @@ export async function handleExplainRequest(req, res) {
       cacheKey,
       historyCount: history.length,
       solveTimeoutMs,
+      solveDeadlineAt,
+      primaryDeadlineAt: solveBudget.primaryDeadlineAt,
+      recoveryDeadlineAt: solveBudget.recoveryDeadlineAt,
+      timeoutOwner: "canonical_solve",
     });
     logSolutionStateDebug("server prompt problem", {
       promptProblemText: problem,
       promptChars: prompt.length,
     });
     const initialMaxOutputTokens = getSolveOutputTokenBudget({
-      modelPath: "canonicalSolve",
-      debugContext: { initialRouting },
+      modelPath: initialRouting.selectedInitialModelPath,
+      debugContext: { attemptType: "initial", initialRouting },
     });
     const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: initialMaxOutputTokens });
     const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: initialMaxOutputTokens }));
+    if (body.progressiveMode === "provider-stream") {
+      if (!progressiveProviderEnabled()) {
+        throw Object.assign(new Error("Provider streaming is not enabled."), {
+          statusCode: 404, code: "PROGRESSIVE_SOLVE_DISABLED",
+          publicMessage: "Progressive solving is not available.",
+        });
+      }
+      await handleProgressiveProviderSolve({
+        req, res, body, requestId, prompt, problem, canonicalProblem,
+        initialRouting, solveDeadlineAt, solveBudget, usageKind, persistenceSource, identity,
+        estimatedTokens, estimatedCostMicros, endpoint, inputSource, cacheKey, sourceMetadata,
+      });
+      return;
+    }
     const { duplicate, value } = await runDeduplicatedRequest(cacheKey, () => withSolveDiagnosticContext({ requestId, endpoint }, async () => {
       let result = createLocalRuleExplanation(problem, { source: "text" });
       let source = "local rule";
@@ -2406,7 +3349,23 @@ export async function handleExplainRequest(req, res) {
       let usage;
       let accumulatedAiUsage = null;
       let accumulatedAiCallCount = 0;
-      const qualityRepairAttemptedCandidates = new Set();
+      const initialExecutionConfig = solveExecutionConfig({
+        modelPath: initialRouting.selectedInitialModelPath,
+        attemptType: "initial",
+        recoveryPurpose: "initial_generation",
+        promptStrategy: "canonical_problem",
+      });
+      const escalationExecutionConfig = solveExecutionConfig({
+        modelPath: "escalation",
+        attemptType: "escalation",
+        recoveryPurpose: "structured_output_recovery",
+        promptStrategy: "fresh_from_canonical_problem",
+      });
+      const assuranceExecutionConfig = solveExecutionConfig({
+        modelPath: "escalation", attemptType: "escalation",
+        recoveryPurpose: "mathematical_assurance_recovery",
+        promptStrategy: "fresh_from_canonical_problem",
+      });
 
       try {
         if (result) {
@@ -2430,17 +3389,30 @@ export async function handleExplainRequest(req, res) {
             throw createOpenAiRequiredError();
           } else {
             try {
+              logSolveRecovery("attempt_started", {
+                requestId,
+                endpoint,
+                routeAttemptId: `${requestId}:route:1`,
+                routeAttemptIndex: 1,
+                recoveryPurpose: "initial_generation",
+                executionConfig: initialExecutionConfig,
+              });
               result = await createMathExplanation({
                 prompt,
                 originalProblem: problem,
-                modelPath: "canonicalSolve",
+                modelPath: initialRouting.selectedInitialModelPath,
                 debugContext: {
+                  ...imageSolveTelemetry(sourceMetadata),
                   requestId,
+                  routeAttemptId: `${requestId}:route:1`,
+                  routeAttemptIndex: 1,
+                  recoveryPurpose: "initial_generation",
                   endpoint,
                   inputSource,
                   normalizedProblem: problem,
                   promptHash,
                   solveDeadlineAt,
+                  solveBudget,
                   initialRouting,
                 },
                 onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
@@ -2462,29 +3434,24 @@ export async function handleExplainRequest(req, res) {
               acceptStructurallyParsedSolve(result);
               source = "live AI call";
             } catch (firstError) {
-              if ([
-                "AI_SERVICE_UNAVAILABLE",
-                "AI_PROVIDER_RATE_LIMITED",
-                "AI_SERVICE_ERROR",
-                "SERVER_CONFIG_ERROR",
-              ].includes(firstError.code)) {
-                throw firstError;
-              }
               accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(firstError));
               accumulatedAiCallCount += aiCallCountFrom(firstError);
-              const initialInvalidResult = result;
               const failureClassification = classifySolveFailure({
                 error: firstError,
-                candidate: initialInvalidResult,
+                candidate: null,
               });
-              const repairIssues = firstError.solutionIssues || [firstError.code || firstError.message];
-              const repairFeedback = buildRepairFeedbackDetails(repairIssues, {
+              const recoveryDecision = decideOrdinaryRecovery({
                 error: firstError,
-                currentResult: initialInvalidResult,
+                routeAttemptCount: 1,
+                escalationAttempted: false,
+                deadlineRemaining: solveBudget.canStartRecovery(),
+                initialConfig: initialExecutionConfig,
+                escalationConfig: escalationExecutionConfig,
               });
+              if (!solveBudget.canStartRecovery()) recoveryDecision.reason = "insufficient_recovery_budget";
               await captureSolveQualityFailure({
                 error: firstError,
-                result,
+                result: null,
                 stage: "initial",
                 requestId,
                 endpoint,
@@ -2493,61 +3460,84 @@ export async function handleExplainRequest(req, res) {
                 problem,
                 problemText: "",
                 canonicalProblem,
-                repairAttempted: failureClassification.category === "parsed_candidate_failure",
+                repairAttempted: false,
                 failureClassification: failureClassification.category,
-                qualityRepairAttempted: failureClassification.category === "parsed_candidate_failure",
+                qualityRepairAttempted: false,
                 compactRetryAttempted: Boolean(firstError?._omniOpenAiDiagnostics?.attemptType?.includes("compact")),
-                freshEscalationAttempted: false,
-                repairFeedback,
+                freshEscalationAttempted: recoveryDecision.action === "escalate",
               });
               logSolveDebug("solve_failure_classification", {
                 requestId,
                 endpoint,
                 ...failureClassification,
-                qualityRepairAttempted: failureClassification.category === "parsed_candidate_failure",
+                ordinaryFailureClassification: recoveryDecision.classification,
+                recoveryDecision: recoveryDecision.action,
+                recoveryReason: recoveryDecision.reason,
+                qualityRepairAttempted: false,
                 compactRetryAttempted: Boolean(firstError?._omniOpenAiDiagnostics?.attemptType?.includes("compact")),
-                freshEscalationAttempted: false,
+                freshEscalationAttempted: recoveryDecision.action === "escalate",
               });
-              if (failureClassification.category === "response_generation_failure") {
-                throw firstError;
-              }
-              claimQualityRepairAttempt(qualityRepairAttemptedCandidates, initialInvalidResult);
-              const repairPrompt = buildRepairSolvePrompt(prompt, repairIssues, {
-                problem,
-                previousResult: initialInvalidResult,
-                error: firstError,
-              });
-              logSolveDebug("repair_retry", {
+              logSolveRecovery("attempt_failed", {
                 requestId,
                 endpoint,
-                retryCount: 1,
-                failedRules: firstError.solutionIssues || [firstError.code || firstError.message].filter(Boolean),
-                repairPromptHash: hashDebugText(repairPrompt),
+                routeAttemptId: `${requestId}:route:1`,
+                routeAttemptIndex: 1,
+                classification: recoveryDecision.classification,
+                recoveryDecision: recoveryDecision.action,
+                recoveryReason: recoveryDecision.reason,
+                nextRouteAttemptId: recoveryDecision.action === "escalate" ? `${requestId}:route:2` : null,
+                executionConfig: initialExecutionConfig,
               });
-              const repairPromptHash = hashDebugText(repairPrompt);
+              if (recoveryDecision.action !== "escalate") {
+                throw firstError;
+              }
+              const escalationPrompt = `${prompt}\n\nStructured-output recovery instruction:\n- This is a fresh solve from the canonical problem.\n- The earlier attempt was unusable because ${recoveryDecision.classification}.\n- Return one complete JSON object matching the requested schema.\n- Do not continue or quote the earlier output.`;
+              const escalationPromptHash = hashDebugText(escalationPrompt);
+              logSolveRecovery("recovery_selected", {
+                requestId,
+                endpoint,
+                priorRouteAttemptId: `${requestId}:route:1`,
+                routeAttemptId: `${requestId}:route:2`,
+                routeAttemptIndex: 2,
+                recoveryPurpose: "structured_output_recovery",
+                recoveryReason: recoveryDecision.reason,
+                expectedImprovement: "higher_reasoning_fresh_prompt_without_reusing_invalid_output",
+                promptHash: escalationPromptHash,
+                executionConfig: escalationExecutionConfig,
+              });
               try {
                 result = await createMathExplanation({
-                  prompt: repairPrompt,
+                  prompt: escalationPrompt,
                   originalProblem: problem,
+                  modelPath: "escalation",
+                  allowCompactRetry: false,
                   debugContext: {
+                  ...imageSolveTelemetry(sourceMetadata),
                     requestId,
+                    routeAttemptId: `${requestId}:route:2`,
+                    routeAttemptIndex: 2,
+                    recoveryPurpose: "structured_output_recovery",
+                    attemptType: "escalation",
                     endpoint,
                     inputSource,
                     normalizedProblem: problem,
-                    promptHash: repairPromptHash,
+                    promptHash: escalationPromptHash,
                     solveDeadlineAt,
-                    retryPurpose: "quality-repair",
+                    solveBudget,
+                    solveBudgetStage: "recovery",
+                    retryPurpose: "structured-output-recovery",
                     initialRouting,
                   },
                   onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
                     requestId,
                     endpoint,
-                    prompt: repairPrompt,
-                    promptHash: repairPromptHash,
+                    prompt: escalationPrompt,
+                    promptHash: escalationPromptHash,
                     problem,
                     problemText: "",
                     canonicalProblem,
-                    repairAttempted: true,
+                    repairAttempted: false,
+                    freshEscalationAttempted: true,
                   }),
                 });
                 accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(result));
@@ -2555,40 +3545,149 @@ export async function handleExplainRequest(req, res) {
                 attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
                 result = applyLocalRulesToExplanation(result);
                 acceptStructurallyParsedSolve(result);
-                source = "live AI repair call";
-              } catch (repairError) {
-                const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(repairError));
-                const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(repairError);
-                attachAccumulatedAiUsage(repairError, failureUsage, failureCallCount);
-                await captureSolveQualityFailure({
-                  error: repairError,
-                  result,
-                  stage: "repair",
+                source = "live AI escalation call";
+              } catch (escalationError) {
+                const failureUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(escalationError));
+                const failureCallCount = accumulatedAiCallCount + aiCallCountFrom(escalationError);
+                attachAccumulatedAiUsage(escalationError, failureUsage, failureCallCount);
+                logSolveRecovery("attempt_failed", {
                   requestId,
                   endpoint,
-                  prompt: repairPrompt,
-                  promptHash: repairPromptHash,
+                  routeAttemptId: `${requestId}:route:2`,
+                  routeAttemptIndex: 2,
+                  classification: "structured_output_recovery_failed",
+                  recoveryDecision: "fail",
+                  recoveryReason: "recovery_attempt_limit",
+                  executionConfig: escalationExecutionConfig,
+                });
+                await captureSolveQualityFailure({
+                  error: escalationError,
+                  result: null,
+                  stage: "escalation",
+                  requestId,
+                  endpoint,
+                  prompt: escalationPrompt,
+                  promptHash: escalationPromptHash,
                   problem,
                   problemText: "",
                   canonicalProblem,
-                  repairAttempted: true,
-                  repairFeedback: buildRepairFeedbackDetails(repairError.solutionIssues || [repairError.code || repairError.message], {
-                    error: repairError,
-                    previousResult: initialInvalidResult,
-                    currentResult: result,
-                  }),
-                  previousResult: initialInvalidResult,
+                  repairAttempted: false,
+                  freshEscalationAttempted: true,
                 });
-                throw repairError;
+                throw escalationError;
               }
             }
           }
         }
+        const firstRouteAttemptIndex = source === "live AI escalation call" ? 2 : 1;
+        const firstRouteAttemptId = `${requestId}:route:${firstRouteAttemptIndex}`;
+        const firstCandidateId = result?._omniOpenAiDiagnostics?.candidateId
+          || `${firstRouteAttemptId}:candidate:${source === "local rule" ? "local" : "selected"}`;
         finalizeSolveCandidate(result, {
           problem,
           inputSource,
           requireFinalAnswer: source !== "local rule",
+          candidateId: firstCandidateId,
+          routeAttemptId: firstRouteAttemptId,
         });
+        logAssuranceChecks({ requestId, endpoint, assurance: result.assurance });
+        const assuranceCandidates = [{ result, assurance: result.assurance }];
+        const assuranceRecovery = decideAssuranceRecovery({
+          assurance: result.assurance,
+          routeAttemptCount: firstRouteAttemptIndex,
+          deadlineRemaining: solveBudget.canStartRecovery(),
+          escalationAvailable: isMeaningfullyDifferentEscalationConfig(
+            initialExecutionConfig, escalationExecutionConfig,
+          ) && source === "live AI call",
+        });
+        if (!solveBudget.canStartRecovery() && assuranceRecovery.action !== "present") {
+          assuranceRecovery.reason = "insufficient_recovery_budget";
+        }
+        logSolveRecovery("assurance_decision", {
+          requestId, endpoint, candidateId: firstCandidateId,
+          routeAttemptId: firstRouteAttemptId,
+          assuranceStatus: result.assurance.status,
+          contradictionCategories: result.assurance.findings.map((finding) => finding.category),
+          recoveryDecision: assuranceRecovery.action,
+          recoveryReason: assuranceRecovery.reason,
+          nextRouteAttemptId: assuranceRecovery.action === "escalate" ? `${requestId}:route:2` : null,
+        });
+        if (assuranceRecovery.action === "escalate") {
+          let assuranceRecoveryFailure = null;
+          const contradictionCategories = result.assurance.findings.map((finding) => finding.category);
+          const assurancePrompt = `${prompt}\n\nMathematical assurance recovery instruction:\n- Solve the canonical problem afresh with the higher-reasoning route.\n- A supported check found a concrete contradiction category: ${contradictionCategories.join(", ")}.\n- Check your final answer against the submitted problem. Return one complete JSON object.`;
+          const assurancePromptHash = hashDebugText(assurancePrompt);
+          logSolveRecovery("recovery_selected", {
+            requestId, endpoint, priorRouteAttemptId: firstRouteAttemptId,
+            routeAttemptId: `${requestId}:route:2`, routeAttemptIndex: 2,
+            recoveryPurpose: "mathematical_assurance_recovery",
+            recoveryReason: assuranceRecovery.reason,
+            contradictionCategories, promptHash: assurancePromptHash,
+            executionConfig: assuranceExecutionConfig,
+          });
+          try {
+            let replacement = await createMathExplanation({
+              prompt: assurancePrompt, originalProblem: problem,
+              modelPath: "escalation", allowCompactRetry: false,
+              debugContext: {
+                  ...imageSolveTelemetry(sourceMetadata),
+                requestId, routeAttemptId: `${requestId}:route:2`, routeAttemptIndex: 2,
+                recoveryPurpose: "mathematical_assurance_recovery", attemptType: "escalation",
+                endpoint, inputSource, normalizedProblem: problem,
+                promptHash: assurancePromptHash, solveDeadlineAt, solveBudget, solveBudgetStage: "recovery", initialRouting,
+              },
+              onGeneratedResponseFailure: createGeneratedResponseFailureCapture({
+                requestId, endpoint, prompt: assurancePrompt, promptHash: assurancePromptHash,
+                problem, problemText: "", canonicalProblem,
+                repairAttempted: false, freshEscalationAttempted: true,
+              }),
+            });
+            accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(replacement));
+            accumulatedAiCallCount += aiCallCountFrom(replacement);
+            replacement = applyLocalRulesToExplanation(replacement);
+            acceptStructurallyParsedSolve(replacement);
+            const replacementCandidateId = replacement?._omniOpenAiDiagnostics?.candidateId
+              || `${requestId}:route:2:candidate:selected`;
+            finalizeSolveCandidate(replacement, {
+              problem, inputSource, candidateId: replacementCandidateId,
+              routeAttemptId: `${requestId}:route:2`,
+            });
+            logAssuranceChecks({ requestId, endpoint, assurance: replacement.assurance });
+            assuranceCandidates.push({ result: replacement, assurance: replacement.assurance });
+            logSolveRecovery("assurance_candidate_assessed", {
+              requestId, endpoint, candidateId: replacementCandidateId,
+              routeAttemptId: `${requestId}:route:2`,
+              assuranceStatus: replacement.assurance.status,
+              contradictionCategories: replacement.assurance.findings.map((finding) => finding.category),
+              recoveryDecision: "stop_after_one_assurance_recovery",
+            });
+          } catch (assuranceError) {
+            assuranceRecoveryFailure = assuranceError?.code || "candidate_unusable";
+            accumulatedAiUsage = mergeOpenAiUsageValues(accumulatedAiUsage, aiUsageFrom(assuranceError));
+            accumulatedAiCallCount += aiCallCountFrom(assuranceError);
+            logSolveRecovery("assurance_recovery_failed", {
+              requestId, endpoint, routeAttemptId: `${requestId}:route:2`,
+              recoveryReason: assuranceError?.code || "candidate_unusable",
+              recoveryDecision: "present_original_unresolved",
+            });
+          }
+          const selected = selectAssuranceCandidate(assuranceCandidates);
+          result = selected.result;
+          finalizeAssuranceSelection(selected, assuranceCandidates, true, {
+            attempted: true,
+            outcome: assuranceRecoveryFailure ? "recovery_failed"
+              : selected.result === assuranceCandidates[0].result ? "unresolved" : "replacement_selected",
+            reason: assuranceRecoveryFailure || assuranceRecovery.reason,
+            routeAttemptId: `${requestId}:route:2`,
+          });
+          if (selected.result !== assuranceCandidates[0].result) source = "live AI escalation call";
+        } else {
+          finalizeAssuranceSelection(assuranceCandidates[0], assuranceCandidates, false, {
+            attempted: false,
+            outcome: assuranceRecovery.action === "present_unresolved" ? "unresolved" : "not_attempted",
+            reason: assuranceRecovery.reason,
+          });
+        }
         const acceptedCandidate = result;
         const acceptedDiagnostics = acceptedCandidate?._omniOpenAiDiagnostics || {};
         const acceptedNormalizationActions = acceptedCandidate?._omniNormalizationActions || [];
@@ -2596,6 +3695,13 @@ export async function handleExplainRequest(req, res) {
         const acceptedWarnings = acceptedCandidate?._omniWarnings || [];
         try {
           const annotated = annotateMathExplanation(acceptedCandidate);
+          if (acceptedCandidate?._omniOpenAiDiagnostics) {
+            Object.defineProperty(annotated, "_omniOpenAiDiagnostics", {
+              enumerable: false,
+              configurable: true,
+              value: acceptedCandidate._omniOpenAiDiagnostics,
+            });
+          }
           acceptStructurallyParsedSolve(annotated, {
             stage: "post_annotation",
             requireFinalAnswer: source !== "local rule",
@@ -2616,10 +3722,13 @@ export async function handleExplainRequest(req, res) {
           result = acceptedCandidate;
         }
         const acceptedInspection = inspectSolveCandidateStructure(result, { stage: "selected" });
+        const acceptedRouteAttemptIndex = result.assurance?.routeAttemptId?.endsWith(":route:2") ? 2 : 1;
+        const acceptedRouteAttemptId = result.assurance?.routeAttemptId
+          || `${requestId}:route:${acceptedRouteAttemptIndex}`;
         logSolveCandidateOutcome({
           requestId,
-          attemptId: `${requestId}:${source === "live AI repair call" ? "repair" : "initial"}:accepted`,
-          candidateId: acceptedDiagnostics.candidateId || `${requestId}:selected`,
+          attemptId: `${acceptedRouteAttemptId}:accepted`,
+          candidateId: result.assurance?.candidateId || acceptedDiagnostics.candidateId || `${requestId}:selected`,
           solveMode: acceptedDiagnostics.solveMode || (source === "local rule" ? "local" : "solver"),
           model: acceptedDiagnostics.model || result?._aiUsage?._omni_model_usage?.at(-1)?.model || null,
           providerCompletionStatus: source === "local rule" ? "not_applicable" : "completed",
@@ -2628,9 +3737,25 @@ export async function handleExplainRequest(req, res) {
           fatalFindings: [],
           recoverableFindings: acceptedRecoverableFindings,
           warnings: [...acceptedWarnings, ...acceptedInspection.warnings],
-          previousUsableCandidate: false,
+          previousUsableCandidate: Boolean(result.assurance?.history?.length > 1),
           selectedForUi: true,
           outcome: "selected_for_ui",
+        });
+        logSolveRecovery("candidate_selected", {
+          requestId,
+          endpoint,
+          routeAttemptId: acceptedRouteAttemptId,
+          routeAttemptIndex: acceptedRouteAttemptIndex,
+          candidateId: result.assurance?.candidateId || acceptedDiagnostics.candidateId || `${requestId}:selected`,
+          verificationPolicy: "bounded_mathematical_assurance_v1",
+          verificationStatus: result?.assurance?.status || null,
+          assuranceStatus: result?.assurance?.status || null,
+          recoveryAttempted: result?.assurance?.recoveryAttempted || false,
+          selectedForUi: true,
+          executionConfig: acceptedRouteAttemptIndex === 2
+            ? result.assurance?.recovery?.routeAttemptId === acceptedRouteAttemptId
+              ? assuranceExecutionConfig : escalationExecutionConfig
+            : initialExecutionConfig,
         });
         attachAccumulatedAiUsage(result, accumulatedAiUsage, accumulatedAiCallCount);
         logSolutionStateDebug("server model response", {
@@ -2641,10 +3766,12 @@ export async function handleExplainRequest(req, res) {
           source,
         });
 
+        solveBudget.throwIfExpired();
         usage = reservation
           ? await settleAiUsageReservation(reservation, result._aiUsage, {
               providerCalls: result._aiCallCount || 0,
               settlementReason: "success",
+              providerAttempts: solveBudget.providerAttempts,
             })
           : await getUsageForKind(req, usageKind, identity);
       } catch (error) {
@@ -2658,11 +3785,12 @@ export async function handleExplainRequest(req, res) {
           code: error?.code || null,
         });
         try {
-          usage = await settleFailureUsageOrRelease(reservation, error, result);
+          usage = await settleFailureUsageOrRelease(reservation, error, result, solveBudget.providerAttempts);
           if (usage) error.usage = usage;
         } catch (releaseError) {
           console.warn("Could not settle failed token reservation:", releaseError.message);
         }
+        error.omniDebugContext = { ...error.omniDebugContext, requestId, endpoint };
         throw error;
       }
 
@@ -2690,9 +3818,12 @@ export async function handleExplainRequest(req, res) {
         kind: persistenceSource,
         endpoint,
         identity,
+        requestId,
+        attemptId: result?._omniOpenAiDiagnostics?.attemptId || null,
+        recoveryPurpose: result?._omniOpenAiDiagnostics?.recoveryPurpose || null,
         prompt,
         aiUsage: result._aiUsage,
-        model: result._aiUsage?._omni_model_usage?.at(-1)?.model || initialRouting.selectedInitialModel,
+        execution: result?._omniOpenAiDiagnostics || null,
       });
       result.canonicalProblem = canonicalProblem;
       result.canonicalInputHash = canonicalProblem.hash;
@@ -2735,10 +3866,11 @@ export async function handleExplainRequest(req, res) {
     }));
 
     const { result, usage, saved, saveStatus, source } = value;
+    const responseResult = sourceMetadata ? { ...result, ...structuredClone(sourceMetadata) } : result;
     sendJson(
       res,
       200,
-      buildResponse(result, {
+      buildResponse(responseResult, {
         usage,
         saved,
         saveStatus,
@@ -2759,6 +3891,9 @@ export async function handleExplainRequest(req, res) {
       finalUiState: "success-response-sent",
       stepCount: Array.isArray(result?.steps) ? result.steps.length : 0,
     });
+    } finally {
+      solveBudget.cleanup();
+    }
   });
 }
 
@@ -2785,16 +3920,9 @@ export async function handleExtractImageProblemRequest(req, res) {
     const image = requireImage(files.file);
     const imageHash = createImageHash(image);
     const prompt = buildImageExtractionPrompt({ problem });
-    const estimatedTokens = estimateOpenAiTokenBudget({
-      prompt,
-      image,
-      maxOutputTokens: getImageExtractionMaxOutputTokens(),
-    });
-    const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({
-      prompt,
-      image,
-      maxOutputTokens: getImageExtractionMaxOutputTokens(),
-    }));
+    const extractionBudget = estimateImageExtractionReservation({ prompt, image });
+    const estimatedTokens = extractionBudget.estimatedTokens;
+    const estimatedCostMicros = dollarsToMicros(extractionBudget.estimatedCostUsd);
 
     logImageUploadDebug("extract-input", {
       filename: image.filename || null,
@@ -2804,124 +3932,154 @@ export async function handleExtractImageProblemRequest(req, res) {
       imageHash,
     });
 
-    const { reservation } = await checkAndReserveUsage({
-      req,
-      identity,
-      kind: "image",
-      estimatedTokens: isOpenAiConfigured() ? estimatedTokens : 0,
-      estimatedCostMicros: isOpenAiConfigured() ? estimatedCostMicros : 0,
-    });
-    let extraction;
-    let usage;
-
-    try {
-      if (!isOpenAiConfigured()) {
-        throw createOpenAiRequiredError();
-      }
-      extraction = await createImageProblemExtraction({ prompt, image });
-      const rawExtractedText = extraction.extractedProblemText;
-      traceMathStage("OCR output", "", extraction.extractedProblemLatex, "model image extraction", {
-        extractedProblemText: rawExtractedText,
-      });
-      const textCleanup = normalizeExtractedProblemText(rawExtractedText);
-      traceMathStage("OCR normalization", rawExtractedText, textCleanup.text || rawExtractedText, "plain OCR text spacing cleanup");
-      extraction.rawExtractedText = rawExtractedText;
-      extraction.extractedProblemText = textCleanup.text || rawExtractedText;
-      extraction.ocrTextCleanup = textCleanup;
-      const display = buildExtractedProblemDisplay({
-        rawOcrText: rawExtractedText,
-        cleanedPlainText: extraction.extractedProblemText,
-        extractedProblemLatex: extraction.extractedProblemLatex,
-      });
-      extraction.rawOcrText = display.rawOcrText;
-      extraction.cleanedPlainText = display.cleanedPlainText;
-      extraction.displaySegments = display.displaySegments;
-      extraction.solverInput = display.solverInput;
-      extraction.latexMathChunks = display.latexMathChunks;
-      extraction.extractionValidation = validateExtraction({
-        extractedProblemText: extraction.extractedProblemText,
-        extractedProblemLatex: extraction.extractedProblemLatex,
-        ocrConfidence: fields.ocrConfidence,
-        modelConfidence: extraction.confidence,
-        modelIssues: extraction.issues,
-        textCleanup,
-      });
-      traceMathStage("Extraction validation", extraction.extractedProblemLatex, extraction.extractedProblemLatex, "structural integrity scoring", {
-        validation: extraction.extractionValidation,
-      });
-      if (display.latexMathChunks.some((chunk) => chunk.renderIssue)) {
-        extraction.extractionValidation.issues.push({
-          type: "render_preview_issue",
-          severity: "low",
-          critical: false,
-          message: "Math preview could not render, but the extracted text can still be solved.",
-        });
-        extraction.extractionValidation.status = extraction.extractionValidation.status === "danger" ? "danger" : "warning";
-      }
-      logExtractionReviewDebug(extraction.extractionValidation, {
-        requestId: fields.debugRequestId || fields.clientRequestId || null,
-        imageHash,
-      });
-      extraction.confidence = extraction.extractionValidation.confidence;
-      extraction.ocrConfidence = extraction.extractionValidation.ocrConfidence;
-      extraction.mathIntegrityScore = extraction.extractionValidation.mathIntegrityScore;
-      extraction.confidenceTier = extraction.extractionValidation.tier;
-      extraction.issues = extraction.extractionValidation.issues;
-      extraction.ocrSolveDecision = assessOcrSolveDecision({
-        solveDecision: "direct",
-        extractionValidation: extraction.extractionValidation,
-      });
-      extraction.imageSource = {
-        imageHash,
-        filename: image.filename || null,
-        contentType: image.contentType,
-        bytes: image.buffer.length,
-        rawExtractedText,
-        cleanedExtractedText: extraction.extractedProblemText,
-        displaySegments: extraction.displaySegments,
-        solverInput: extraction.solverInput,
-        latexMathChunks: extraction.latexMathChunks,
-        rawExtractedLatex: extraction.extractedProblemLatex,
-        confidence: extraction.confidence,
-        ocrConfidence: extraction.ocrConfidence,
-        mathIntegrityScore: extraction.mathIntegrityScore,
-        confidenceTier: extraction.confidenceTier,
-        issues: extraction.issues,
-      };
-
-      const normalizedUsage = normalizeOpenAiUsage(extraction._aiUsage, estimatedTokens);
-      usage = await settleTokenUsage(
-        reservation,
-        normalizedUsage.totalTokens,
-        dollarsToMicros(estimateOpenAiCost(extraction._aiUsage))
-      );
-    } catch (error) {
+    const ingestionRequestId = optionalShortText(fields.ingestionRequestId || fields.debugRequestId || fields.clientRequestId || "", "Image ingestion id", 120) || crypto.randomUUID();
+    const scopeId = optionalShortText(fields.ingestionScopeId || ingestionRequestId, "Image upload scope", 120);
+    const uploadId = optionalShortText(fields.uploadId || ingestionRequestId, "Image upload id", 120);
+    const uploadRevision = fields.uploadRevision === undefined ? 0 : Number(fields.uploadRevision);
+    if (!Number.isSafeInteger(uploadRevision) || uploadRevision < 0 || uploadRevision > 1000000) throw createBadInputError("Image upload revision is invalid.");
+    const promptHash = ingestionDigest({ prompt, ocrConfidence: fields.ocrConfidence || "" });
+    const dedupKey = ingestionDigest({ owner: identity.key, scopeId, uploadId, uploadRevision, ingestionRequestId, imageHash, promptHash });
+    const { duplicate, value } = await runDeduplicatedRequest(`ocr-extraction:${dedupKey}`, async () => {
+      const claimed = await imageIngestionRegistry.begin({ owner: identity.key, scopeId, uploadId, uploadRevision, ingestionRequestId, imageHash, promptHash });
+      if (claimed.kind === "completed") return claimed.record.extraction;
+      const record = claimed.record;
+      const configuredExtractionTimeoutMs = resolveOpenAiRequestTimeout("imageExtraction").timeoutMs;
+      const logicalExtractionBudgetMs = process.env.VERCEL === "1"
+        ? Math.min(configuredExtractionTimeoutMs, 60000) : configuredExtractionTimeoutMs;
+      const extractionDeadlineAt = Date.now() + logicalExtractionBudgetMs;
+      const extractionContext = { requestId: ingestionRequestId, ingestionRequestId,
+        logicalImageIngestionRequestId: ingestionRequestId, uploadId, uploadRevision, scopeId, imageHash,
+        extractionId: record.ingestion.extractionId, extractionAttemptId: `${record.ingestion.extractionId}:initial` };
+      console.info("[omnimath:image-ingestion]", { event: "extraction_started", ...extractionContext, state: "extracting",
+        configuredExtractionTimeoutMs, logicalExtractionBudgetMs, extractionDeadlineAt });
+      let reservation = null;
+      let extraction;
+      let usage;
+      let settlementStarted = false;
       try {
-        await releaseTokenReservation(reservation);
-      } catch (releaseError) {
-        console.warn("Could not release token reservation:", releaseError.message);
+        ({ reservation } = await checkAndReserveUsage({
+          req, identity, kind: "image", estimatedTokens: isOpenAiConfigured() ? estimatedTokens : 0,
+          estimatedCostMicros: isOpenAiConfigured() ? estimatedCostMicros : 0,
+        }));
+        if (!isOpenAiConfigured()) throw createOpenAiRequiredError();
+        extraction = await createImageProblemExtraction({ prompt, image, debugContext: extractionContext, deadlineAt: extractionDeadlineAt });
+        const rawExtractedText = extraction.extractedProblemText;
+        traceMathStage("OCR output", "", extraction.extractedProblemLatex, "model image extraction", {
+          extractedProblemText: rawExtractedText,
+        });
+        const textCleanup = normalizeExtractedProblemText(rawExtractedText);
+        traceMathStage("OCR normalization", rawExtractedText, textCleanup.text || rawExtractedText, "plain OCR text spacing cleanup");
+        extraction.rawExtractedText = rawExtractedText;
+        extraction.extractedProblemText = textCleanup.text || rawExtractedText;
+        try { requireTextProblem(extraction.extractedProblemText); } catch (error) {
+          throw Object.assign(error, { code: "OCR_INPUT_INVALID", statusCode: 422,
+            publicMessage: "The extracted problem is empty or exceeds the supported 4000-character input bound. Crop to one problem or edit it as typed input.",
+            ingestionStage: "input_validation" });
+        }
+
+        extraction.ocrTextCleanup = textCleanup;
+        const display = buildExtractedProblemDisplay({
+          rawOcrText: rawExtractedText,
+          cleanedPlainText: extraction.extractedProblemText,
+          extractedProblemLatex: extraction.extractedProblemLatex,
+        });
+        extraction.rawOcrText = display.rawOcrText;
+        extraction.cleanedPlainText = display.cleanedPlainText;
+        extraction.displaySegments = display.displaySegments;
+        extraction.solverInput = display.solverInput;
+        extraction.latexMathChunks = display.latexMathChunks;
+        extraction.extractionValidation = validateExtraction({
+          extractedProblemText: extraction.extractedProblemText,
+          extractedProblemLatex: extraction.extractedProblemLatex,
+          ocrConfidence: fields.ocrConfidence,
+          modelConfidence: extraction.confidence,
+          modelIssues: extraction.issues,
+          textCleanup,
+        });
+        traceMathStage("Extraction validation", extraction.extractedProblemLatex, extraction.extractedProblemLatex, "structural integrity scoring", {
+          validation: extraction.extractionValidation,
+        });
+        if (display.latexMathChunks.some((chunk) => chunk.renderIssue)) {
+          extraction.extractionValidation.issues.push({
+            type: "render_preview_issue",
+            severity: "low",
+            critical: false,
+            message: "Math preview could not render, but the extracted text can still be solved.",
+          });
+          extraction.extractionValidation.status = extraction.extractionValidation.status === "danger" ? "danger" : "warning";
+        }
+        logExtractionReviewDebug(extraction.extractionValidation, {
+          requestId: fields.debugRequestId || fields.clientRequestId || null,
+          imageHash,
+        });
+        extraction.confidence = extraction.extractionValidation.confidence;
+        extraction.ocrConfidence = extraction.extractionValidation.ocrConfidence;
+        extraction.mathIntegrityScore = extraction.extractionValidation.mathIntegrityScore;
+        extraction.confidenceTier = extraction.extractionValidation.tier;
+        extraction.issues = extraction.extractionValidation.issues;
+        extraction.ocrSolveDecision = assessOcrSolveDecision({
+          solveDecision: "direct",
+          extractionValidation: extraction.extractionValidation,
+        });
+        extraction.imageSource = {
+          imageHash,
+          filename: image.filename || null,
+          contentType: image.contentType,
+          bytes: image.buffer.length,
+          rawExtractedText,
+          cleanedExtractedText: extraction.extractedProblemText,
+          displaySegments: extraction.displaySegments,
+          solverInput: extraction.solverInput,
+          latexMathChunks: extraction.latexMathChunks,
+          rawExtractedLatex: extraction.extractedProblemLatex,
+          confidence: extraction.confidence,
+          ocrConfidence: extraction.ocrConfidence,
+          mathIntegrityScore: extraction.mathIntegrityScore,
+          confidenceTier: extraction.confidenceTier,
+          issues: extraction.issues,
+        };
+
+        // Once settlement starts, a storage failure must not trigger a second
+        // release/settlement that would compound partially applied counter deltas.
+        settlementStarted = true;
+        usage = await settleAiUsageReservation(reservation, extraction._aiUsage, {
+          providerCalls: extraction._aiCallCount || 1, settlementReason: "success",
+        });
+        const result = await imageIngestionRegistry.extracted({ owner: identity.key, record, extraction: {
+          ...extraction, usage, requestId: ingestionRequestId,
+          runtime: { source: "live AI extraction", demoMode: false },
+        } });
+        console.info("[omnimath:image-ingestion]", { event: "extraction_completed", ...extractionContext,
+          state: result.ingestion.state, selectedExtractionId: result.ingestion.extractionId, reviewRequired: !result.ocrSolveDecision.allowed,
+          schemaParseClassification: "valid_extraction", selectedOutputContract: extraction._omniOpenAiDiagnostics?.selectedExtractionContract || "full",
+          providerCallCount: extraction._aiCallCount || 1 });
+        logSolveTiming({ endpoint: "/api/extract-image-problem", startedAt, source: "live AI extraction", identity, prompt,
+          aiUsage: extraction._aiUsage, apiCallCount: extraction._aiCallCount || 1 });
+        return result;
+      } catch (error) {
+        error.ingestionStage ||= "extraction";
+        if (error.responseFailureType === "json_parse") error.publicMessage = "The image reader returned invalid JSON. Extraction did not complete. Try reading the image again.";
+        if (error.responseFailureType === "schema_contract") error.publicMessage = "The image reader returned an invalid extraction structure. Extraction did not complete. Try reading the image again.";
+        if (settlementStarted && !usage) error.accountingStatus = "unsettled";
+        error.omniDebugContext = { ...error.omniDebugContext, requestId: ingestionRequestId, endpoint: "/api/extract-image-problem" };
+        if (!settlementStarted) {
+          settlementStarted = true;
+          try { const settled = await settleFailureUsageOrRelease(reservation, error, extraction); if (settled) error.usage = settled; }
+          catch (settlementError) {
+            console.error("[omnimath:image-ingestion]", { event: "accounting_failed", ...extractionContext, code: settlementError.code || null });
+            error.accountingStatus = "unsettled";
+          }
+        }
+        try { await imageIngestionRegistry.failed({ owner: identity.key, record, error }); }
+        catch (lifecycleError) { console.error("[omnimath:image-ingestion]", { event: "failure_state_unavailable", ...extractionContext, code: lifecycleError.code }); }
+        console.info("[omnimath:image-ingestion]", { event: "extraction_failed", ...extractionContext, code: error.code,
+          retrySuppressedReason: error.retrySuppressedReason || null,
+          classification: error.responseFailureType || error.ingestionStage, providerCallCount: aiCallCountFrom(error) || aiCallCountFrom(extraction) });
+        throw error;
       }
-      throw error;
-    }
-
-    logSolveTiming({
-      endpoint: "/api/extract-image-problem",
-      startedAt,
-      source: "live AI extraction",
-      identity,
-      prompt,
-      aiUsage: extraction._aiUsage,
-      apiCallCount: extraction._aiCallCount || 1,
     });
-
-    sendJson(res, 200, {
-      ...extraction,
-      usage,
-      runtime: {
-        source: "live AI extraction",
-        demoMode: !isOpenAiConfigured(),
-      },
-    }, createUsageHeaders(usage));
+    console.info("[omnimath:image-ingestion]", { event: "extraction_response", ...value.ingestion, duplicate });
+    sendJson(res, 200, value, createUsageHeaders(value.usage));
   });
 }
 
@@ -2933,31 +4091,44 @@ export async function handleSolveExtractedProblemRequest(req, res) {
 
   await runHandler(res, async () => {
     const body = requireObject(await readJson(req));
-    const extraction = requireObject(body.extraction || {}, "Extraction");
-    const solveDecision = ["direct", "confirmed", "edited"].includes(body.solveDecision)
-      ? body.solveDecision
-      : "direct";
-    const reviewAction = body.reviewAction && typeof body.reviewAction === "object"
-      ? body.reviewAction
-      : null;
-    const requestId = optionalShortText(body.debugRequestId || body.clientRequestId || "", "Debug request id", 120)
-      || createDebugRequestId("solve-extracted");
-    const extractionValidation = extraction.extractionValidation || {
-      confidence: Number(extraction.confidence ?? extraction.imageSource?.confidence ?? 0),
-      ocrConfidence: Number(extraction.ocrConfidence ?? extraction.imageSource?.ocrConfidence ?? 0),
-      mathIntegrityScore: Number(extraction.mathIntegrityScore ?? extraction.imageSource?.mathIntegrityScore ?? extraction.confidence ?? 0),
-      tier: extraction.confidenceTier || extraction.imageSource?.confidenceTier || "",
-      issues: Array.isArray(extraction.issues) ? extraction.issues : extraction.imageSource?.issues || [],
-    };
+    const identity = await requireRequestIdentity(req, "solve-extracted-problem");
+    const submittedExtraction = requireObject(body.extraction || {}, "Extraction");
+    const receipt = body.extractionReceipt || submittedExtraction.extractionReceipt;
+    const ingestion = submittedExtraction.ingestion;
+    const record = await imageIngestionRegistry.get({ owner: identity.key, receipt, ingestion });
+    // All extraction findings and image provenance come from the selected
+    // server record. Client-authored confidence/validation cannot bypass review.
+    const extraction = record.extraction;
+    const solveDecision = ["direct", "confirmed", "edited"].includes(body.solveDecision) ? body.solveDecision : "direct";
+    const reviewAction = body.reviewAction && typeof body.reviewAction === "object" ? body.reviewAction : null;
+    const requestId = optionalShortText(body.debugRequestId || body.clientRequestId || "", "Debug request id", 120) || createDebugRequestId("solve-extracted");
+    const reviewRevision = body.reviewRevision ?? submittedExtraction.reviewRevision;
+    const reviewRevisionId = optionalShortText(body.reviewRevisionId || submittedExtraction.reviewRevisionId || "", "Review revision id", 120);
+    const extractionValidation = extraction.extractionValidation;
     const trustedOcrSource = solveDecision === "direct" ? "ocr-direct" : "ocr-reviewed";
-    const canonicalProblem = normalizeCanonicalProblem(body, {
-      canonicalText: body.problem || body.problemText || body.extractedProblemText || extraction.normalizedText || extraction.validationText || "",
-      canonicalLatex: body.problemLatex || body.extractedProblemLatex || extraction.extractedProblemLatex || "",
-      source: trustedOcrSource,
-      forceSource: trustedOcrSource,
-      extractionWarnings: extraction.issues || extraction.extractionValidation?.issues || [],
-      extractionConfidence: extraction.confidence ?? extraction.extractionValidation?.confidence,
-    });
+    const canonicalProblem = normalizeCanonicalProblem({
+      ...body,
+      canonicalProblem: {
+        canonicalText: body.canonicalProblem?.canonicalText || body.problem || body.problemText || "",
+        canonicalLatex: body.canonicalProblem?.canonicalLatex ?? "",
+        source: trustedOcrSource,
+        extractionWarnings: extraction.issues || extractionValidation.issues || [],
+        extractionConfidence: extraction.confidence ?? extractionValidation.confidence,
+      },
+    }, { forceSource: trustedOcrSource });
+    const canonicalText = getCanonicalSolverInput(canonicalProblem);
+    for (const value of [body.problem, body.problemText, body.problemInput?.problemText]) {
+      if (value !== undefined && getCanonicalSolverInput({ canonicalText: value }) !== canonicalText) {
+        throw Object.assign(createBadInputError("The reviewed text and canonical solve input disagree."), { code: "OCR_CANONICAL_INPUT_MISMATCH", ingestionStage: "canonicalization" });
+      }
+    }
+    if (solveDecision !== "edited" && canonicalText !== extraction.extractedProblemText) {
+      throw Object.assign(createBadInputError("Changed OCR text must be submitted as an edited review."), { code: "OCR_REVIEW_TEXT_CHANGED", ingestionStage: "review" });
+    }
+    if (solveDecision === "edited" && canonicalText !== extraction.extractedProblemText && canonicalProblem.canonicalLatex
+      && canonicalProblem.canonicalLatex !== canonicalText) {
+      throw Object.assign(createBadInputError("The edited input still contains a preview from the previous extraction."), { code: "OCR_CANONICAL_INPUT_MISMATCH", ingestionStage: "canonicalization" });
+    }
     let ocrDecision;
     try {
       ocrDecision = assertOcrSolveAllowed({
@@ -2965,6 +4136,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
         extractionValidation,
         reviewAction,
         canonicalInputHash: canonicalProblem.hash,
+        extractionId: record.ingestion.extractionId, reviewRevision, reviewRevisionId,
       });
     } catch (error) {
       error.omniDebugContext = { requestId, endpoint: "/api/solve-extracted-problem" };
@@ -3002,6 +4174,9 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       editedBeforeSolving: solveDecision === "edited",
       canonicalProblem,
       canonicalInputHash: canonicalProblem.hash,
+      ingestion: { ...record.ingestion, reviewRevision, reviewRevisionId, state: "solving" },
+      canonicalProblemId: ingestionDigest({ text: canonicalProblem.canonicalText, latex: canonicalProblem.canonicalLatex }),
+      canonicalSolveRequestId: requestId,
     };
 
     logImageUploadDebug("solve-extracted-canonicalized", {
@@ -3027,6 +4202,8 @@ export async function handleSolveExtractedProblemRequest(req, res) {
         history: body.history || [],
         debugRequestId: requestId,
         clientRequestId: body.clientRequestId,
+        progressiveMode: body.progressiveMode,
+        progressiveIdentity: body.progressiveIdentity,
         reference: body.reference || [
           "ocr",
           imageSource.imageHash || "no-image-hash",
@@ -3042,6 +4219,9 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       usageKind: "image",
       persistenceSource: "image",
       sourceMetadata: {
+        ingestion: imageSource.ingestion,
+        canonicalProblemId: imageSource.canonicalProblemId,
+        canonicalSolveRequestId: requestId,
         imageSource,
         extractedProblemText: imageSource.finalProblemText || imageSource.cleanedExtractedText || imageSource.rawExtractedText,
         extractedProblemLatex: imageSource.rawExtractedLatex,
@@ -3055,7 +4235,83 @@ export async function handleSolveExtractedProblemRequest(req, res) {
       },
     });
 
-    await handleExplainRequest(sharedRequest, res);
+    const solveSignature = ingestionDigest({ canonicalProblemId: imageSource.canonicalProblemId,
+      history: parseHistory(body.history), depth: body.depth || "intermediate", reference: body.reference || "", progressive: body.progressiveMode || "" });
+    const executeSolve = async () => {
+      const claim = await imageIngestionRegistry.review({ owner: identity.key, receipt, ingestion, revision: reviewRevision,
+        revisionId: reviewRevisionId, canonicalProblem, solveSignature, requestId });
+      if (claim.kind === "completed") {
+        if (claim.response?.progressive) throw Object.assign(new Error("This streamed solve already completed. Submit a new reviewed revision to solve again."), { code: "OCR_SOLVE_ALREADY_COMPLETED", statusCode: 409 });
+        return claim.response;
+      }
+      console.info("[omnimath:image-ingestion]", { event: "canonical_solve_started", ...imageSource.ingestion,
+        selectedExtractionId: record.ingestion.extractionId, reviewRevisionId, canonicalProblemId: imageSource.canonicalProblemId,
+        canonicalSolveRequestId: requestId, canonicalInputHash: canonicalProblem.hash });
+      const progressive = body.progressiveMode === "provider-stream";
+      const captured = { statusCode: 200, headers: {}, body: "", progressive: false };
+      let terminalEvent = null;
+      const response = progressive ? {
+        writeHead(status, headers) { captured.statusCode = status; captured.headers = headers; captured.progressive = String(headers?.["Content-Type"] || headers?.["content-type"] || "").includes("text/event-stream"); if (captured.progressive) res.writeHead(status, headers); },
+        write(chunk) {
+          const text = String(chunk);
+          const matches = [...text.matchAll(/^data: (.+)$/gm)];
+          for (const match of matches) { try { const event = JSON.parse(match[1]); if (event.type === "solve_completed" || event.type === "solve_failed") terminalEvent = event; } catch { /* framing belongs to canonical stream contract */ } }
+          if (captured.progressive) return res.write(chunk);
+          captured.body += text;
+          return true;
+        },
+        end(chunk = "") { if (captured.progressive) { if (chunk) this.write(chunk); } else captured.body += String(chunk); },
+        on: (...args) => res.on?.(...args), once: (...args) => res.once?.(...args), off: (...args) => res.off?.(...args),
+        flushHeaders: () => res.flushHeaders?.(),
+        get headersSent() { return captured.progressive && res.headersSent; },
+        get writableEnded() { return res.writableEnded; },
+        get destroyed() { return res.destroyed; },
+      } : {
+        writeHead(status, headers) { captured.statusCode = status; captured.headers = headers; },
+        end(chunk = "") { captured.body += String(chunk); },
+      };
+      await handleExplainRequest(sharedRequest, response);
+      if (captured.progressive) {
+        captured.statusCode = terminalEvent?.type === "solve_completed" ? 200 : 502;
+        captured.body = JSON.stringify({ code: terminalEvent?.code || "OCR_STREAM_TERMINAL", ingestionStage: "canonical_solve" });
+      } else {
+        const parsed = JSON.parse(captured.body || "{}");
+        parsed.ingestionStage = captured.statusCode === 200 ? "solved" : "canonical_solve";
+        if (captured.statusCode !== 200) parsed.extractionSucceeded = true;
+        parsed.ingestion = { ...imageSource.ingestion, state: captured.statusCode === 200 ? "solved" : "solve_failed" };
+        if (parsed.imageSource) parsed.imageSource = { ...parsed.imageSource, ingestion: parsed.ingestion };
+        captured.body = JSON.stringify(parsed);
+      }
+      await imageIngestionRegistry.finish({ owner: identity.key, receipt, ingestion, revision: reviewRevision,
+        revisionId: reviewRevisionId, requestId, response: captured });
+      console.info("[omnimath:image-ingestion]", { event: "canonical_solve_completed", ...imageSource.ingestion,
+        state: captured.statusCode === 200 ? "solved" : "solve_failed", selectedExtractionId: record.ingestion.extractionId,
+        reviewRevisionId, canonicalProblemId: imageSource.canonicalProblemId, canonicalSolveRequestId: requestId, responseStatus: captured.statusCode });
+      return captured;
+    };
+    if (body.progressiveMode === "provider-stream") {
+      try {
+        const response = await executeSolve();
+        if (response.progressive) res.end();
+        else { res.writeHead(response.statusCode, response.headers); res.end(response.body); }
+      } catch (error) {
+        if (res.headersSent) { res.end(); return; }
+        throw error;
+      }
+    } else {
+      const solveKey = ingestionDigest({ owner: identity.key, receipt, reviewRevision, reviewRevisionId, solveSignature });
+      const { value: response, duplicate } = await runDeduplicatedRequest(`ocr-solve:${solveKey}`, executeSolve);
+      // Joining/replaying a semantic operation preserves the submitter's HTTP
+      // correlation id; it never substitutes another upload's provenance.
+      const parsed = JSON.parse(response.body || "{}");
+      parsed.requestId = requestId;
+      parsed.canonicalSolveRequestId = requestId;
+      if (parsed.imageSource) parsed.imageSource.canonicalSolveRequestId = requestId;
+      console.info("[omnimath:image-ingestion]", { event: "canonical_solve_response", ...imageSource.ingestion,
+        reviewRevisionId, canonicalProblemId: imageSource.canonicalProblemId, canonicalSolveRequestId: requestId, duplicate });
+      res.writeHead(response.statusCode, response.headers);
+      res.end(JSON.stringify(parsed));
+    }
   });
 }
 
@@ -3116,6 +4372,9 @@ export async function handleExplainImageRequest(req, res) {
         canonicalProblem,
         extraction,
         solveDecision: "direct",
+        extractionReceipt: extraction.extractionReceipt,
+        reviewRevision: 0,
+        reviewRevisionId: `${extraction.ingestion.extractionId}:review:0`,
         debugRequestId: fields.debugRequestId || fields.clientRequestId || "",
       },
     });
@@ -3290,8 +4549,10 @@ async function handleLazyExplanationRequest(req, res, mode) {
         kind: mode,
         endpoint: mode === "pin" ? "/api/explain-pin" : "/api/explain-token",
         identity,
+        requestId,
         prompt,
         aiUsage: result.usage,
+        execution: result?._omniOpenAiDiagnostics || null,
       });
       return { payload, usage };
     });
@@ -3337,6 +4598,8 @@ export async function handleCompareMethodsRequest(req, res) {
     throttleRequest(req, identity, "ai");
     assertAiEnabled();
     const body = requireObject(await readJson(req));
+    const requestId = optionalShortText(body.debugRequestId || body.clientRequestId || "", "Debug request id", 120)
+      || createDebugRequestId("compare");
     const canonicalProblem = normalizeCanonicalProblem(body, {
       canonicalText: body.problemLatex || body.problem || "",
       canonicalLatex: body.problemLatex || "",
@@ -3387,7 +4650,10 @@ export async function handleCompareMethodsRequest(req, res) {
           usage: null,
         };
       } else {
-        result = await createCompareMethods({ prompt });
+        result = await createCompareMethods({
+          prompt,
+          debugContext: { requestId, recoveryPurpose: "compare_methods" },
+        });
       }
       const normalizedUsage = normalizeOpenAiUsage(result.usage, isOpenAiConfigured() ? estimateTokens(prompt) : 0);
       usage = await settleTokenUsage(
@@ -3415,11 +4681,285 @@ export async function handleCompareMethodsRequest(req, res) {
       kind: "compare",
       endpoint: "/api/compare-methods",
       identity,
+      requestId,
       prompt,
       aiUsage: result.usage,
+      execution: result?._omniOpenAiDiagnostics || null,
     });
     sendJson(res, 200, { ...payload, usage, cached: false }, createUsageHeaders(usage));
   });
+}
+
+function followupStreamRequested(req, body = {}) {
+  return body.stream === true || String(req.headers?.accept || "").includes("text/event-stream");
+}
+
+function requireFollowupStreamCorrelation(correlation = {}) {
+  if (!correlation.requestId || !correlation.conversationId
+    || correlation.targetRevision === null || correlation.targetRevision === undefined
+    || correlation.targetRevision === "") {
+    throw createBadInputError(
+      "Streaming follow-up requires requestId, conversationId, and targetRevision."
+    );
+  }
+  return correlation;
+}
+
+function followupStreamKey(identity, correlation) {
+  return JSON.stringify([
+    identity?.key || identity?.subject || "anonymous",
+    correlation.requestId,
+    correlation.conversationId,
+    correlation.targetRevision,
+  ]);
+}
+
+function followupStreamConflict() {
+  return Object.assign(new Error("This follow-up request is already streaming."), {
+    statusCode: 409,
+    code: "FOLLOWUP_STREAM_IN_PROGRESS",
+    publicMessage: "This follow-up is already being generated.",
+  });
+}
+
+async function handleStreamingFollowup({
+  req, res, body, correlation, identity, identityResult, history, prompt, snapshot,
+  scope, presentationDepth, reservation, reservedUsage, fallbackReason, deadlineAt, startedAt,
+}) {
+  const abortController = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) {
+      abortController.abort(new DOMException("Follow-up client disconnected.", "AbortError"));
+    }
+  };
+  const onRequestAborted = () => {
+    abortController.abort(new DOMException("Follow-up request aborted.", "AbortError"));
+  };
+  const onRequestError = (error) => {
+    if (error?.code === "ECONNRESET" || error?.message === "aborted") onRequestAborted();
+  };
+  res.on?.("close", onClose);
+  req.on?.("aborted", onRequestAborted);
+  req.on?.("error", onRequestError);
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+
+  let sequence = 0;
+  let terminal = false;
+  let publishedDelta = false;
+  let answer = "";
+  let providerResult = null;
+  let usage = reservedUsage;
+  let settlementAttempted = false;
+  const emit = (type, fields = {}) => {
+    if (terminal || res.destroyed || res.writableEnded) return false;
+    const event = {
+      type,
+      requestId: correlation.requestId,
+      conversationId: correlation.conversationId,
+      targetRevision: correlation.targetRevision,
+      sequence: sequence++,
+      ...fields,
+    };
+    res.write(`event: followup\ndata: ${JSON.stringify(event)}\n\n`);
+    if (type === "complete" || type === "error") terminal = true;
+    return true;
+  };
+  const emitFallback = async (reason) => {
+    const fallbackAnswer = createGeneralFollowupFallback(body, history, reason);
+    answer = fallbackAnswer;
+    publishedDelta = Boolean(fallbackAnswer);
+    if (fallbackAnswer) emit("delta", { status: "streaming", delta: fallbackAnswer, fallback: true });
+    const normalizedUsage = normalizeOpenAiUsage(null, estimateTokens(prompt));
+    settlementAttempted = true;
+    try {
+      usage = await settleTokenUsage(
+        reservation,
+        normalizedUsage.totalTokens,
+        0,
+        { providerCalls: 0, settlementReason: "local-fallback" },
+      );
+    } catch (error) {
+      if (!isProductionRuntime() && isLocalPersistenceError(error)) {
+        console.warn("[omnimath:followup-usage-warning]", {
+          requestId: correlation.requestId,
+          code: error.code || null,
+        });
+        usage = reservedUsage;
+      } else {
+        emit("error", {
+          status: "partial_error",
+          code: error.code || "USAGE_STORE_UNAVAILABLE",
+          message: error.publicMessage || "Usage accounting could not complete this follow-up.",
+          partial: publishedDelta,
+          usage,
+          scope,
+        });
+        return;
+      }
+    }
+    emit("complete", {
+      status: "complete",
+      answer: fallbackAnswer,
+      usage,
+      fallback: true,
+      fallbackReason: fallbackReason || identityResult.fallbackReason || reason,
+      scope,
+    });
+  };
+
+  emit("generating", { status: "generating", scope, presentationDepth });
+  try {
+    if (!isOpenAiConfigured()) {
+      await emitFallback("OPENAI_API_KEY is not configured on the server.");
+    } else {
+      try {
+        providerResult = await streamFollowupAnswer({
+          prompt,
+          scope,
+          deadlineAt,
+          signal: abortController.signal,
+          debugContext: {
+            requestId: correlation.requestId,
+            recoveryPurpose: "followup_stream",
+          },
+          onTextDelta(delta) {
+            if (abortController.signal.aborted) throw abortController.signal.reason;
+            answer += delta;
+            if (!emit("delta", { status: "streaming", delta, fallback: false })) {
+              throw abortController.signal.reason || new DOMException("Follow-up stream closed.", "AbortError");
+            }
+            publishedDelta = true;
+          },
+        });
+        answer = String(providerResult.text || answer).trim();
+        const normalizedUsage = normalizeOpenAiUsage(providerResult.usage, estimateTokens(prompt));
+        settlementAttempted = true;
+        usage = await settleTokenUsage(
+          reservation,
+          normalizedUsage.totalTokens,
+          dollarsToMicros(estimateOpenAiCost(providerResult.usage)),
+          {
+            actualInputTokens: normalizedUsage.inputTokens,
+            actualOutputTokens: normalizedUsage.outputTokens,
+            actualReasoningTokens: normalizedUsage.reasoningTokens,
+            providerCalls: providerResult.providerCallCount || 1,
+            settlementReason: "success",
+          },
+        );
+        logExplanationSource({
+          source: "live AI call",
+          kind: "text",
+          endpoint: "/api/explain-followup",
+          identity,
+          requestId: correlation.requestId,
+          prompt,
+          aiUsage: providerResult.usage,
+          execution: providerResult._omniOpenAiDiagnostics || providerResult,
+        });
+        emit("complete", {
+          status: "complete",
+          answer,
+          usage,
+          fallback: false,
+          scope,
+        });
+      } catch (error) {
+        logHoverDebug("followup_error", {
+          ...correlation,
+          semanticId: snapshot.target.semanticId || snapshot.target.targetId || null,
+          code: error.code || null,
+          statusCode: error.statusCode || null,
+          partial: publishedDelta,
+          elapsedMs: Date.now() - startedAt,
+        });
+        if (!publishedDelta && !abortController.signal.aborted && !isProductionRuntime()) {
+          console.warn("[omnimath:followup-fallback]", {
+            reason: "OpenAI streaming request failed before output",
+            code: error.code,
+            message: error.message,
+            statusCode: error.statusCode || null,
+          });
+          if (!settlementAttempted) {
+            settlementAttempted = true;
+            try {
+              usage = await settleFailureUsageOrRelease(reservation, error, providerResult);
+            } catch (settlementError) {
+              console.warn("[omnimath:followup-usage-warning]", {
+                requestId: correlation.requestId,
+                code: settlementError?.code || null,
+              });
+              emit("error", {
+                status: "error",
+                code: settlementError?.code || "USAGE_STORE_UNAVAILABLE",
+                message: settlementError?.publicMessage || "Usage accounting could not complete this follow-up.",
+                partial: false,
+                usage,
+                scope,
+              });
+              return;
+            }
+          }
+          // The failed provider attempt has already been accounted. Local
+          // fallback is emitted without a second provider request or another
+          // reservation settlement.
+          const fallbackAnswer = createGeneralFollowupFallback(
+            body, history, "local context after AI failure"
+          );
+          answer = fallbackAnswer;
+          if (fallbackAnswer) emit("delta", {
+            status: "streaming", delta: fallbackAnswer, fallback: true,
+          });
+          emit("complete", {
+            status: "complete", answer: fallbackAnswer, usage,
+            fallback: true, fallbackReason: error.publicMessage || error.message, scope,
+          });
+        } else {
+          if (!settlementAttempted) {
+            try {
+              usage = await settleFailureUsageOrRelease(reservation, error, providerResult);
+              settlementAttempted = true;
+            } catch (settlementError) {
+              settlementAttempted = true;
+              console.warn("[omnimath:followup-usage-warning]", {
+                requestId: correlation.requestId,
+                code: settlementError?.code || null,
+              });
+            }
+          }
+          const cancelled = abortController.signal.aborted || error?.name === "AbortError";
+          emit("error", {
+            status: cancelled ? "cancelled" : publishedDelta ? "partial_error" : "error",
+            code: cancelled ? "FOLLOWUP_CANCELLED" : error.code || "AI_SERVICE_UNAVAILABLE",
+            message: cancelled
+              ? "Follow-up generation was cancelled."
+              : error.publicMessage || "The AI service could not complete this follow-up.",
+            partial: publishedDelta,
+            usage,
+            scope,
+          });
+        }
+      }
+    }
+    logHoverDebug("followup_finish", {
+      ...correlation,
+      semanticId: snapshot.target.semanticId || snapshot.target.targetId || null,
+      fallback: !providerResult?.usage,
+      partial: publishedDelta && !terminal,
+      elapsedMs: Date.now() - startedAt,
+    });
+  } finally {
+    res.off?.("close", onClose);
+    req.off?.("aborted", onRequestAborted);
+    req.off?.("error", onRequestError);
+    if (!res.destroyed && !res.writableEnded) res.end();
+  }
 }
 
 export async function handleExplainFollowupRequest(req, res) {
@@ -3447,10 +4987,37 @@ export async function handleExplainFollowupRequest(req, res) {
     assertAiEnabled();
     const history = parseFollowupHistory(body.history);
     requireFollowupQuestion(body.question);
-    const { prompt, snapshot } = buildProvenanceFollowupPrompt(body, history);
-    const { reservation, usage: reservedUsage, fallbackReason } = await reserveFollowupUsage(req, identity, prompt);
+    const { prompt, snapshot, scope, presentationDepth } = buildProvenanceFollowupPrompt(body, history);
+    const streaming = followupStreamRequested(req, body);
+    let streamClaim = null;
+    if (streaming) {
+      requireFollowupStreamCorrelation(correlation);
+      streamClaim = followupStreamKey(identity, correlation);
+      if (activeFollowupStreams.has(streamClaim)) throw followupStreamConflict();
+      activeFollowupStreams.add(streamClaim);
+    }
+    let reservationResult;
+    try {
+      reservationResult = await reserveFollowupUsage(req, identity, prompt);
+    } catch (error) {
+      if (streamClaim) activeFollowupStreams.delete(streamClaim);
+      throw error;
+    }
+    const { reservation, usage: reservedUsage, fallbackReason } = reservationResult;
+    if (streaming) {
+      try {
+        await handleStreamingFollowup({
+          req, res, body, correlation, identity, identityResult, history, prompt, snapshot,
+          scope, presentationDepth, reservation, reservedUsage, fallbackReason, deadlineAt, startedAt,
+        });
+      } finally {
+        activeFollowupStreams.delete(streamClaim);
+      }
+      return;
+    }
     let answer;
     let aiUsage;
+    let aiExecution = null;
     let usage = reservedUsage;
 
     try {
@@ -3464,7 +5031,15 @@ export async function handleExplainFollowupRequest(req, res) {
         answer = createGeneralFollowupFallback(body, history, "local pinned context");
       } else {
         try {
-          const result = await createFollowupAnswer({ prompt, deadlineAt });
+          const result = await createFollowupAnswer({
+            prompt,
+            scope,
+            deadlineAt,
+            debugContext: {
+              requestId: correlation.requestId,
+              recoveryPurpose: "followup",
+            },
+          });
           answer = String(result.text || "").trim();
           if (!answer) {
             throw Object.assign(new Error("The AI service returned an empty follow-up answer."), {
@@ -3474,6 +5049,7 @@ export async function handleExplainFollowupRequest(req, res) {
             });
           }
           aiUsage = result.usage;
+          aiExecution = result._omniOpenAiDiagnostics || null;
         } catch (openAiError) {
           logHoverDebug("followup_error", {
             ...correlation,
@@ -3528,8 +5104,10 @@ export async function handleExplainFollowupRequest(req, res) {
       kind: "text",
       endpoint: "/api/explain-followup",
       identity,
+      requestId: correlation.requestId,
       prompt,
       aiUsage,
+      execution: aiExecution,
     });
     sendJson(res, 200, {
       answer,
@@ -3550,8 +5128,8 @@ export async function handleExplainFollowupRequest(req, res) {
 }
 
 export async function handleSessionsRequest(req, res) {
-  if (req.method !== "GET" && req.method !== "POST" && req.method !== "PUT") {
-    sendMethodNotAllowed(res, ["GET", "POST", "PUT"]);
+  if (req.method !== "GET" && req.method !== "POST" && req.method !== "PUT" && req.method !== "DELETE") {
+    sendMethodNotAllowed(res, ["GET", "POST", "PUT", "DELETE"]);
     return;
   }
 
@@ -3560,6 +5138,16 @@ export async function handleSessionsRequest(req, res) {
 
     if (req.method === "GET") {
       const data = await getCurrentUserSessions(req);
+      sendJson(res, 200, data);
+      return;
+    }
+
+    const sessionId = url.searchParams.get("id");
+    if (req.method === "DELETE") {
+      if (!sessionId || typeof sessionId !== "string") {
+        throw createBadInputError("Session id is required.");
+      }
+      const data = await deleteUserSessionForRequest(req, sessionId);
       sendJson(res, 200, data);
       return;
     }
@@ -3573,12 +5161,12 @@ export async function handleSessionsRequest(req, res) {
       return;
     }
 
-    const sessionId = url.searchParams.get("id") || body.id || body.sessionId;
-    if (!sessionId || typeof sessionId !== "string") {
+    const updateSessionId = sessionId || body.id || body.sessionId;
+    if (!updateSessionId || typeof updateSessionId !== "string") {
       throw createBadInputError("Session id is required.");
     }
 
-    const data = await updateUserSessionForRequest(req, sessionId, session);
+    const data = await updateUserSessionForRequest(req, updateSessionId, session);
     sendJson(res, 200, data);
   });
 }

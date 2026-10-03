@@ -120,6 +120,7 @@ test("matrix follow-ups retain exact occurrence, derivation evidence, and multi-
     });
   });
   const { window, semanticId } = await solveAndPinAdjugateTwenty(page);
+  await window.getByRole("button", { name: "Ask follow-up" }).click();
   const input = window.getByPlaceholder("Ask about this");
 
   await input.fill("how did you find 20?");
@@ -163,13 +164,18 @@ test("follow-up provider failure restores the exact question for deterministic r
     });
   });
   const { window } = await solveAndPinAdjugateTwenty(page);
+  await window.getByRole("button", { name: "Ask follow-up" }).click();
   const input = window.getByPlaceholder("Ask about this");
 
   await input.fill("show the exact calculation");
   await input.press("Enter");
-  await expect(window).toContainText("timed out or connection dropped");
+  await expect(window.locator("[data-conversation-status]")).toHaveAttribute("data-conversation-status", "failed");
+  await expect(window.getByRole("alert")).toContainText(/timed out|timeout/i);
+  await expect(window.locator("[data-message-role='user']")).toContainText("show the exact calculation");
   await expect(input).toHaveValue("show the exact calculation");
   await input.press("Enter");
   await expect(window).toContainText("Retry succeeded");
+  await expect(window.locator("[data-message-role='user']")).toHaveCount(2);
+  await expect(window.locator("[data-message-role='assistant']")).toHaveCount(1);
   expect(attempts).toBe(2);
 });

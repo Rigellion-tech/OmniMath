@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Menu } from "lucide-react";
 import { HoverProvider } from "@/lib/HoverContext";
+import ExportButton from "@/components/math/ExportButton";
 import { useAuthToken } from "@/lib/auth";
-import { cleanLatexSnippet, getProblemLabel, getSessionLabel, getStatusStepText } from "@/lib/problemLabels";
+import { cleanLatexSnippet, getConciseProblemTitle, getSessionLabel, getStatusStepText } from "@/lib/problemLabels";
 import { useSettings } from "@/lib/settings";
 import {
   getSolutionSteps,
@@ -23,20 +24,31 @@ import {
 } from "@/lib/solutionState";
 import {
   createUserSession,
+  deleteUserSession,
   fetchUserSessions,
   updateUserSession,
 } from "@/api/userClient";
 import { normalizeSolveResponse } from "@/api/mathClient";
 import { createCanonicalProblemPayload, logCanonicalProblem } from "@/lib/canonicalProblem";
 import { measureOmniSync } from "@/lib/performanceDiagnostics";
+import { markProgressiveEventReceived } from "@/lib/progressivePresentationDiagnostics";
+import {
+  applyProgressiveSolveEvent,
+  createFullResponseEvents,
+  createProgressiveSolveState,
+  progressiveProblemFromState,
+  progressiveDurableSnapshot,
+  PROGRESSIVE_EVENT_TYPES,
+} from "@/lib/progressiveSolve";
 import { createOperationId, logSessionOperation } from "@/lib/sessionOperations";
 import ProblemBlock from "@/components/math/ProblemBlock";
 import ExplanationPanel from "@/components/math/ExplanationPanel";
 import PrimaryMathComposer from "@/components/math/PrimaryMathComposer";
-import ExportButton from "@/components/math/ExportButton";
 import ImageUpload from "@/components/math/ImageUpload";
 import GenerationStatus from "@/components/math/GenerationStatus";
 import SessionSidebar from "@/components/layout/SessionSidebar";
+import { normalizeWorkspaceConversation } from "@/lib/workspaceConversation";
+import "@/workspace.css";
 
 const emptyProblem = {
   title: "New session",
@@ -46,6 +58,7 @@ const emptyProblem = {
 
 const DEBUG_SOLUTION_STATE = import.meta.env.DEV
   && import.meta.env.VITE_DEBUG_SOLUTION_STATE === "true";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "omnimath.sidebar.collapsed";
 
 function logSolutionState(event, details = {}) {
   if (!DEBUG_SOLUTION_STATE) return;
@@ -67,6 +80,7 @@ function createSession(overrides = {}) {
     createdAt: now,
     updatedAt: now,
     messages: [],
+    workspaceConversation: normalizeWorkspaceConversation(),
     problem: emptyProblem,
     problems: [],
     steps: [],
@@ -113,6 +127,7 @@ function normalizeSession(session) {
     problems: normalizedProblems,
     steps: sessionSteps.length > 0 ? sessionSteps : getSolutionSteps(normalizedProblem),
     messages: Array.isArray(session.messages) ? session.messages : [],
+    workspaceConversation: normalizeWorkspaceConversation(session.workspaceConversation),
     pinnedWindows: Array.isArray(session.pinnedWindows) ? session.pinnedWindows : [],
     persisted: Boolean(session.persisted),
     dirty: Boolean(session.dirty),
@@ -120,11 +135,37 @@ function normalizeSession(session) {
 }
 
 function titleFromProblem(problem, fallback = "Math Problem") {
-  return getProblemLabel(problem, fallback);
+  return getConciseProblemTitle(problem, fallback);
 }
 
 function compactTitle(value) {
-  return cleanLatexSnippet(value, "Math Problem", 42);
+  return getConciseProblemTitle({ problem: value }, "Math Problem");
+}
+
+function hasWorkspaceProblem(problem = {}) {
+  return Boolean(
+    getSolutionSteps(problem).length
+    || problem.canonicalProblem?.canonicalText
+    || problem.canonicalProblem?.canonicalLatex
+    || problem.imageSource
+    || problem.extractedProblemText
+    || problem.extractedProblemLatex
+    || problem.originalProblem
+    || problem.problem
+    || problem.problemLatex
+    || problem.expression
+  );
+}
+
+function withoutManualLensPosition(window) {
+  const next = { ...window, placementMode: "stacked" };
+  delete next.x;
+  delete next.y;
+  delete next.manualOffset;
+  delete next.manualPosition;
+  delete next.horizontalRatio;
+  delete next.position;
+  return next;
 }
 
 function getUsageMeta(usage) {
@@ -153,8 +194,28 @@ function getUsageUsed(usage) {
     : Math.max(0, Number(usage?.limit || 0) - Number(usage?.remaining || 0));
 }
 
+function solveIdentity(operationContext, sessionId, fallbackRequestId = "") {
+  const requestId = operationContext?.operationId || fallbackRequestId || createOperationId("solve");
+  return {
+    requestId,
+    attemptId: operationContext ? `${requestId}:${operationContext.revision}` : requestId,
+    sessionId,
+    conversationId: sessionId,
+  };
+}
+
 function getSessionGenerationStatus(session = null) {
   const steps = getSolutionSteps(session);
+  const progressive = session?.problem?.progressiveSolve;
+  if (progressive?.status === "failed" || progressive?.status === "cancelled") {
+    return {
+      type: progressive.status === "failed" ? "error" : "warning",
+      label: progressive.status === "failed" ? "Generation stopped" : "Generation cancelled",
+      detail: progressive.failure?.message || `${steps.length} completed steps preserved.`,
+      meta: steps.length ? `${steps.length} completed steps` : "",
+      retryable: progressive.failure?.retryable !== false,
+    };
+  }
   if (steps.length > 0) {
     return {
       type: "success",
@@ -180,22 +241,22 @@ function IssueCard({ status }) {
   const hints = Array.isArray(status.hints) ? status.hints : [];
 
   return (
-    <div className="mb-5 flex items-start gap-3 rounded-2xl border border-rose-300/[0.16] bg-rose-400/[0.055] p-4 shadow-[0_18px_44px_rgba(0,0,0,0.2)]">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-rose-300/[0.18] bg-rose-400/[0.09]">
-        <AlertTriangle className="h-4 w-4 text-rose-100" />
+    <div className="mb-5 flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 shadow-sm">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-rose-200 bg-rose-100">
+        <AlertTriangle className="h-4 w-4 text-rose-700" />
       </div>
       <div className="min-w-0">
-        <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-rose-100/80">
+        <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-rose-800">
           {status.label}
         </p>
-        <p className="mt-1 text-sm leading-6 text-slate-200/75">
+        <p className="mt-1 text-sm leading-6 text-neutral-700">
           {cleanLatexSnippet(status.detail, "", 100)}
         </p>
         {status.meta && (
-          <p className="mt-2 text-xs text-slate-300/55">{status.meta}</p>
+          <p className="mt-2 text-xs text-neutral-500">{status.meta}</p>
         )}
         {hints.length > 0 && (
-          <ul className="mt-2 grid gap-1 text-xs leading-5 text-slate-200/68">
+          <ul className="mt-2 grid gap-1 text-xs leading-5 text-neutral-600">
             {hints.map((hint) => (
               <li key={hint}>{hint}</li>
             ))}
@@ -225,31 +286,95 @@ export default function Home() {
   });
   const [activeSessionId, setActiveSessionId] = useState(() => sessions[0]?.id);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
   const [sessionLoading, setSessionLoading] = useState(true);
   const [sessionError, setSessionError] = useState("");
   const [syncStatus, setSyncStatus] = useState("");
   const [generationStatusBySession, setGenerationStatusBySession] = useState({});
+  const [imageTaskBySession, setImageTaskBySession] = useState({});
   const boardRef = useRef(null);
+  const workspaceRef = useRef(null);
+  const toolbarRef = useRef(null);
+  const composerDockRef = useRef(null);
   const saveTimerRef = useRef(null);
   const sessionsRef = useRef(sessions);
   const activeSessionIdRef = useRef(activeSessionId);
   const operationRevisionsRef = useRef({});
   const activeOperationsRef = useRef({});
+  const progressiveBySessionRef = useRef({});
   const generationStatusBySessionRef = useRef({});
   const sessionRestoreAttemptedRef = useRef(false);
-  const { getToken, isLoaded, isSignedIn, isMock } = useAuthToken();
+  const inFlightSessionSavesRef = useRef(new Set());
+  const deletedSessionIdsRef = useRef(new Set());
+  const { getToken, isLoaded, isSignedIn, isMock, user } = useAuthToken();
   const { settings } = useSettings();
+
+  useLayoutEffect(() => {
+    const workspace = workspaceRef.current;
+    const composer = composerDockRef.current;
+    const toolbar = toolbarRef.current;
+    if (!workspace || !composer) return undefined;
+
+    const measure = () => {
+      const workspaceRect = workspace.getBoundingClientRect();
+      const composerRect = composer.getBoundingClientRect();
+      const toolbarRect = toolbar?.getBoundingClientRect();
+      workspace.style.setProperty("--omni-workspace-left", `${workspaceRect.left}px`);
+      workspace.style.setProperty("--omni-workspace-width", `${workspaceRect.width}px`);
+      workspace.style.setProperty("--omni-composer-height", `${composerRect.height}px`);
+      workspace.style.setProperty("--omni-toolbar-height", `${toolbarRect?.height || 0}px`);
+    };
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(workspace);
+    observer?.observe(composer);
+    if (toolbar) observer?.observe(toolbar);
+    window.addEventListener("resize", measure, { passive: true });
+    measure();
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        SIDEBAR_COLLAPSED_STORAGE_KEY,
+        String(sidebarCollapsed)
+      );
+    } catch {
+      // The preference is optional when browser storage is unavailable.
+    }
+  }, [sidebarCollapsed]);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const generationStatus = generationStatusBySession[activeSession?.id] || getSessionGenerationStatus(activeSession);
+  // Conversation/placement persistence changes the session record, not its
+  // mathematics. Keep the rendered problem identity stable across those writes.
+  const {
+    id: mathematicalSessionId, problem: sessionProblem, steps: sessionSteps,
+    solution: sessionSolution, result: sessionResult, explanation: sessionExplanation,
+    session: nestedSession,
+  } = /** @type {any} */ (activeSession || {});
   const problem = useMemo(() => {
-    const renderedProblem = getActiveRenderedProblem(activeSession, emptyProblem);
+    const renderedProblem = getActiveRenderedProblem({
+      problem: sessionProblem, steps: sessionSteps, solution: sessionSolution,
+      result: sessionResult, explanation: sessionExplanation, session: nestedSession,
+    }, emptyProblem);
     return {
       ...renderedProblem,
-      id: renderedProblem.id || activeSession?.id,
-      sessionId: activeSession?.id,
+      id: renderedProblem.id || mathematicalSessionId,
+      sessionId: mathematicalSessionId,
     };
-  }, [activeSession]);
+  }, [mathematicalSessionId, sessionProblem, sessionSteps, sessionSolution, sessionResult, sessionExplanation, nestedSession]);
   useEffect(() => {
     if (!import.meta.env.DEV || import.meta.env.VITE_DEBUG_MATH_RENDER !== "true") return;
     const finalLine = getSolutionSteps(problem).flatMap((step) => step?.lines || [])
@@ -286,6 +411,45 @@ export default function Home() {
       return nextSessions;
     });
   }, [activeSessionId]);
+
+  const resetSessionWorkspaceConversation = useCallback((sessionId, revision = "") => {
+    if (!sessionId) return;
+    const workspaceConversation = normalizeWorkspaceConversation({ revision });
+    setSessions((prev) => {
+      const nextSessions = prev.map((session) => session.id === sessionId
+        ? {
+            ...session,
+            workspaceConversation,
+            updatedAt: new Date().toISOString(),
+            dirty: true,
+          }
+        : session);
+      sessionsRef.current = nextSessions;
+      return nextSessions;
+    });
+  }, []);
+
+  const handleWorkspaceConversationChange = useCallback((sessionId, value) => {
+    if (!sessionId) return;
+    if (generationStatusBySessionRef.current[sessionId]?.workflowActive) return;
+    const current = sessionsRef.current.find((session) => session.id === sessionId)?.workspaceConversation;
+    const workspaceConversation = normalizeWorkspaceConversation({
+      ...value,
+      revision: value?.revision || current?.revision || "",
+    });
+    setSessions((prev) => {
+      const nextSessions = prev.map((session) => session.id === sessionId
+        ? {
+            ...session,
+            workspaceConversation,
+            updatedAt: new Date().toISOString(),
+            dirty: true,
+          }
+        : session);
+      sessionsRef.current = nextSessions;
+      return nextSessions;
+    });
+  }, []);
 
   const setSessionGenerationStatus = useCallback((sessionId, status, operationContext = null) => {
     if (!sessionId) return;
@@ -395,7 +559,6 @@ export default function Home() {
 
         if (merged.sessions.length > 0) {
           const nextActive = merged.sessions.find((session) => session.id === merged.activeSessionId) || merged.sessions[0];
-          const restoredSteps = getSolutionSteps(nextActive);
           const restoredCanonical = nextActive.problem?.canonicalProblem || (nextActive.problem?.expression || nextActive.problem?.problem
             ? createCanonicalProblemPayload({
                 canonicalText: nextActive.problem?.originalProblem || nextActive.problem?.problem || nextActive.problem?.expression || "",
@@ -413,16 +576,7 @@ export default function Home() {
           sessionsRef.current = merged.sessions;
           activeSessionIdRef.current = nextActive.id;
           if (!merged.preservedPending) {
-            setSessionGenerationStatus(nextActive.id, {
-              type: restoredSteps.length ? "success" : "empty",
-              label: restoredSteps.length
-                ? merged.preservedActive ? "Explanation ready" : "Session restored"
-                : "Session ready",
-              detail: restoredSteps.length
-                ? getStatusStepText(restoredSteps)
-                : getSessionLabel(nextActive, "Ready for a problem."),
-              meta: "",
-            });
+            setSessionGenerationStatus(nextActive.id, getSessionGenerationStatus(nextActive));
           }
         } else {
           const session = createSession({ title: "New math session", dirty: false });
@@ -461,6 +615,7 @@ export default function Home() {
 
       for (const sessionSnapshot of sessionsToSave) {
         const saveRevision = sessionSnapshot.updatedAt || "";
+        inFlightSessionSavesRef.current.add(sessionSnapshot.id);
         logSessionOperation("session-save-started", {
           originSessionId: sessionSnapshot.id,
           activeSessionId: activeSessionIdRef.current,
@@ -471,6 +626,11 @@ export default function Home() {
           const data = sessionSnapshot.persisted
             ? await updateUserSession({ getToken, session: sessionSnapshot })
             : await createUserSession({ getToken, session: sessionSnapshot });
+          if (deletedSessionIdsRef.current.has(sessionSnapshot.id)) {
+            await deleteUserSession({ getToken, sessionId: sessionSnapshot.id }).catch(() => {});
+            deletedSessionIdsRef.current.delete(sessionSnapshot.id);
+            continue;
+          }
           const savedSession = import.meta.env.DEV
             ? measureOmniSync("session.save-response.normalize", () => normalizeSession({
               ...data.session,
@@ -531,6 +691,11 @@ export default function Home() {
           });
           if (applied) setSyncStatus("Saved");
         } catch (error) {
+          if (deletedSessionIdsRef.current.has(sessionSnapshot.id)) {
+            await deleteUserSession({ getToken, sessionId: sessionSnapshot.id }).catch(() => {});
+            deletedSessionIdsRef.current.delete(sessionSnapshot.id);
+            continue;
+          }
           logSessionOperation("session-save-discarded", {
             originSessionId: sessionSnapshot.id,
             activeSessionId: activeSessionIdRef.current,
@@ -541,6 +706,8 @@ export default function Home() {
           setSessionError(error.message || "Could not save this session.");
           const hasLiveSteps = getSolutionSteps(sessionSnapshot).length > 0;
           setSyncStatus(hasLiveSteps ? "Solved but not saved" : "");
+        } finally {
+          inFlightSessionSavesRef.current.delete(sessionSnapshot.id);
         }
       }
     }, 700);
@@ -574,11 +741,14 @@ export default function Home() {
   const handleProblemReset = () => {
     const resetSessionId = activeSessionIdRef.current;
     const nextSessions = sessionsRef.current.map((session) => (
-      session.id === resetSessionId ? clearSessionSolution(session) : session
+      session.id === resetSessionId
+        ? { ...clearSessionSolution(session), workspaceConversation: normalizeWorkspaceConversation() }
+        : session
     ));
     setSessions(nextSessions);
     sessionsRef.current = nextSessions;
     activeOperationsRef.current[resetSessionId] = null;
+    delete progressiveBySessionRef.current[resetSessionId];
     setSessionGenerationStatus(resetSessionId, emptyGenerationStatus());
     logSolutionState("reset", {
       activeSessionId: resetSessionId,
@@ -589,24 +759,65 @@ export default function Home() {
 
   const handleSessionSelect = (sessionId) => {
     const selectedSession = sessions.find((session) => session.id === sessionId);
-    const selectedSteps = getSolutionSteps(selectedSession);
     setActiveSessionId(sessionId);
     activeSessionIdRef.current = sessionId;
     if (!generationStatusBySessionRef.current[sessionId]) {
-      setSessionGenerationStatus(sessionId, {
-        type: selectedSteps.length ? "success" : "empty",
-        label: selectedSteps.length ? "Session restored" : "Session ready",
-        detail: selectedSteps.length
-          ? getStatusStepText(selectedSteps)
-          : getSessionLabel(selectedSession, "Ready for a problem."),
-        meta: "",
-      });
+      setSessionGenerationStatus(sessionId, getSessionGenerationStatus(selectedSession));
     }
     logSessionOperation("session-switched", {
       originSessionId: sessionId,
       activeSessionId: sessionId,
       reason: "select-session",
     });
+  };
+
+  const handleSessionRename = (sessionId, title) => {
+    const nextTitle = cleanLatexSnippet(title, "Math Problem", 42);
+    const nextSessions = sessionsRef.current.map((session) => session.id === sessionId
+      ? {
+          ...session,
+          title: nextTitle,
+          updatedAt: new Date().toISOString(),
+          dirty: true,
+        }
+      : session);
+    sessionsRef.current = nextSessions;
+    setSessions(nextSessions);
+  };
+
+  const handleSessionDelete = async (sessionId) => {
+    const previousSessions = sessionsRef.current;
+    const previousActiveSessionId = activeSessionIdRef.current;
+    const target = previousSessions.find((session) => session.id === sessionId);
+    if (!target) return;
+    delete progressiveBySessionRef.current[sessionId];
+
+    let nextSessions = previousSessions.filter((session) => session.id !== sessionId);
+    if (nextSessions.length === 0) nextSessions = [createSession()];
+    const nextActiveSessionId = previousActiveSessionId === sessionId
+      ? nextSessions[0].id
+      : previousActiveSessionId;
+    sessionsRef.current = nextSessions;
+    activeSessionIdRef.current = nextActiveSessionId;
+    setSessions(nextSessions);
+    setActiveSessionId(nextActiveSessionId);
+
+    const saveInFlight = inFlightSessionSavesRef.current.has(sessionId);
+    if (saveInFlight) deletedSessionIdsRef.current.add(sessionId);
+    if (!isSignedIn || isMock || (!target.persisted && !saveInFlight)) return;
+    if (!target.persisted) return;
+    try {
+      await deleteUserSession({ getToken, sessionId });
+      if (!saveInFlight) deletedSessionIdsRef.current.delete(sessionId);
+      setSyncStatus("Session deleted");
+    } catch (deleteError) {
+      deletedSessionIdsRef.current.delete(sessionId);
+      sessionsRef.current = previousSessions;
+      activeSessionIdRef.current = previousActiveSessionId;
+      setSessions(previousSessions);
+      setActiveSessionId(previousActiveSessionId);
+      setSessionError(deleteError.message || "Could not delete this session.");
+    }
   };
 
   const handleHistoryChange = (messages, { operationContext = null, targetSessionId = "" } = {}) => {
@@ -663,11 +874,37 @@ export default function Home() {
     }
     const requestSessionId = operationDecision.targetSessionId;
     const beforeActiveSessionId = activeSessionIdRef.current;
-    const { problemData, steps: normalizedSteps, status: responseStatus } = import.meta.env.DEV
+    const { problemData: canonicalProblemData, steps: normalizedSteps, status: responseStatus } = import.meta.env.DEV
       ? measureOmniSync("solve-response.create-generated-state", () => (
         createGeneratedProblemState(normalizedData)
       ))
       : createGeneratedProblemState(normalizedData);
+    const identity = solveIdentity(operationContext, requestSessionId, normalizedData.requestId);
+    let progressive = progressiveBySessionRef.current[requestSessionId] || createProgressiveSolveState();
+    for (const event of createFullResponseEvents(canonicalProblemData, identity)) {
+      if (event.type === PROGRESSIVE_EVENT_TYPES.STARTED
+        && progressive.requestId === identity.requestId
+        && progressive.attemptId === identity.attemptId) continue;
+      const result = applyProgressiveSolveEvent(progressive, event);
+      if (!result.accepted && result.reason !== "duplicate") {
+        console.error("Full-response progressive adapter rejected a validated solve event", result.reason, event.type);
+        setSessionGenerationStatus(requestSessionId, {
+          type: "error",
+          label: "Solution state mismatch",
+          detail: "The completed solution could not be applied safely.",
+          meta: "",
+        }, operationContext);
+        return;
+      }
+      progressive = result.state;
+    }
+    if (progressive.status !== "complete") return;
+    progressiveBySessionRef.current[requestSessionId] = progressive;
+    const problemData = {
+      ...canonicalProblemData,
+      steps: progressive.completedSteps,
+      progressiveSolve: { ...progressiveDurableSnapshot(progressive), mode: "full-response" },
+    };
     logSolutionState("solve response", {
       submittedProblemText: normalizedData.originalProblem || normalizedData.problem || normalizedData.expression || "",
       requestSessionId,
@@ -758,6 +995,20 @@ export default function Home() {
       source,
     });
     const requestSessionId = operationContext.originSessionId;
+    resetSessionWorkspaceConversation(requestSessionId, `${operationContext.operationId}:${operationContext.revision}`);
+    const identity = solveIdentity(operationContext, requestSessionId);
+    const prior = progressiveBySessionRef.current[requestSessionId] || createProgressiveSolveState();
+    const previousAttempt = prior.status !== "idle"
+      && (prior.requestId !== identity.requestId || prior.attemptId !== identity.attemptId)
+      ? prior.attemptId : "";
+    if (previousAttempt) operationContext.supersedesAttemptId = previousAttempt;
+    const started = applyProgressiveSolveEvent(prior, {
+      ...identity,
+      sequence: 0,
+      type: PROGRESSIVE_EVENT_TYPES.STARTED,
+      ...(previousAttempt ? { supersedesAttemptId: previousAttempt } : {}),
+    });
+    if (started.accepted) progressiveBySessionRef.current[requestSessionId] = started.state;
     logSolutionState("submit", {
       source,
       submittedProblemText: event.problem || "",
@@ -870,6 +1121,22 @@ export default function Home() {
       return;
     }
     const targetSessionId = operationDecision.targetSessionId;
+    const progressive = progressiveBySessionRef.current[targetSessionId];
+    if (progressive && !["complete", "failed", "cancelled"].includes(progressive.status)) {
+      const failureEvent = {
+        ...solveIdentity(operationContext, targetSessionId),
+        sequence: progressive.lastSequence + 1,
+        type: PROGRESSIVE_EVENT_TYPES.FAILED,
+        reason: message || "The solve did not complete.",
+        retryable,
+      };
+      if (progressive.completedSteps.length > 0) {
+        applyProgressiveEventToSession(failureEvent);
+      } else {
+        const failed = applyProgressiveSolveEvent(progressive, failureEvent);
+        if (failed.accepted) progressiveBySessionRef.current[targetSessionId] = failed.state;
+      }
+    }
     const isLimitError = status === 429 && code === "USAGE_LIMIT_EXCEEDED";
     if (isLimitError) {
       setSessionGenerationStatus(targetSessionId, {
@@ -932,9 +1199,99 @@ export default function Home() {
     });
   };
 
+  // Retain the transport-independent synthetic driver for deterministic
+  // lifecycle tests alongside the provider-backed Phase 6B path.
+  const beginSyntheticProgressiveSolve = () => {
+    const sessionId = activeSessionIdRef.current;
+    const operationContext = createOperationContext({ originSessionId: sessionId, source: "synthetic-progressive" });
+    const identity = solveIdentity(operationContext, sessionId);
+    const prior = progressiveBySessionRef.current[sessionId] || createProgressiveSolveState();
+    const result = applyProgressiveSolveEvent(prior, {
+      ...identity,
+      sequence: 0,
+      type: PROGRESSIVE_EVENT_TYPES.STARTED,
+      ...(prior.status !== "idle" ? { supersedesAttemptId: prior.attemptId } : {}),
+    });
+    if (!result.accepted) return { accepted: false, reason: result.reason };
+    progressiveBySessionRef.current[sessionId] = result.state;
+    setSessionGenerationStatus(sessionId, {
+      type: "loading", label: "Solving problem", detail: "Waiting for completed steps.", meta: "", workflowActive: true,
+    }, operationContext);
+    return { accepted: true, ...identity };
+  };
+
+  const applyProgressiveEventToSession = (event) => {
+    const sessionId = event?.sessionId;
+    const operation = activeOperationsRef.current[sessionId];
+    if (!operation || operation.operationId !== event.requestId
+      || `${operation.operationId}:${operation.revision}` !== event.attemptId
+      || !sessionsRef.current.some((session) => session.id === sessionId)) {
+      return { accepted: false, reason: "stale-operation" };
+    }
+    const current = progressiveBySessionRef.current[sessionId] || createProgressiveSolveState();
+    const result = applyProgressiveSolveEvent(current, event);
+    // Submission already installed start locally; only a byte-for-byte
+    // duplicate of that event may be acknowledged from the wire.
+    if (event.type === PROGRESSIVE_EVENT_TYPES.STARTED && result.reason === "duplicate") {
+      return { accepted: true, duplicate: true, status: current.status };
+    }
+    if (!result.accepted) return { accepted: false, reason: result.reason };
+    markProgressiveEventReceived(event);
+    progressiveBySessionRef.current[sessionId] = result.state;
+    const next = result.state;
+    if (event.type !== PROGRESSIVE_EVENT_TYPES.STEP_STARTED && next.metadata) {
+      const problemData = progressiveProblemFromState(next);
+      const commit = commitGeneratedProblemToSessions({
+        sessions: sessionsRef.current,
+        requestSessionId: sessionId,
+        problemData,
+        strictTarget: true,
+      });
+      if (commit.wrote) {
+        sessionsRef.current = commit.sessions;
+        setSessions(commit.sessions);
+      }
+    }
+    const stepCount = next.completedSteps.length;
+    const status = next.status === "failed"
+      ? { type: "error", label: "Generation stopped", detail: next.failure.message, meta: `${stepCount} completed steps`, retryable: next.failure.retryable }
+      : next.status === "cancelled"
+        ? { type: "warning", label: "Generation cancelled", detail: `${stepCount} completed steps preserved.`, meta: "" }
+        : next.status === "complete"
+          ? { type: "success", label: "Explanation ready", detail: getStatusStepText(next.completedSteps), meta: "" }
+          : { type: "loading", label: stepCount ? "Solution in progress" : "Solving problem", detail: `${stepCount} completed steps`, meta: "", workflowActive: true };
+    setSessionGenerationStatus(sessionId, status, operation);
+    return { accepted: true, status: next.status, completedStepCount: stepCount };
+  };
+
+  const handleGenerationCancelled = (operationContext) => {
+    const sessionId = operationContext?.originSessionId;
+    const current = progressiveBySessionRef.current[sessionId];
+    if (!current || ["complete", "failed", "cancelled"].includes(current.status)) return;
+    applyProgressiveEventToSession({
+      ...solveIdentity(operationContext, sessionId),
+      sequence: current.lastSequence + 1,
+      type: PROGRESSIVE_EVENT_TYPES.CANCELLED,
+    });
+  };
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || !new URLSearchParams(window.location.search).has("progressiveFixture")) return undefined;
+    /** @type {any} */ (window).__OMNIMATH_PROGRESSIVE_FIXTURE__ = {
+      start: beginSyntheticProgressiveSolve,
+      dispatch: applyProgressiveEventToSession,
+      snapshot: (sessionId = activeSessionIdRef.current) => progressiveBySessionRef.current[sessionId] || null,
+      sessions: () => sessionsRef.current,
+    };
+    return () => { delete /** @type {any} */ (window).__OMNIMATH_PROGRESSIVE_FIXTURE__; };
+  });
+
   const handleWindowsChange = useCallback((windows, sessionId = activeSessionId) => {
-    if (!settings.interaction.stickyLensPositions) return;
-    const pinnedWindows = windows.filter((window) => window.pinned);
+    const pinnedWindows = windows
+      .filter((window) => window.pinned)
+      .map((window) => settings.interaction.stickyLensPositions
+        ? window
+        : withoutManualLensPosition(window));
     setSessions((prev) =>
       prev.map((session) => {
         if (session.id !== sessionId) return session;
@@ -966,6 +1323,26 @@ export default function Home() {
     [generationStatus, problem]
   );
   const renderedStepCount = getSolutionSteps(problem).length;
+  const hasRenderedProblem = hasWorkspaceProblem(problem);
+  const imageTaskActive = Boolean(imageTaskBySession[activeSessionId]);
+  const isWorkspaceEmpty = !isGenerating && !hasRenderedProblem && !imageTaskActive;
+  const showWorkspaceConversation = renderedStepCount > 0 && !isGenerating;
+  const handleImageWorkspaceStateChange = useCallback(({ sessionId, active }) => {
+    if (!sessionId) return;
+    setImageTaskBySession((current) => {
+      if (Boolean(current[sessionId]) === active) return current;
+      const next = { ...current };
+      if (active) next[sessionId] = true;
+      else delete next[sessionId];
+      return next;
+    });
+  }, []);
+  const presentationDepth = ({
+    basic: "concise",
+    beginner: "concise",
+    intermediate: "standard",
+    advanced: "detailed",
+  })[settings.learning.explanationDepth] || settings.learning.explanationDepth || "standard";
   useEffect(() => {
     logSolutionState("active render state", {
       activeSessionId,
@@ -997,97 +1374,118 @@ export default function Home() {
       problem={problem}
       sessionId={providerKey}
     >
-      <div className="omni-shell min-h-screen w-full overflow-x-hidden text-foreground">
+      <div className="omni-shell min-h-screen w-full overflow-x-hidden text-foreground lg:flex lg:items-start">
         <SessionSidebar
           sessions={sessions}
           activeSessionId={activeSessionId}
           onNewSession={handleNewSession}
           onSelectSession={handleSessionSelect}
+          onRenameSession={handleSessionRename}
+          onDeleteSession={handleSessionDelete}
           loading={sessionLoading}
           syncStatus={syncStatus}
           error={sessionError}
           open={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
+          collapsed={sidebarCollapsed}
+          onCollapse={() => setSidebarCollapsed(true)}
+          onExpand={() => setSidebarCollapsed(false)}
         />
 
-        <div className="min-h-screen lg:pl-[280px]">
-          <header className="sticky top-0 z-40 border-b border-white/[0.06] bg-[#061116]/80 backdrop-blur-xl">
-            <div className="mx-auto flex w-full max-w-[clamp(1100px,88vw,1680px)] flex-col gap-2 px-4 py-2 sm:px-6 xl:px-10">
+        <div
+          ref={workspaceRef}
+          data-math-workspace
+          data-workspace-state={isWorkspaceEmpty ? "empty" : imageTaskActive && !showWorkspaceConversation ? "image" : "active"}
+          className="omni-workspace-shell min-h-screen min-w-0 flex-1"
+        >
+          <header ref={toolbarRef} className="omni-workspace-toolbar sticky top-0 z-40 border-b border-neutral-200 bg-white/90 backdrop-blur-xl">
+            <div className="mx-auto flex w-full max-w-[clamp(1100px,88vw,1680px)] flex-col gap-1.5 px-4 py-1.5 sm:px-6 xl:px-10">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
                   <button
                     type="button"
                     onClick={() => setSidebarOpen(true)}
-                    className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-2 text-slate-200/75 transition-colors hover:text-teal-100 lg:hidden"
+                    className="rounded-xl border border-neutral-200 bg-white p-2 text-neutral-600 transition-colors hover:bg-neutral-100 hover:text-neutral-900 lg:hidden"
                     aria-label="Open sessions"
                   >
                     <Menu className="h-5 w-5" />
                   </button>
                   <div className="min-w-0">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <h1 className="shrink-0 font-sans text-base font-semibold tracking-normal text-cyan-50">
+                    <div className="flex min-w-0 items-center gap-2 lg:hidden">
+                      <h1 className="shrink-0 font-sans text-base font-semibold tracking-normal text-neutral-950">
                         OmniMath
                       </h1>
-                      <span className="truncate text-xs text-slate-400" title={getSessionLabel(activeSession, "New session")}>
-                        {getSessionLabel(activeSession, "New session")}
-                      </span>
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <ExportButton
-                    targetRef={boardRef}
-                    filename={getProblemLabel(problem, "omnimath-session").toLowerCase().replace(/\s+/g, "-")}
-                    problem={problem}
-                    pinnedWindows={activeSession?.pinnedWindows || []}
-                  />
-                </div>
               </div>
-
-              <div>
-                  <PrimaryMathComposer
-                    activeSessionId={activeSession?.id}
-                    problem={problem}
-                    history={activeSession?.messages ?? []}
-                    onHistoryChange={handleHistoryChange}
-                    onReset={handleProblemReset}
-                    onProblemGenerated={handleProblemGenerated}
-                    onGenerationStart={handleGenerationStart}
-                    onGenerationError={handleGenerationError}
-                    canApplyOperation={canApplyOperation}
-                    imageUpload={(
-                      <ImageUpload
-                        activeSessionId={activeSession?.id}
-                        history={activeSession?.messages ?? []}
-                        onCreateOperation={createOperationContext}
-                        canApplyOperation={canApplyOperation}
-                        onProblemGenerated={handleProblemGenerated}
-                        onGenerationStart={handleGenerationStart}
-                        onGenerationError={handleGenerationError}
-                        onExtractionReview={handleExtractionReview}
-                        onUsageUpdate={null}
-                        onReviewedProblemSubmitted={handleReviewedProblemSubmitted}
-                      />
-                    )}
-                  />
-              </div>
-
-              {displayedGenerationStatus.type !== "error" && displayedGenerationStatus.type !== "limit" && (
-                <GenerationStatus status={displayedGenerationStatus} />
-              )}
             </div>
           </header>
 
-          <main ref={boardRef} className="relative z-10 mx-auto w-full max-w-[clamp(1100px,88vw,1680px)] px-4 py-4 sm:px-6 xl:px-10">
+          <main
+            ref={boardRef}
+            data-lens-canvas
+            className="omni-workspace-canvas relative z-10 mx-auto w-full max-w-[clamp(1100px,88vw,1680px)] px-4 py-3 sm:px-6 xl:px-10"
+          >
             <div className="mx-auto min-w-0">
-              <IssueCard status={displayedGenerationStatus} />
-              <ProblemBlock problem={problem} loading={isGenerating} />
+              {(isGenerating || hasRenderedProblem) && displayedGenerationStatus.type !== "error" && displayedGenerationStatus.type !== "limit" && (
+                <GenerationStatus status={displayedGenerationStatus} />
+              )}
+              {(isGenerating || hasRenderedProblem) && !(problem.progressiveSolve?.mode === "progressive"
+                && problem.progressiveSolve.status === "failed"
+                && getSolutionSteps(problem).length > 0) && (
+                <IssueCard status={displayedGenerationStatus} />
+              )}
+              {(isGenerating || hasRenderedProblem) && <ProblemBlock problem={problem} loading={isGenerating} />}
             </div>
           </main>
+
+          <div ref={composerDockRef} className="omni-composer-dock" data-testid="workspace-composer-dock">
+            <div className="omni-composer-dock-inner">
+              <PrimaryMathComposer
+                isWorkspaceEmpty={isWorkspaceEmpty}
+                isImageTaskActive={imageTaskActive}
+                userName={user?.firstName || user?.fullName?.split(" ")?.[0] || user?.username || ""}
+                showWorkspaceConversation={showWorkspaceConversation}
+                conversation={activeSession?.workspaceConversation}
+                onConversationChange={(value) => handleWorkspaceConversationChange(activeSession?.id, value)}
+                presentationDepth={presentationDepth}
+                activeSessionId={activeSession?.id}
+                problem={problem}
+                history={activeSession?.messages ?? []}
+                onHistoryChange={handleHistoryChange}
+                onReset={handleProblemReset}
+                onProblemGenerated={handleProblemGenerated}
+                onGenerationStart={handleGenerationStart}
+                onGenerationError={handleGenerationError}
+                onGenerationCancelled={handleGenerationCancelled}
+                onProgressiveEvent={applyProgressiveEventToSession}
+                canApplyOperation={canApplyOperation}
+                imageUpload={(
+                  <ImageUpload
+                    activeSessionId={activeSession?.id}
+                    history={activeSession?.messages ?? []}
+                    onCreateOperation={createOperationContext}
+                    canApplyOperation={canApplyOperation}
+                    onProblemGenerated={handleProblemGenerated}
+                    onGenerationStart={handleGenerationStart}
+                    onGenerationError={handleGenerationError}
+                    onGenerationCancelled={handleGenerationCancelled}
+                    onProgressiveEvent={applyProgressiveEventToSession}
+                    onExtractionReview={handleExtractionReview}
+                    onUsageUpdate={null}
+                    onReviewedProblemSubmitted={handleReviewedProblemSubmitted}
+                    onWorkspaceStateChange={handleImageWorkspaceStateChange}
+                  />
+                )}
+              />
+            </div>
+          </div>
         </div>
 
         <ExplanationPanel problem={problem} />
+        <ExportButton showControls={false} targetRef={boardRef} problem={problem} pinnedWindows={activeSession?.pinnedWindows || []} />
       </div>
     </HoverProvider>
   );

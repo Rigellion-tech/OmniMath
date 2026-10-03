@@ -51,10 +51,22 @@ export const OPENAI_TIMEOUT_LIMITS = Object.freeze({
   maxMs: 300000,
 });
 
+export const DEFAULT_CANONICAL_SOLVE_TIMEOUT_MS = 90_000;
+
+export const DEFAULT_IMAGE_EXTRACTION_OUTPUT_TOKENS = Object.freeze({
+  full: 3200,
+  compact: 2000,
+});
+
+const IMAGE_EXTRACTION_OUTPUT_TOKEN_ENV = Object.freeze({
+  full: ["OMNIMATH_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS", "OPENAI_IMAGE_EXTRACTION_MAX_OUTPUT_TOKENS"],
+  compact: ["OMNIMATH_IMAGE_EXTRACTION_COMPACT_MAX_OUTPUT_TOKENS"],
+});
+
 export const DEFAULT_OPENAI_TIMEOUTS_MS = Object.freeze({
   imageExtraction: 60000,
   extractionReview: 60000,
-  solver: 60000,
+  solver: DEFAULT_CANONICAL_SOLVE_TIMEOUT_MS,
   repair: 120000,
   escalation: 180000,
   premiumEscalation: 180000,
@@ -349,6 +361,52 @@ export function getModelCapability(modelId = "") {
   };
 }
 
+export function resolveImageExtractionOutputTokenBudget({
+  compact = false,
+  model = "",
+  debugContext = {},
+} = {}) {
+  const stage = compact ? "compact" : "full";
+  const envNames = IMAGE_EXTRACTION_OUTPUT_TOKEN_ENV[stage];
+  const configuredEntry = envNames
+    .map((name) => ({ name, rawValue: process.env[name] }))
+    .find(({ rawValue }) => typeof rawValue === "string" && rawValue.trim());
+  const parsedValue = configuredEntry ? Number(configuredEntry.rawValue) : null;
+  const configuredIsValid = Number.isFinite(parsedValue) && parsedValue > 0;
+  const configuredMaxOutputTokens = Math.max(1, Math.round(
+    configuredIsValid ? parsedValue : DEFAULT_IMAGE_EXTRACTION_OUTPUT_TOKENS[stage],
+  ));
+  const selection = selectOpenAiModel({ modelPath: "imageExtraction", model, debugContext });
+  const capabilityMaxOutputTokens = Number(
+    selection.maxOutputTokenCapability ?? selection.maxOutputTokens,
+  );
+  const effectiveMaxOutputTokens = Math.max(1, Math.floor(
+    Number.isFinite(capabilityMaxOutputTokens) && capabilityMaxOutputTokens > 0
+      ? Math.min(configuredMaxOutputTokens, capabilityMaxOutputTokens)
+      : configuredMaxOutputTokens,
+  ));
+
+  return {
+    role: selection.role,
+    stage,
+    configuredMaxOutputTokens,
+    effectiveMaxOutputTokens,
+    capabilityMaxOutputTokens: Number.isFinite(capabilityMaxOutputTokens)
+      ? capabilityMaxOutputTokens
+      : null,
+    source: configuredIsValid
+      ? configuredEntry.name
+      : configuredEntry
+        ? "role_default_invalid_fallback"
+        : "role_default",
+    configStatus: configuredIsValid
+      ? (effectiveMaxOutputTokens < configuredMaxOutputTokens ? "configured_capability_clamped" : "configured")
+      : configuredEntry
+        ? "invalid_fallback"
+        : "default",
+  };
+}
+
 function pricingEnvName(modelId = "", suffix = "") {
   const key = String(modelId || "")
     .toUpperCase()
@@ -521,6 +579,9 @@ export function selectOpenAiModel({
     sampling: capability.allowSampling ? sampling : {},
     samplingOmitted,
     structuredOutput: capability.structuredOutput,
+    maxOutputTokenCapability: capability.maxOutputTokens,
+    // Compatibility for execution-config consumers. This is a model
+    // capability ceiling, not the configured request budget.
     maxOutputTokens: capability.maxOutputTokens,
     timeoutMs: timeout.timeoutMs,
     timeoutSource: timeout.timeoutSource,
@@ -573,6 +634,7 @@ export function logOpenAiModelSelection(path, extra = {}) {
     solveMode: selection.solveMode,
     timeoutMs: selection.timeoutMs,
     timeoutSource: selection.timeoutSource,
+    maxOutputTokenCapability: selection.maxOutputTokenCapability ?? selection.maxOutputTokens,
     freshSolve: selection.freshSolve,
     purpose: extra.purpose,
   });

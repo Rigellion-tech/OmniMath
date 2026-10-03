@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
 import { Ellipsis, FileText, Loader2 } from "lucide-react";
+import { assessSolutionFinalAnswerPresentations, normalizeFinalAnswerComparison, presentSolutionSteps } from "@/lib/finalAnswerPresentation";
 
 function downloadText(filename, content, type = "text/markdown") {
   const blob = new Blob([content], { type });
@@ -15,11 +16,14 @@ function downloadText(filename, content, type = "text/markdown") {
 
 function formatWindowContent(window) {
   const content = window.content || {};
-  return content[window.depth] || content.intermediate || content.beginner || window.title || "";
+  return window.lastDisplayedExplanation || content[window.depth] || content.intermediate || content.beginner || window.title || "";
 }
 
 function buildMarkdownExport(problem, pinnedWindows = []) {
-  const steps = problem?.steps || [];
+  const presentations = assessSolutionFinalAnswerPresentations(problem || {}, {
+    validationFindings: problem?.finalAnswerPresentation?.findings?.map(({ issue }) => issue) || [],
+  });
+  const steps = presentations.reduce((current, plan) => presentSolutionSteps(current, plan), problem?.steps || []);
   const lines = [
     `# ${problem?.title || "OmniMath Session"}`,
     "",
@@ -40,12 +44,22 @@ function buildMarkdownExport(problem, pinnedWindows = []) {
       lines.push(`### ${index + 1}. ${step.label || "Step"}`);
       if (expression) lines.push("", `\`${expression}\``);
       if (step.summary) lines.push("", step.summary);
+      if (step.finalAnswerPresentation === "compacted") {
+        for (const line of step.lines || []) {
+          if (line.kind === "text" && line.text && line.text !== step.summary) lines.push("", line.text);
+        }
+      }
       lines.push("");
     });
   }
 
-  if (problem?.finalAnswer) {
-    lines.push("## Final Answer", "", `\`${problem.finalAnswer}\``, "");
+  for (const presentation of presentations) {
+    if (["suppressed", "fallback"].includes(presentation.action)) {
+      for (const { text } of presentation.retainedFinalText) lines.push(text, "");
+    }
+    if (presentation.latex && !steps.some((step) => normalizeFinalAnswerComparison(step.math || step.latex) === normalizeFinalAnswerComparison(presentation.latex))) {
+      lines.push(presentation.action === "fallback" ? "## Complete supplied result" : "## Final Answer", "", `\`${presentation.latex}\``, "");
+    }
   }
 
   if (pinnedWindows.length > 0) {
@@ -54,6 +68,9 @@ function buildMarkdownExport(problem, pinnedWindows = []) {
       lines.push(`### ${index + 1}. ${window.title || "Explanation"}`);
       if (window.display) lines.push("", `\`${window.display}\``);
       lines.push("", `Depth: ${window.depth || "intermediate"}`, "", formatWindowContent(window), "");
+      for (const message of window.chatHistory || []) {
+        lines.push(`**${message.role === "user" ? "You" : "OmniMath"}**${message.partial ? " (partial)" : ""}`, "", String(message.text || ""), "");
+      }
     });
   }
 
@@ -65,6 +82,7 @@ export default function ExportButton({
   filename = "math-problem",
   problem,
   pinnedWindows = [],
+  showControls = true,
 }) {
   const [loading, setLoading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -74,7 +92,7 @@ export default function ExportButton({
   const capture = async () => {
     const el = targetRef.current;
     return await html2canvas(el, {
-      backgroundColor: "#061116",
+      backgroundColor: "#ffffff",
       scale: 2,
       useCORS: true,
       logging: false,
@@ -146,10 +164,19 @@ export default function ExportButton({
   };
 
   useEffect(() => {
-    const handleExportRequest = () => exportMarkdown();
+    const handleExportRequest = (event) => {
+      const format = event.detail?.format;
+      if (format === "png") void exportPNG();
+      else if (format === "pdf") void exportPDF();
+      else exportMarkdown();
+    };
     window.addEventListener("omnimath:export-session", handleExportRequest);
     return () => window.removeEventListener("omnimath:export-session", handleExportRequest);
-  }, [exportMarkdown]);
+  }, [exportMarkdown, exportPNG, exportPDF]);
+
+  if (!showControls) return error
+    ? <p role="alert" className="text-xs text-rose-700">{error}</p>
+    : loading ? <span role="status" className="sr-only">Preparing session export…</span> : null;
 
   return (
     <div ref={menuRef} className="relative" data-testid="export-menu">
@@ -173,15 +200,15 @@ export default function ExportButton({
                 type="button"
                 onClick={action}
                 role="menuitem"
-                className="flex items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-slate-200/80 transition-colors hover:bg-white/[0.06]"
+                className="flex items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-neutral-700 transition-colors hover:bg-neutral-100"
               >
-                {Icon && <Icon className="h-3.5 w-3.5 text-teal-200/70" />}
+                {Icon && <Icon className="h-3.5 w-3.5 text-neutral-500" />}
                 {label}
               </button>
             ))}
         </div>
       )}
-      {error && <p className="absolute right-0 top-full z-50 mt-2 w-52 rounded-xl border border-rose-300/20 bg-[#160c12] px-3 py-2 text-xs text-rose-100" role="alert">{error}</p>}
+      {error && <p className="absolute right-0 top-full z-50 mt-2 w-52 rounded-xl border border-rose-300/60 bg-rose-50 px-3 py-2 text-xs text-rose-800" role="alert">{error}</p>}
     </div>
   );
 }

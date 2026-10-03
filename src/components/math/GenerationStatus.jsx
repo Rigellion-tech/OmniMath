@@ -7,39 +7,39 @@ const statusConfig = {
   empty: {
     icon: Clock3,
     label: "Ready",
-    className: "border-white/[0.08] bg-white/[0.035] text-slate-300/70",
-    iconClassName: "text-slate-300/60",
+    className: "border-transparent bg-transparent text-neutral-600",
+    iconClassName: "text-neutral-500",
   },
   loading: {
     icon: Loader2,
     label: "Generating explanation",
-    className: "border-teal-300/20 bg-teal-300/[0.07] text-teal-50/80",
-    iconClassName: "text-teal-200",
+    className: "border-transparent bg-neutral-50 text-neutral-700",
+    iconClassName: "text-neutral-600",
     spin: true,
   },
   error: {
     icon: AlertTriangle,
     label: "Generation failed",
-    className: "border-rose-300/[0.22] bg-rose-400/[0.075] text-rose-100/90",
-    iconClassName: "text-rose-200",
+    className: "border-rose-200 bg-rose-50 text-rose-800",
+    iconClassName: "text-rose-600",
   },
   limit: {
     icon: Clock3,
     label: "Daily limit reached",
-    className: "border-amber-300/[0.22] bg-amber-300/[0.075] text-amber-100/90",
-    iconClassName: "text-amber-200",
+    className: "border-amber-200 bg-amber-50 text-amber-800",
+    iconClassName: "text-amber-600",
   },
   warning: {
     icon: AlertTriangle,
     label: "Solved with warning",
-    className: "border-amber-300/[0.22] bg-amber-300/[0.075] text-amber-100/90",
-    iconClassName: "text-amber-200",
+    className: "border-amber-200 bg-amber-50 text-amber-800",
+    iconClassName: "text-amber-600",
   },
   success: {
     icon: CheckCircle2,
     label: "Explanation ready",
-    className: "border-emerald-300/20 bg-emerald-300/[0.065] text-emerald-100/80",
-    iconClassName: "text-emerald-200",
+    className: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    iconClassName: "text-emerald-600",
   },
 };
 
@@ -53,7 +53,7 @@ export default function GenerationStatus({ status }) {
       role="status"
       aria-live="polite"
       className={cn(
-        "flex min-h-11 items-center justify-between gap-3 rounded-2xl border px-4 py-2.5 text-sm shadow-[0_12px_32px_rgba(0,0,0,0.16)]",
+        "flex min-h-9 items-center justify-between gap-2 rounded-lg border px-3 py-1.5 text-sm",
         config.className
       )}
     >
@@ -67,7 +67,7 @@ export default function GenerationStatus({ status }) {
               {status.label || config.label}
             </span>
             {detail && (
-              <span className="truncate text-xs text-slate-300/60">
+              <span className="truncate text-xs text-neutral-500">
                 {status.type === "success" ? `· ${detail}` : detail}
               </span>
             )}
@@ -75,7 +75,7 @@ export default function GenerationStatus({ status }) {
         </div>
       </div>
       {status.meta && (
-        <span className="shrink-0 rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-1 font-mono text-[10px] text-slate-300/60">
+        <span className="shrink-0 rounded-full border border-neutral-200 bg-white px-2 py-1 font-mono text-[10px] text-neutral-500">
           {status.meta}
         </span>
       )}

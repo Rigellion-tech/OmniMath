@@ -1,0 +1,30 @@
+[omnimath:progressive-recovery] {
+  "requestId": "solve-a", "providerAttemptIndex": 1, "model": "model-start",
+  "decision": "retry", "startedAt": 1000, "endedAt": 1500,
+  "usage": {"totalTokens": 42, "estimatedCostUsd": 0.004}
+}
+[omnimath:progressive-recovery] {
+  "requestId": "solve-a", "providerAttemptIndex": 2, "model": "model-start",
+  "decision": "escalate", "escalationReason": "retry_exhausted", "startedAt": 1500, "endedAt": 2100
+}
+[omnimath:progressive-recovery] {
+  "requestId": "solve-a", "providerAttemptIndex": 3, "model": "model-final",
+  "decision": "authoritative", "startedAt": 2100, "endedAt": 5000
+}
+[omnimath:progressive-terminal] {
+  "requestId": "solve-a", "terminalReason": "completed", "initialAttemptSucceeded": false,
+  "initialSelectedModel": "model-start", "finalAuthoritativeModel": "model-final",
+  "providerCallCount": 3, "retryCount": 1, "repairCount": 0, "escalationCount": 1,
+  "recoveryDurationMs": 1100, "firstProviderEventMs": 120,
+  "firstValidatedStepMs": 2400, "totalDurationMs": 5200, "steps": 4,
+  "aggregateUsage": {"totalTokens": 310, "estimatedCostUsd": 0.031}, "partialPrefixFailure": false
+}
+[omnimath:progressive-recovery] {
+  "requestId": "solve-b", "providerAttemptIndex": 1, "model": "model-start",
+  "decision": "authoritative", "startedAt": 9000, "endedAt": 10000
+}
+[omnimath:progressive-terminal] {
+  "requestId": "solve-b", "terminalReason": "failure", "initialAttemptSucceeded": true,
+  "initialSelectedModel": "model-start", "model": "model-start", "providerCallCount": 1,
+  "steps": 2, "partialPrefixFailure": true
+}

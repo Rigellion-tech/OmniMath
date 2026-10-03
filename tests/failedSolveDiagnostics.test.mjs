@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
+import { recordExtraction, recordedSolvePayload } from "./helpers/recordedExtraction.mjs";
 import {
   classifySolveCandidate,
   classifySolveFailure,
@@ -834,7 +835,7 @@ async function withRuntime({ capture = false, blockDiagnosticDirectory = false }
 }
 
 describe("common mathematical evidence through HTTP solve routes", () => {
-  it("typed and reviewed OCR accept the same contradicted candidate without new provider retries", async () => {
+  it("typed and reviewed OCR apply one bounded recovery to the same contradicted candidate", async () => {
     await withRuntime({ capture: false }, async ({ handleExplainRequest, handleSolveExtractedProblemRequest }) => {
       let calls = 0;
       const input = String.raw`\int_0^1 (2*x+1)\,dx`;
@@ -851,25 +852,26 @@ describe("common mathematical evidence through HTTP solve routes", () => {
       for (const response of [typed, ocr]) {
         assert.equal(response.statusCode, 200);
         const body = response.json();
-        assert.equal(body.candidateAcceptance.mode, "evidence_only");
+        assert.equal(body.candidateAcceptance.mode, "bounded_assurance");
         assert.equal(body.candidateAcceptance.accepted, true);
         assert.equal(body.verification.checks.at(-1).state, "contradicted");
         assert.equal(body.verification.checks.at(-1).exactIntegral, "2");
         assert.equal(body.verification.summary.solutionCorrectness, "not_established");
       }
-      assert.equal(calls, 2);
+      assert.equal(calls, 4);
       const cached = await invokeTypedSolve(handleExplainRequest, { problemValue: input, requestId: "trust-typed-cache" });
       assert.equal(cached.statusCode, 200);
       assert.equal(cached.json().verification.checks.at(-1).state, "contradicted");
-      assert.equal(calls, 2);
+      assert.equal(calls, 4);
     });
   });
 
   it("typed and reviewed OCR reject the same invalid provider response with the same compact retry policy", async () => {
     await withRuntime({ capture: false }, async ({ handleExplainRequest, handleSolveExtractedProblemRequest }) => {
-      let calls = 0;
-      globalThis.fetch = async () => {
-        calls++;
+      process.env.OMNIMATH_ESCALATION_MODEL = "gpt-5.6-sol";
+      const requests = [];
+      globalThis.fetch = async (_url, options) => {
+        requests.push(JSON.parse(options.body));
         return jsonResponse(openAiBody("not valid explanation JSON"));
       };
       const input = "Solve x + 2 = 3.";
@@ -887,7 +889,19 @@ describe("common mathematical evidence through HTTP solve routes", () => {
       assert.equal(typed.statusCode, ocr.statusCode);
       assert.equal(typed.json().code, ocr.json().code);
       assert.equal(typed.json().code, "AI_RESPONSE_INVALID");
-      assert.equal(calls, 4);
+      assert.equal(requests.length, 6);
+      for (const routeRequests of [requests.slice(0, 3), requests.slice(3, 6)]) {
+        assert.deepEqual(routeRequests.map((request) => request.text.format.name), [
+          "math_fast_solve",
+          "math_compact_solve",
+          "math_fast_solve",
+        ]);
+        assert.deepEqual(routeRequests.map((request) => request.reasoning?.effort || null), [
+          "medium",
+          "medium",
+          "high",
+        ]);
+      }
     });
   });
 });
@@ -926,7 +940,28 @@ async function invokeSolve(handler, {
   problemLatexValue = "",
   canonicalTextValue = problemValue,
   canonicalLatexValue = "",
+  recordedExtractionValue = null,
 } = {}) {
+  const storedExtraction = recordedExtractionValue || await recordExtraction({
+    problem: canonicalTextValue,
+    latex: canonicalLatexValue,
+    extraction: {
+      normalizedText: problemValue,
+      validationText: problemValue,
+      confidence: 91,
+      ocrConfidence: 88,
+      mathIntegrityScore: 91,
+      confidenceTier: "high",
+      issues: [{ type: "test", severity: "low", message: "test issue", critical: false }],
+    },
+    extractionValidation: {
+      confidence: 91,
+      ocrConfidence: 88,
+      mathIntegrityScore: 91,
+      tier: "high",
+      issues: [],
+    },
+  });
   const req = {
     method: "POST",
     url: "/api/solve-extracted-problem",
@@ -938,39 +973,12 @@ async function invokeSolve(handler, {
       host: "localhost:8787",
     },
     socket: { remoteAddress: `127.0.0.${Math.floor(Math.random() * 200) + 1}` },
-    body: {
-      problem: problemValue,
-      problemText: reviewedTextValue,
-      problemLatex: problemLatexValue,
-      canonicalProblem: {
-        canonicalText: canonicalTextValue,
-        canonicalLatex: canonicalLatexValue,
-        source: "ocr-reviewed",
-        extractionWarnings: [],
-        extractionConfidence: 91,
-        hash: "test-hash",
-      },
-      extraction: {
-        normalizedText: problemValue,
-        validationText: problemValue,
-        extractedProblemLatex: canonicalLatexValue,
-        rawExtractedLatex: canonicalLatexValue,
-        confidence: 91,
-        ocrConfidence: 88,
-        mathIntegrityScore: 91,
-        confidenceTier: "high",
-        issues: [{ type: "test", severity: "low", message: "test issue", critical: false }],
-        extractionValidation: {
-          confidence: 91,
-          ocrConfidence: 88,
-          mathIntegrityScore: 91,
-          tier: "high",
-          issues: [],
-        },
-      },
+    body: recordedSolvePayload(storedExtraction, {
+      problem: canonicalTextValue,
+      latex: canonicalLatexValue || problemLatexValue,
       solveDecision: "direct",
-      debugRequestId: requestId,
-    },
+      body: { debugRequestId: requestId },
+    }),
   };
   const res = createJsonResponseRecorder();
   await handler(req, res);
@@ -2731,15 +2739,22 @@ describe.skip("legacy validator-driven solve diagnostics", () => {
         return jsonResponse(openAiBody(concisePassingIntegralOutput()));
       };
 
+      const duplicateExtraction = await recordExtraction({
+        problem: regressionIntegralProblem,
+        latex: "",
+      });
+
       const first = invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "usage-duplicate-a",
         problemValue: regressionIntegralProblem,
         reviewedTextValue: regressionIntegralProblem,
+        recordedExtractionValue: duplicateExtraction,
       });
       const second = invokeSolve(handleSolveExtractedProblemRequest, {
         requestId: "usage-duplicate-b",
         problemValue: regressionIntegralProblem,
         reviewedTextValue: regressionIntegralProblem,
+        recordedExtractionValue: duplicateExtraction,
       });
       await new Promise((resolve) => setTimeout(resolve, 10));
       releaseFetch();
@@ -3441,10 +3456,10 @@ describe.skip("legacy validator-driven solve diagnostics", () => {
 });
 
 describe("structural solve acceptance diagnostics", () => {
-  it("routes every initial canonical solve to Sol without calling a provider", async () => {
+  it("routes elementary work to Sol-medium and recognized advanced work to Sol-high without calling a provider", async () => {
     await withRuntime({ capture: false }, async () => {
       process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
-      process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
+      process.env.OMNIMATH_REPAIR_MODEL = "gpt-5.6-sol";
       process.env.OMNIMATH_ESCALATION_MODEL = "test-sol-model";
       let providerCalls = 0;
       globalThis.fetch = async () => {
@@ -3452,20 +3467,24 @@ describe("structural solve acceptance diagnostics", () => {
         throw new Error("Routing must not call the provider.");
       };
 
-      for (const canonicalLatex of [
-        "x+1=2",
-        regressionIntegralLatex,
-        "\\oint_C F\\cdot dr",
-        "\\sum_{n=1}^{\\infty}n^{-2}",
-      ]) {
-        assert.equal(resolveInitialSolveRouting({ canonicalLatex }).selectedInitialModelRole, "solver");
-        assert.equal(resolveInitialSolveRouting({ canonicalLatex }).selectedInitialModel, "gpt-5.6-sol");
+      for (const canonicalLatex of ["x+1=2", regressionIntegralLatex]) {
+        const routing = resolveInitialSolveRouting({ canonicalLatex });
+        assert.equal(routing.selectedInitialModelRole, "solver");
+        assert.equal(routing.selectedInitialModel, "gpt-5.6-sol");
+        assert.equal(routing.selectedInitialReasoningEffort, "medium");
+      }
+      for (const canonicalLatex of ["\\oint_C F\\cdot dr", "\\sum_{n=1}^{\\infty}n^{-2}"]) {
+        const routing = resolveInitialSolveRouting({ canonicalLatex });
+        assert.equal(routing.selectedInitialModelRole, "repair");
+        assert.equal(routing.selectedInitialModel, "gpt-5.6-sol");
+        assert.equal(routing.selectedInitialReasoningEffort, "high");
+        assert.equal(routing.routeSource, "difficulty-based");
       }
       assert.equal(providerCalls, 0);
     });
   });
 
-  it("returns a structurally valid Sol candidate without Terra repair", async () => {
+  it("returns a structurally valid Sol candidate after one bounded contradiction recovery", async () => {
     await withRuntime({ capture: true }, async ({ cwd, handleSolveExtractedProblemRequest }) => {
       process.env.OMNIMATH_SOLVER_MODEL = "test-luna-model";
       process.env.OMNIMATH_REPAIR_MODEL = "test-terra-model";
@@ -3481,7 +3500,7 @@ describe("structural solve acceptance diagnostics", () => {
 
       assert.equal(response.statusCode, 200);
       assert.equal(response.json().finalAnswerLatex, "x=-35");
-      assert.deepEqual(requests.map((request) => request.model), ["gpt-5.6-sol"]);
+      assert.deepEqual(requests.map((request) => request.model), ["gpt-5.6-sol", "test-escalation-model"]);
       assert.equal((await readArtifacts(cwd)).length, 0);
     });
   });

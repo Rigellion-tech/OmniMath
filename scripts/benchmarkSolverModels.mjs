@@ -8,8 +8,11 @@ import { loadEnvFiles } from "../server/env.js";
 import { normalizeOpenAiUsage } from "../server/openai.js";
 import { analyzeNumericExpression } from "../server/mathValidationAnalysis.js";
 import { estimateModelCostUsd, getOpenAiModels } from "../server/openaiModels.js";
+import { imageIngestionRegistry, ingestionDigest } from "../server/imageIngestionRegistry.js";
+import { assessOcrSolveDecision } from "../server/ocrSolvePolicy.js";
 import { getSolverBenchmarkSuite } from "../server/solverBenchmarkSuite.js";
 import { aggregateBenchmarkResults, classifyBenchmarkRecord, summarizeBenchmarkByCandidate } from "../server/solverBenchmarkMetrics.js";
+import { createCanonicalProblemPayload } from "../src/lib/canonicalProblem.js";
 
 loadEnvFiles();
 
@@ -320,6 +323,56 @@ function skippedCostCapRecord({ candidate, fixture, repeatIndex, costUsd, estima
 }
 
 async function invokeSolve(handler, fixture, requestId) {
+  // Benchmark transcriptions are trusted server fixtures, not measured OCR
+  // provider output. Register them through the same receipt lifecycle so the
+  // benchmark exercises the production OCR canonical-solve boundary.
+  const owner = "local-dev-solve-extracted-problem";
+  const imageHash = ingestionDigest({ benchmarkFixture: fixture.id, text: fixture.canonicalText, latex: fixture.canonicalLatex });
+  const claimed = await imageIngestionRegistry.begin({
+    owner,
+    scopeId: requestId,
+    uploadId: requestId,
+    uploadRevision: 0,
+    ingestionRequestId: requestId,
+    imageHash,
+    promptHash: ingestionDigest({ benchmarkFixture: fixture.id }),
+  });
+  const extractionValidation = {
+    status: "success",
+    tier: "high",
+    critical: false,
+    confidence: 99,
+    ocrConfidence: 99,
+    mathIntegrityScore: 99,
+    issues: [],
+    metrics: {},
+  };
+  const extraction = {
+    extractedProblemText: fixture.canonicalText,
+    extractedProblemLatex: fixture.canonicalLatex,
+    rawExtractedText: fixture.canonicalText,
+    rawExtractedLatex: fixture.canonicalLatex,
+    normalizedText: fixture.canonicalText,
+    validationText: fixture.canonicalText,
+    confidence: 99,
+    ocrConfidence: 99,
+    mathIntegrityScore: 99,
+    confidenceTier: "high",
+    issues: [],
+    extractionValidation,
+    imageSource: { imageHash },
+    ocrSolveDecision: assessOcrSolveDecision({ solveDecision: "direct", extractionValidation }),
+  };
+  const recorded = await imageIngestionRegistry.extracted({ owner, record: claimed.record, extraction });
+  const canonicalProblem = createCanonicalProblemPayload({
+    canonicalText: fixture.canonicalText,
+    canonicalLatex: fixture.canonicalLatex,
+    source: "ocr-direct",
+    extractionWarnings: [],
+    extractionConfidence: 99,
+  });
+  const reviewRevision = 0;
+  const reviewRevisionId = `${recorded.ingestion.extractionId}:review:${reviewRevision}`;
   const req = {
     method: "POST",
     url: "/api/solve-extracted-problem",
@@ -329,27 +382,13 @@ async function invokeSolve(handler, fixture, requestId) {
     },
     socket: { remoteAddress: "127.0.0.1" },
     body: {
-      problem: fixture.canonicalLatex,
+      problem: fixture.canonicalText,
       problemText: fixture.canonicalText,
-      canonicalProblem: {
-        canonicalText: fixture.canonicalText,
-        canonicalLatex: fixture.canonicalLatex,
-        source: "benchmark-fixture",
-        extractionWarnings: [],
-        extractionConfidence: 99,
-        hash: fixture.id,
-      },
-      extraction: {
-        normalizedText: fixture.canonicalText,
-        validationText: fixture.canonicalText,
-        extractedProblemLatex: fixture.canonicalLatex,
-        rawExtractedLatex: fixture.canonicalLatex,
-        confidence: 99,
-        ocrConfidence: 99,
-        mathIntegrityScore: 99,
-        confidenceTier: "high",
-        issues: [],
-      },
+      canonicalProblem,
+      extraction: recorded,
+      extractionReceipt: recorded.extractionReceipt,
+      reviewRevision,
+      reviewRevisionId,
       solveDecision: "direct",
       debugRequestId: requestId,
     },
@@ -369,6 +408,10 @@ async function withBenchmarkRuntime(callback) {
     USAGE_LOCAL_STORE_PATH: process.env.USAGE_LOCAL_STORE_PATH,
     USAGE_KV_REST_API_URL: process.env.USAGE_KV_REST_API_URL,
     USAGE_KV_REST_API_TOKEN: process.env.USAGE_KV_REST_API_TOKEN,
+    KV_REST_API_URL: process.env.KV_REST_API_URL,
+    KV_REST_API_TOKEN: process.env.KV_REST_API_TOKEN,
+    UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
+    UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
     OMNIMATH_SOLVER_MODEL: process.env.OMNIMATH_SOLVER_MODEL,
     OMNIMATH_SOLVER_REASONING_EFFORT: process.env.OMNIMATH_SOLVER_REASONING_EFFORT,
     OMNIMATH_REPAIR_MODEL: process.env.OMNIMATH_REPAIR_MODEL,
@@ -391,6 +434,10 @@ async function withBenchmarkRuntime(callback) {
   process.env.POSTGRES_URL = "";
   process.env.USAGE_KV_REST_API_URL = "";
   process.env.USAGE_KV_REST_API_TOKEN = "";
+  process.env.KV_REST_API_URL = "";
+  process.env.KV_REST_API_TOKEN = "";
+  process.env.UPSTASH_REDIS_REST_URL = "";
+  process.env.UPSTASH_REDIS_REST_TOKEN = "";
   process.env.USAGE_LOCAL_STORE_PATH = join(cwd, ".data", "usage.json");
   process.env.DAILY_AI_LIMIT = "100000";
   process.env.MONTHLY_AI_LIMIT = "100000";
@@ -545,11 +592,13 @@ async function runLiveBenchmark(args, fixtures) {
             const latencyMs = Date.now() - started;
             const body = response.json();
             const usage = usageFromBody(body);
-            const actualCostUsd = Number(body.usage?.settlement?.actualCostMicros || 0) / 1000000;
+            const settlement = body.usage?.settlement;
+            const usageUnknown = ["unknown_due_to_abort", "unknown_unreconciled", "partially_observed"].includes(settlement?.usageStatus);
+            const actualCostUsd = usageUnknown ? null : Number(settlement?.actualCostMicros || 0) / 1000000;
             const providerCalls = Number(body.usage?.settlement?.providerCalls || 0);
             const transportDiagnostics = body.openAiTransportDiagnostics || null;
             const transportAttempts = Number(transportDiagnostics?.transportAttempts || providerCalls || 0);
-            const successfulProviderResponses = Number(transportDiagnostics?.successfulProviderResponses || providerCalls || 0);
+            const successfulProviderResponses = Number(transportDiagnostics?.successfulProviderResponses ?? providerCalls ?? 0);
             const retryCount = Number(transportDiagnostics?.retryCount || Math.max(0, transportAttempts - successfulProviderResponses));
             const finalInfrastructureErrorCode = transportDiagnostics?.finalInfrastructureErrorCode || body.networkCauseCode || null;
             const infrastructureFailureType = transportDiagnostics?.finalInfrastructureFailureType || (
@@ -560,10 +609,12 @@ async function runLiveBenchmark(args, fixtures) {
                   : null
             );
             calls += providerCalls;
-            costUsd += actualCostUsd;
+            // Enforce the spend cap using held estimates without calling them actual cost.
+            costUsd += actualCostUsd ?? Number(settlement?.settledCostMicros || settlement?.reservedCostMicros || 0) / 1000000;
             const rejected = response.statusCode >= 400;
             const infrastructureFailure = response.statusCode === 429
               || response.statusCode === 503
+              || body.code === "AI_SOLVE_TIMEOUT"
               || body.code === "AI_SERVICE_UNAVAILABLE"
               || body.code === "AI_PROVIDER_RATE_LIMITED";
             const evaluation = evaluateFixtureAnswer(fixture, body, response.statusCode);
@@ -584,12 +635,14 @@ async function runLiveBenchmark(args, fixtures) {
               live: true,
               statusCode: response.statusCode,
               latencyMs,
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-              reasoningTokens: usage.reasoningTokens,
+              inputTokens: usageUnknown ? null : usage.inputTokens,
+              outputTokens: usageUnknown ? null : usage.outputTokens,
+              reasoningTokens: usageUnknown ? null : usage.reasoningTokens,
               costUsd: actualCostUsd,
               providerCalls,
-              billedProviderCalls: providerCalls,
+              billedProviderCalls: usageUnknown ? null : providerCalls,
+              usageStatus: settlement?.usageStatus || "observed",
+              costStatus: usageUnknown ? "unreconciled" : "observed",
               transportAttempts,
               successfulProviderResponses,
               retryCount,

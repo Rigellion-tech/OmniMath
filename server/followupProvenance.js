@@ -1,5 +1,7 @@
 const SNAPSHOT_VERSION = 1;
 const MAX_PROMPT_CHARS = 24_000;
+const FOLLOWUP_SCOPES = new Set(["lens", "workspace"]);
+const PRESENTATION_DEPTHS = new Set(["concise", "standard", "detailed"]);
 
 function badInput(message) {
   return Object.assign(new Error(message), { statusCode: 400, code: "BAD_INPUT" });
@@ -71,6 +73,27 @@ function distinct(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function workspaceTarget(target = {}) {
+  return [target.targetId, target.semanticId, target.type, target.role]
+    .some((value) => /(?:^|[:/_\s-])(workspace|global|whole[-_\s]?solution)(?:$|[:/_\s-])/iu.test(text(value, 240)));
+}
+
+export function normalizeFollowupScope(body = {}) {
+  const scope = text(body.scope || body.followupScope, 40) || "lens";
+  if (!FOLLOWUP_SCOPES.has(scope)) {
+    throw badInput("Follow-up scope must be lens or workspace.");
+  }
+  return scope;
+}
+
+export function normalizePresentationDepth(value) {
+  const depth = text(value, 40) || "standard";
+  if (!PRESENTATION_DEPTHS.has(depth)) {
+    throw badInput("Follow-up presentationDepth must be concise, standard, or detailed.");
+  }
+  return depth;
+}
+
 function assertConsistentSnapshot(body, snapshot) {
   const declaredTargets = distinct([
     text(body.targetId, 240),
@@ -90,7 +113,7 @@ function assertConsistentSnapshot(body, snapshot) {
   }
 }
 
-export function normalizeProvenanceSnapshot(value, body = {}) {
+export function normalizeProvenanceSnapshot(value, body = {}, requestedScope = normalizeFollowupScope(body)) {
   if (value == null) return null;
   const input = object(value, "provenanceSnapshot");
   if (input.version !== SNAPSHOT_VERSION) {
@@ -105,8 +128,9 @@ export function normalizeProvenanceSnapshot(value, body = {}) {
     throw badInput("provenanceSnapshot.target requires targetId or semanticId.");
   }
   const conceptTarget = /concept/i.test(text(targetInput.type || targetInput.role, 120));
+  const targetIsDeclaredWorkspace = workspaceTarget(targetInput);
   if (!originInput.stepId && integer(originInput.stepIndex) == null
-    && confidenceKind !== "insufficient" && !conceptTarget) {
+    && confidenceKind !== "insufficient" && !conceptTarget && !targetIsDeclaredWorkspace) {
     throw badInput("provenanceSnapshot.origin requires stepId or stepIndex.");
   }
   if (!Array.isArray(evidenceInput.steps)) {
@@ -141,11 +165,16 @@ export function normalizeProvenanceSnapshot(value, body = {}) {
       stepIndex: integer(originInput.stepIndex),
       stepId: text(originInput.stepId, 240),
       stepTitle: text(originInput.stepTitle, 400),
-      currentStep: compactStep(originInput.currentStep, integer(originInput.stepIndex)),
+      currentStep: originInput.currentStep == null
+        ? null
+        : compactStep(originInput.currentStep, integer(originInput.stepIndex)),
       branchId: text(originInput.branchId, 240),
     },
     evidence: {
-      steps: evidenceInput.steps.slice(0, 48).map((step, index) => {
+      // The client already sends an origin-centered window of at most 64
+      // entries. Preserve that entire window until relevance-aware selection
+      // below so a late selected step cannot be removed by prefix slicing.
+      steps: evidenceInput.steps.slice(0, 64).map((step, index) => {
         const normalized = compactStep(step, index);
         return {
           ...normalized,
@@ -163,6 +192,13 @@ export function normalizeProvenanceSnapshot(value, body = {}) {
     },
     confidence: { kind: confidenceKind },
   };
+  const targetIsWorkspace = workspaceTarget(snapshot.target);
+  if (requestedScope === "workspace" && !targetIsWorkspace) {
+    throw badInput("Workspace follow-up scope requires an explicit workspace provenance target.");
+  }
+  if (requestedScope === "lens" && targetIsWorkspace) {
+    throw badInput("Lens follow-up scope cannot use a workspace provenance target.");
+  }
   assertConsistentSnapshot(body, snapshot);
   return snapshot;
 }
@@ -240,7 +276,12 @@ function json(value) {
 }
 
 export function buildProvenanceFollowupPrompt(body, history = []) {
-  const snapshot = normalizeProvenanceSnapshot(body.provenanceSnapshot, body) || legacySnapshot(body);
+  const scope = normalizeFollowupScope(body);
+  const presentationDepth = normalizePresentationDepth(body.presentationDepth);
+  const snapshot = normalizeProvenanceSnapshot(body.provenanceSnapshot, body, scope) || legacySnapshot(body);
+  if (scope === "workspace" && !workspaceTarget(snapshot.target)) {
+    throw badInput("Workspace follow-up scope requires an explicit workspace provenance target.");
+  }
   const question = text(body.question, 1_000);
   if (!question) throw badInput("Follow-up question is required.");
   const evidence = selectEvidence(snapshot);
@@ -249,7 +290,17 @@ export function buildProvenanceFollowupPrompt(body, history = []) {
     text: text(item.text, 1_000),
   })).filter((item) => item.text);
 
-  const prompt = `You are OmniMath, a careful math tutor tracing one exact selected mathematical occurrence.
+  const scopeInstructions = scope === "workspace"
+    ? `You are OmniMath, a careful math tutor answering about the whole current solution workspace.
+
+INSTRUCTIONS
+- Ground the answer in ORIGINAL PROBLEM, exact CURRENT SOLUTION evidence, relevant inputs, assumptions, and conversation history below.
+- The workspace target is an explicit whole-solution owner. Do not silently narrow the question to a pinned token or invent a selected occurrence.
+- Treat ordered evidence as a dependency graph when a result has multiple inputs; do not force a branching derivation into a linear story.
+- Correct a false premise in the user's question before answering it. If evidence conflicts or is incomplete, identify the limit.
+- Resolve conversational references from recent turns only when the history clearly establishes them.
+- Answer only the follow-up and use LaTeX where useful.`
+    : `You are OmniMath, a careful math tutor tracing one exact selected mathematical occurrence.
 
 INSTRUCTIONS
 - Anchor every answer to TARGET OCCURRENCE and ORIGIN STEP below. Identical-looking symbols or numbers elsewhere are different occurrences unless the evidence explicitly links them.
@@ -259,9 +310,15 @@ INSTRUCTIONS
 - Correct a false premise in the user's question before answering it. Do not agree that an operation, sign, formula, source, or theorem occurred unless the evidence supports it.
 - Resolve "this", "that", "why", and similar references first against the selected target, then the latest assistant-introduced intermediate only when the conversation clearly shifts focus.
 - If evidence conflicts, identify the conflict and be uncertain. Do not silently choose a convenient occurrence or branch.
-- Answer only the follow-up, concisely and mathematically. Use LaTeX where useful.
+- Answer only the follow-up and use LaTeX where useful.`;
 
-TARGET OCCURRENCE
+  const prompt = `${scopeInstructions}
+
+PRESENTATION DEPTH
+${json(presentationDepth)}
+Concise means a direct short answer. Standard means enough explanation to follow the reasoning. Detailed means a fuller derivation while staying on the question.
+
+${scope === "workspace" ? "WORKSPACE TARGET" : "TARGET OCCURRENCE"}
 ${json(snapshot.target)}
 
 ORIGINAL PROBLEM AND ORIGIN
@@ -301,13 +358,24 @@ ${json(question)}`;
       publicMessage: "The selected explanation context is too large. Please pin a more focused expression.",
     });
   }
-  return { prompt, snapshot };
+  return { prompt, snapshot, scope, presentationDepth };
 }
 
 export function createGeneralFollowupFallback(body, history = [], reason = "local context") {
-  const snapshot = normalizeProvenanceSnapshot(body.provenanceSnapshot, body) || legacySnapshot(body);
+  const scope = normalizeFollowupScope(body);
+  const snapshot = normalizeProvenanceSnapshot(body.provenanceSnapshot, body, scope) || legacySnapshot(body);
+  if (scope === "workspace") {
+    const problem = snapshot.origin.problemText || "the current problem";
+    return [
+      `This follow-up remains attached to the current solution workspace for \`${problem}\`. (${reason})`,
+      snapshot.evidence.steps.length
+        ? "I can use the saved solution steps and assumptions, but live AI explanation is unavailable."
+        : "The saved workspace does not contain enough solution evidence for a deeper answer.",
+      history.length ? "The prior workspace conversation remains associated with this solution revision." : "",
+    ].filter(Boolean).join(" ");
+  }
   const selected = snapshot.target.sourceText || "the selected mathematical object";
-  const step = snapshot.origin.currentStep;
+  const step = snapshot.origin.currentStep || compactStep(null);
   const prior = text(body.pinnedExplanation, 2_400);
   const source = step.math
     ? `The selected occurrence \`${selected}\` belongs to the saved step \`${step.math}\`.`

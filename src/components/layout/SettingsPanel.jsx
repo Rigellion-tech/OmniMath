@@ -9,7 +9,6 @@ import {
   RotateCcw,
   Sigma,
   SlidersHorizontal,
-  Sparkles,
   X,
 } from "lucide-react";
 import { useSettings } from "@/lib/settings";
@@ -26,11 +25,11 @@ const CATEGORIES = [
 
 function Section({ eyebrow, title, children }) {
   return (
-    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4 shadow-[0_14px_38px_rgba(0,0,0,0.18)]">
-      <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-teal-200/60">
+    <section className="rounded-2xl border border-transparent bg-neutral-50 p-4">
+      <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-500">
         {eyebrow}
       </p>
-      <h3 className="mt-1 text-base font-semibold tracking-normal text-cyan-50">
+      <h3 className="mt-1 text-base font-semibold tracking-normal text-neutral-900">
         {title}
       </h3>
       <div className="mt-4 space-y-4">{children}</div>
@@ -40,12 +39,12 @@ function Section({ eyebrow, title, children }) {
 
 function SettingRow({ label, description, children }) {
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-white/[0.06] bg-black/10 p-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex flex-col gap-3 rounded-xl border border-transparent bg-white p-3 lg:flex-row lg:items-center lg:justify-between">
       <div className="min-w-0">
-        <p className="text-sm font-medium text-slate-100/86">{label}</p>
-        {description && <p className="mt-1 text-xs leading-5 text-slate-300/54">{description}</p>}
+        <p className="text-sm font-medium text-neutral-900">{label}</p>
+        {description && <p className="mt-1 text-xs leading-5 text-neutral-500">{description}</p>}
       </div>
-      <div className="shrink-0">{children}</div>
+      <div className="min-w-0 max-w-full lg:max-w-[52%]">{children}</div>
     </div>
   );
 }
@@ -69,7 +68,7 @@ function Toggle({ checked, onChange, label }) {
 
 function SegmentedControl({ value, options, onChange }) {
   return (
-    <div className="grid rounded-xl border border-white/[0.08] bg-black/15 p-1" style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
+    <div className="grid rounded-xl border border-neutral-200 bg-neutral-100 p-1" style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
       {options.map((option) => (
         <button
           key={option.value}
@@ -79,8 +78,8 @@ function SegmentedControl({ value, options, onChange }) {
           className={cn(
             "rounded-lg px-2.5 py-1.5 text-center text-xs font-medium transition-all duration-200",
             value === option.value
-              ? "bg-teal-300/[0.16] text-teal-50 shadow-[0_8px_20px_rgba(0,0,0,0.18)]"
-              : "text-slate-400/72 hover:bg-white/[0.045] hover:text-slate-200"
+              ? "bg-white text-neutral-900 shadow-sm"
+              : "text-neutral-500 hover:bg-white/70 hover:text-neutral-800"
           )}
         >
           {option.label}
@@ -102,7 +101,7 @@ function Slider({ value, min, max, step = 1, suffix = "", onChange }) {
         onChange={(event) => onChange(Number(event.target.value))}
         className="omni-range w-full"
       />
-      <div className="mt-1 text-right font-mono text-[10px] uppercase tracking-[0.12em] text-teal-200/65">
+      <div className="mt-1 text-right font-mono text-[10px] uppercase tracking-[0.12em] text-neutral-500">
         {value}{suffix}
       </div>
     </div>
@@ -111,18 +110,18 @@ function Slider({ value, min, max, step = 1, suffix = "", onChange }) {
 
 function KeyboardShortcuts({ onClose }) {
   return (
-    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4">
+    <div className="rounded-2xl border border-transparent bg-neutral-50 p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-teal-200/60">
+          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-500">
             Productivity
           </p>
-          <h4 className="mt-1 text-sm font-semibold text-cyan-50">Keyboard shortcuts</h4>
+          <h4 className="mt-1 text-sm font-semibold text-neutral-900">Keyboard shortcuts</h4>
         </div>
         <button
           type="button"
           onClick={onClose}
-          className="rounded-lg p-1.5 text-slate-300/60 transition-colors hover:bg-white/[0.06] hover:text-slate-100"
+          className="rounded-lg p-1.5 text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900"
           aria-label="Close keyboard shortcuts"
         >
           <X className="h-3.5 w-3.5" />
@@ -130,9 +129,9 @@ function KeyboardShortcuts({ onClose }) {
       </div>
       <div className="mt-3 grid gap-2">
         {keyboardShortcuts.map((shortcut) => (
-          <div key={shortcut.keys} className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-black/12 px-3 py-2">
-            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-teal-100/72">{shortcut.keys}</span>
-            <span className="text-xs text-slate-300/62">{shortcut.action}</span>
+          <div key={shortcut.keys} className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">
+            <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-neutral-700">{shortcut.keys}</span>
+            <span className="text-xs text-neutral-600">{shortcut.action}</span>
           </div>
         ))}
       </div>
@@ -159,6 +158,18 @@ export default function SettingsPanel({ open, onClose }) {
       case "interaction":
         return (
           <Section eyebrow="Interaction" title="Lens behavior">
+            <SettingRow label="Explanation workspace" description="Choose how persistent mathematical conversations appear.">
+              <div className="space-y-2">
+                <SegmentedControl value={settings.interaction.explanationWorkspace}
+                  options={[{ value: "inspector", label: "Inspector" }, { value: "canvas", label: "Canvas" }]}
+                  onChange={(value) => updateSetting("interaction", "explanationWorkspace", value)} />
+                <p className="text-xs leading-5 text-neutral-500">
+                  {settings.interaction.explanationWorkspace === "inspector"
+                    ? "One focused contextual explanation panel. Keeps the solution clean."
+                    : "Multiple persistent mini-OmniMath workspaces that can be freely arranged."}
+                </p>
+              </div>
+            </SettingRow>
             <SettingRow label="Hover lens" description="Show temporary mini lenses while inspecting tokens.">
               <Toggle
                 checked={settings.interaction.hoverLens}
@@ -182,12 +193,11 @@ export default function SettingsPanel({ open, onClose }) {
                 options={[
                   { value: "precise", label: "Precise" },
                   { value: "balanced", label: "Balanced" },
-                  { value: "fast", label: "Fast" },
                 ]}
                 onChange={(value) => updateSetting("interaction", "lensDragSmoothness", value)}
               />
             </SettingRow>
-            <SettingRow label="Sticky lens positions" description="Remember pinned lens positions with the current session.">
+            <SettingRow label="Sticky lens positions" description="Restore manual note positions with the session; conversations are always retained.">
               <Toggle
                 checked={settings.interaction.stickyLensPositions}
                 onChange={(value) => updateSetting("interaction", "stickyLensPositions", value)}
@@ -206,41 +216,29 @@ export default function SettingsPanel({ open, onClose }) {
       case "learning":
         return (
           <Section eyebrow="Learning" title="Explanation defaults">
-            <SettingRow label="Explanation depth" description="Controls how much detail hover previews and lenses can reveal.">
+            <SettingRow label="Explanation detail" description="Controls preview depth and the detail of whole-solution replies.">
               <SegmentedControl
                 value={settings.learning.explanationDepth}
                 options={[
-                  { value: "beginner", label: "Beginner" },
-                  { value: "intermediate", label: "Intermediate" },
-                  { value: "advanced", label: "Advanced" },
-                  { value: "exam", label: "Exam" },
-                  { value: "intuition", label: "Intuition" },
-                  { value: "professor", label: "Professor" },
+                  { value: "concise", label: "Concise" },
+                  { value: "standard", label: "Standard" },
+                  { value: "detailed", label: "Detailed" },
                 ]}
                 onChange={(value) => updateSetting("learning", "explanationDepth", value)}
               />
             </SettingRow>
-            <SettingRow label="Default lens level" description="New pinned lenses start at this explanation level.">
+            <SettingRow label="Lens response detail" description="New lenses use this amount of detail for conversational replies.">
               <SegmentedControl
                 value={settings.learning.defaultLensLevel}
                 options={[
-                  { value: "beginner", label: "Beginner" },
-                  { value: "intermediate", label: "Intermediate" },
-                  { value: "advanced", label: "Advanced" },
-                  { value: "exam", label: "Exam" },
-                  { value: "intuition", label: "Intuition" },
-                  { value: "professor", label: "Professor" },
+                  { value: "concise", label: "Concise" },
+                  { value: "standard", label: "Standard" },
+                  { value: "detailed", label: "Detailed" },
                 ]}
                 onChange={(value) => updateSetting("learning", "defaultLensLevel", value)}
               />
             </SettingRow>
-            <SettingRow label="Socratic mode" description="Stored for upcoming tutor prompts; not applied to generated solutions yet.">
-              <Toggle
-                checked={settings.learning.socraticMode}
-                onChange={(value) => updateSetting("learning", "socraticMode", value)}
-                label="Toggle Socratic mode"
-              />
-            </SettingRow>
+
           </Section>
         );
       case "mathRendering":
@@ -264,13 +262,7 @@ export default function SettingsPanel({ open, onClose }) {
                 onChange={(value) => updateSetting("mathRendering", "equationDensity", value)}
               />
             </SettingRow>
-            <SettingRow label="Coordinate visuals" description="Show coordinate-system previews for supported Calc 3 demos.">
-              <Toggle
-                checked={settings.mathRendering.coordinateVisuals}
-                onChange={(value) => updateSetting("mathRendering", "coordinateVisuals", value)}
-                label="Toggle coordinate visuals"
-              />
-            </SettingRow>
+
           </Section>
         );
       case "productivity":
@@ -283,7 +275,8 @@ export default function SettingsPanel({ open, onClose }) {
                 label="Toggle autosave"
               />
             </SettingRow>
-            <SettingRow label="Export session" description="Download the current board as Markdown.">
+            <SettingRow label="Export session" description="Download the current mathematical workspace.">
+              <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => window.dispatchEvent(new CustomEvent("omnimath:export-session"))}
@@ -292,12 +285,18 @@ export default function SettingsPanel({ open, onClose }) {
                 <Download className="h-3.5 w-3.5" />
                 Export Markdown
               </button>
+              {["png", "pdf"].map((format) => <button key={format} type="button"
+                onClick={() => window.dispatchEvent(new CustomEvent("omnimath:export-session", { detail: { format } }))}
+                className="omni-button min-h-9 rounded-xl px-3 text-xs font-semibold" aria-label={`Export ${format.toUpperCase()}`}>
+                {format.toUpperCase()}
+              </button>)}
+              </div>
             </SettingRow>
             <SettingRow label="Keyboard shortcuts" description="Review the current interaction map.">
               <button
                 type="button"
                 onClick={() => setShortcutsOpen((value) => !value)}
-                className="flex min-h-9 items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.045] px-3 text-xs font-semibold text-slate-200/75 transition-colors hover:text-teal-100"
+                className="flex min-h-9 items-center gap-2 rounded-xl border border-neutral-200 bg-white px-3 text-xs font-semibold text-neutral-700 transition-colors hover:bg-neutral-100 hover:text-neutral-900"
               >
                 <Keyboard className="h-3.5 w-3.5" />
                 {shortcutsOpen ? "Hide" : "Show"}
@@ -309,18 +308,17 @@ export default function SettingsPanel({ open, onClose }) {
       default:
         return (
           <Section eyebrow="Appearance" title="Workspace style">
-            <SettingRow label="Theme selector" description="Shift the dashboard treatment while preserving the OmniMath dark UI.">
+            <SettingRow label="Theme selector" description="Choose the same compact workspace hierarchy in dark or light.">
               <SegmentedControl
                 value={settings.appearance.theme}
                 options={[
-                  { value: "midnight", label: "Midnight" },
-                  { value: "deep", label: "Deep" },
-                  { value: "contrast", label: "Contrast" },
+                  { value: "dark", label: "Dark" },
+                  { value: "light", label: "Light" },
                 ]}
                 onChange={(value) => updateSetting("appearance", "theme", value)}
               />
             </SettingRow>
-            <SettingRow label="Accent color" description="Applies to core controls and the settings surface immediately.">
+            <SettingRow label="Accent color" description="Applies a restrained accent to focused and selected controls.">
               <SegmentedControl
                 value={settings.appearance.accentColor}
                 options={[
@@ -363,26 +361,26 @@ export default function SettingsPanel({ open, onClose }) {
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/62 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Settings">
       <div className="omni-settings-panel relative flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl">
-        <div className="flex items-start justify-between gap-4 border-b border-white/[0.08] p-5">
+        <div className="flex items-start justify-between gap-4 border-b border-neutral-200 p-5">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <SlidersHorizontal className="h-4 w-4 text-teal-200/72" />
-              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-teal-200/68">
+              <SlidersHorizontal className="h-4 w-4 text-neutral-600" />
+              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.18em] text-neutral-500">
                 Settings
               </p>
             </div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-normal text-cyan-50">
+            <h2 className="mt-2 text-2xl font-semibold tracking-normal text-neutral-950">
               Tune OmniMath
             </h2>
-            <p className="mt-1 text-sm leading-6 text-slate-300/62">
-              Settings are saved locally and applied live where the current app surface supports it.
+            <p className="mt-1 text-sm leading-6 text-neutral-600">
+              Settings are saved locally and applied to your workspace.
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
               onClick={resetSettings}
-              className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-2.5 text-slate-300/62 transition-colors hover:text-teal-100"
+              className="rounded-xl border border-neutral-200 bg-white p-2.5 text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900"
               aria-label="Reset settings"
             >
               <RotateCcw className="h-4 w-4" />
@@ -390,7 +388,7 @@ export default function SettingsPanel({ open, onClose }) {
             <button
               type="button"
               onClick={onClose}
-              className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-2.5 text-slate-300/62 transition-colors hover:bg-rose-400/10 hover:text-rose-100"
+              className="rounded-xl border border-neutral-200 bg-white p-2.5 text-neutral-500 transition-colors hover:bg-rose-50 hover:text-rose-700"
               aria-label="Close settings"
             >
               <X className="h-4 w-4" />
@@ -399,7 +397,7 @@ export default function SettingsPanel({ open, onClose }) {
         </div>
 
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)]">
-          <nav className="border-b border-white/[0.08] p-3 md:border-b-0 md:border-r">
+          <nav className="border-b border-neutral-200 p-3 md:border-b-0 md:border-r">
             <div className="grid grid-cols-2 gap-2 md:grid-cols-1">
               {CATEGORIES.map(({ key, label, icon: Icon }) => (
                 <button
@@ -409,8 +407,8 @@ export default function SettingsPanel({ open, onClose }) {
                   className={cn(
                     "flex min-h-11 items-center gap-2 rounded-xl border px-3 text-left text-sm font-medium transition-all duration-200",
                     activeCategory === key
-                      ? "border-teal-300/[0.28] bg-teal-300/[0.12] text-teal-50"
-                      : "border-transparent text-slate-300/66 hover:border-white/[0.08] hover:bg-white/[0.045] hover:text-slate-100"
+                      ? "border-neutral-300 bg-neutral-200 text-neutral-900"
+                      : "border-transparent text-neutral-600 hover:border-neutral-200 hover:bg-neutral-100 hover:text-neutral-900"
                   )}
                 >
                   <Icon className="h-4 w-4 shrink-0" />
@@ -423,14 +421,6 @@ export default function SettingsPanel({ open, onClose }) {
           <div className="omni-scrollbar min-h-0 overflow-y-auto p-4">
             <div className="transition-all duration-200">
               {content}
-              <div className="mt-4 rounded-2xl border border-teal-300/[0.12] bg-teal-300/[0.05] p-4">
-                <div className="flex items-start gap-3">
-                  <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-teal-200/68" />
-                  <p className="text-xs leading-5 text-slate-300/62">
-                    Placeholder settings are intentionally persisted now, so future solver and rendering work can adopt them without changing the user-facing control model.
-                  </p>
-                </div>
-              </div>
             </div>
           </div>
         </div>

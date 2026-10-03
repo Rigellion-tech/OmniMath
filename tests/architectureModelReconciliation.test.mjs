@@ -44,7 +44,7 @@ function responseRecorder() {
   };
 }
 
-it("reproduces hover model attribution divergence without misrouting or mispricing", async (t) => {
+it("attributes hover and pin calls to their actual execution and preserves unknown provider identity", async (t) => {
   const originalEnv = { ...process.env };
   const originalFetch = globalThis.fetch;
   const usagePath = join(tmpdir(), `omnimath-model-reconciliation-${Date.now()}-${Math.random()}.json`);
@@ -65,6 +65,7 @@ it("reproduces hover model attribution divergence without misrouting or misprici
     OPENAI_API_KEY: "offline-model-attribution-fixture",
     OMNIMATH_SOLVER_MODEL: "gpt-5.6-luna",
     OMNIMATH_HOVER_MODEL: "gpt-4.1-mini",
+    OMNIMATH_PINNED_MODEL: "gpt-4.1-mini",
     OMNIMATH_MODEL_GPT_4_1_MINI_INPUT_COST_PER_1M: "1",
     OMNIMATH_MODEL_GPT_4_1_MINI_OUTPUT_COST_PER_1M: "2",
     CLERK_JWT_KEY: session.jwtKey,
@@ -84,13 +85,13 @@ it("reproduces hover model attribution divergence without misrouting or misprici
   t.mock.method(console, "error", (...args) => logs.push(args));
 
   const providerRequests = [];
+  let reportedProviderModel = "gpt-4.1-mini-2025-04-14";
   globalThis.fetch = async (url, options = {}) => {
     assert.equal(String(url), "https://api.openai.com/v1/responses");
     providerRequests.push(JSON.parse(options.body));
-    return new Response(JSON.stringify({
-      id: "resp_hover_model_reconciliation",
+    const response = {
+      id: `resp_model_reconciliation_${providerRequests.length}`,
       status: "completed",
-      model: "gpt-4.1-mini-2025-04-14",
       usage: {
         input_tokens: 1000,
         output_tokens: 2000,
@@ -100,10 +101,15 @@ it("reproduces hover model attribution divergence without misrouting or misprici
         title: "Variable",
         explanation: "This variable is the selected term in the equation.",
       }),
-    }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    if (reportedProviderModel !== null) response.model = reportedProviderModel;
+    return new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
-  const { handleExplainTokenRequest } = await import(`../server/app.js?model-reconciliation-${Date.now()}-${Math.random()}`);
+  const { handleExplainPinRequest, handleExplainTokenRequest } = await import(`../server/app.js?model-reconciliation-${Date.now()}-${Math.random()}`);
   const requestId = "hover-model-reconciliation";
   const req = {
     method: "POST",
@@ -141,7 +147,7 @@ it("reproduces hover model attribution divergence without misrouting or misprici
   ))?.[1];
 
   assert.equal(openAiRequest.model, "gpt-4.1-mini");
-  assert.equal(openAiResponse.responseId, "resp_hover_model_reconciliation");
+  assert.equal(openAiResponse.responseId, "resp_model_reconciliation_1");
   assert.equal(openAiResponse.model, "gpt-4.1-mini-2025-04-14");
   assert.equal(requestSettings.requestId, requestId);
   assert.equal(requestSettings.model, "gpt-4.1-mini");
@@ -149,8 +155,17 @@ it("reproduces hover model attribution divergence without misrouting or misprici
 
   assert.equal(aiRequest.endpoint, "/api/explain-token");
   assert.equal(aiRequest.kind, "hover");
-  assert.equal(aiRequest.model, "gpt-5.6-luna");
-  assert.equal(Object.hasOwn(aiRequest, "requestId"), false);
+  assert.equal(aiRequest.requestId, requestId);
+  assert.equal(aiRequest.routeAttemptId, null);
+  assert.equal(aiRequest.providerTransportAttempt, 1);
+  assert.equal(aiRequest.providerTransportAttempts, 1);
+  assert.equal(aiRequest.role, "hover");
+  assert.equal(aiRequest.requestedModel, "gpt-4.1-mini");
+  assert.equal(aiRequest.effectiveModel, "gpt-4.1-mini");
+  assert.equal(aiRequest.providerModel, "gpt-4.1-mini-2025-04-14");
+  assert.equal(aiRequest.accountingModel, "gpt-4.1-mini");
+  assert.equal(aiRequest.reasoningEffort, null);
+  assert.equal(aiRequest.model, "gpt-4.1-mini-2025-04-14");
   assert.equal(aiRequest.estimatedCostUsd, 0.005);
 
   const body = res.json();
@@ -160,15 +175,62 @@ it("reproduces hover model attribution divergence without misrouting or misprici
   assert.equal(body.usage.settlement.actualInputTokens, 0);
   assert.equal(body.usage.settlement.actualOutputTokens, 0);
 
+  const pinReq = {
+    ...req,
+    url: "/api/explain-pin",
+    body: {
+      ...req.body,
+      debugRequestId: "pin-model-reconciliation",
+      selectedLatex: "x+1",
+      semanticId: "step-1:x-plus-one",
+    },
+  };
+  const pinRes = responseRecorder();
+  await handleExplainPinRequest(pinReq, pinRes);
+  assert.equal(pinRes.statusCode, 200, pinRes.body);
+
+  reportedProviderModel = null;
+  const unknownReq = {
+    ...req,
+    body: {
+      ...req.body,
+      debugRequestId: "hover-provider-model-unknown",
+      selectedLatex: "1",
+      semanticId: "step-1:one",
+    },
+  };
+  const unknownRes = responseRecorder();
+  await handleExplainTokenRequest(unknownReq, unknownRes);
+  assert.equal(unknownRes.statusCode, 200, unknownRes.body);
+
+  const aiRequests = logs
+    .filter(([name]) => name === "[omnimath:ai-request]")
+    .map(([, value]) => value);
+  const pinRequest = aiRequests.find((entry) => entry.requestId === "pin-model-reconciliation");
+  assert.equal(pinRequest.kind, "pin");
+  assert.equal(pinRequest.role, "pinned");
+  assert.equal(pinRequest.requestedModel, "gpt-4.1-mini");
+  assert.equal(pinRequest.effectiveModel, "gpt-4.1-mini");
+  assert.equal(pinRequest.providerModel, "gpt-4.1-mini-2025-04-14");
+  assert.equal(pinRequest.accountingModel, "gpt-4.1-mini");
+
+  const unknownRequest = aiRequests.find((entry) => entry.requestId === "hover-provider-model-unknown");
+  assert.equal(unknownRequest.kind, "hover");
+  assert.equal(unknownRequest.requestedModel, "gpt-4.1-mini");
+  assert.equal(unknownRequest.effectiveModel, "gpt-4.1-mini");
+  assert.equal(unknownRequest.providerModel, null);
+  assert.equal(unknownRequest.model, null);
+  assert.equal(unknownRequest.accountingModel, "gpt-4.1-mini");
+
   const persistedUsage = JSON.parse(await readFile(usagePath, "utf8"));
   const persistedEntries = Object.entries(persistedUsage);
   assert.equal(
     persistedEntries.find(([key]) => /:tokens:global$/u.test(key))?.[1]?.count,
-    3000,
+    9000,
   );
   assert.equal(
     persistedEntries.find(([key]) => /:costMicros:global$/u.test(key))?.[1]?.count,
-    5000,
+    15000,
   );
   assert.equal(persistedEntries.some(([key]) => /gpt-4|gpt-5/iu.test(key)), false);
 });

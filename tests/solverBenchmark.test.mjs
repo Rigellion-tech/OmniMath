@@ -231,7 +231,7 @@ describe("solver benchmark suite", () => {
     assert.equal(candidates.find((candidate) => candidate.id === "policy-b").escalationModel, "gpt-5.6-sol");
   });
 
-  it("records production-route DNS failures as transport attempts without billed provider calls", async () => {
+  it("records production-route dispatch failures with unreconciled billing and cost", async () => {
     process.env.OPENAI_API_KEY = "test-key";
     process.env.OPENAI_MODEL = "gpt-4.1-mini";
     process.env.OPENAI_RETRY_BASE_DELAY_MS = "1";
@@ -258,8 +258,16 @@ describe("solver benchmark suite", () => {
       assert.equal(records[0].finalInfrastructureErrorCode, "EAI_AGAIN");
       assert.equal(records[0].transportAttempts, 3);
       assert.equal(records[0].successfulProviderResponses, 0);
-      assert.equal(records[0].billedProviderCalls, 0);
-      assert.equal(records[0].costUsd, 0);
+      assert.equal(records[0].providerCalls, 3);
+      assert.equal(records[0].billedProviderCalls, null);
+      assert.equal(records[0].costUsd, null);
+      assert.equal(records[0].inputTokens, null);
+      assert.equal(records[0].usageStatus, "unknown_unreconciled");
+      assert.equal(records[0].costStatus, "unreconciled");
+      const summary = aggregateBenchmarkResults(records);
+      assert.equal(summary.totalCostUsd, null);
+      assert.equal(summary.totalBilledProviderCalls, null);
+      assert.equal(summary.averageInputTokens, null);
       assert.equal(records[0].networkDiagnostics.apiBaseUrlHost, "api.openai.com");
       assert.equal(records[0].networkDiagnostics.envPresence.OPENAI_API_KEY, true);
     } finally {
@@ -359,14 +367,15 @@ describe("solver routing", () => {
     );
   });
 
-  it("does not route prior mathematical validator findings away from Luna", () => {
+  it("uses explicit prior mathematical failure metadata to select the bounded high-reasoning route", () => {
     const route = chooseSolverRoleForProblem({
       canonicalLatex: "\\int_0^1 x\\,dx",
       priorIssues: ["numerical_final_answer_mismatch"],
     });
 
-    assert.equal(route.role, "solver");
-    assert.equal(route.reason, "solver_first:prior_mathematical_validation_failure");
+    assert.equal(route.role, "repair");
+    assert.equal(route.tier, "escalation");
+    assert.equal(route.reason, "prior_mathematical_validation_failure");
   });
 
   it("routes the known improper-integral regression fixture to the standard solver first", () => {
@@ -381,11 +390,19 @@ describe("solver routing", () => {
     });
   });
 
-  it("keeps higher-complexity classifications on the solver-first model role", () => {
+  it("uses a materially stronger initial route for recognized higher-complexity notation", () => {
     const route = chooseSolverRoleForProblem({ canonicalLatex: "\\oint_C F\\cdot dr" });
 
-    assert.equal(route.role, "solver");
+    assert.equal(route.role, "repair");
     assert.equal(route.tier, "escalation");
-    assert.equal(route.reason, "solver_first:vector_or_multivariable_calculus");
+    assert.equal(route.reason, "vector_or_multivariable_calculus");
+  });
+
+  it("does not equate prompt length alone with mathematical difficulty", () => {
+    const route = chooseSolverRoleForProblem({ problem: "Explain the setup. ".repeat(100) });
+
+    assert.equal(route.role, "solver");
+    assert.equal(route.tier, "standard");
+    assert.equal(route.reason, "long_context_standard_first");
   });
 });

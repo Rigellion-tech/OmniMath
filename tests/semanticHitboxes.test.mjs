@@ -502,6 +502,11 @@ describe("semanticHitboxes", () => {
     const result = resolveSemanticTarget({ pointer: { x: 35, y: 25 }, candidates: [paddedPlus, fraction] });
     assert.equal(result.target.id, fraction.id);
     assert.equal(result.candidateScores[0].ownedPrimitiveExact, true);
+    const sourceDerivedFraction = { ...fraction, isAggregateTarget: false };
+    assert.equal(resolveSemanticTarget({
+      pointer: { x: 35, y: 25 },
+      candidates: [paddedPlus, sourceDerivedFraction],
+    }).target.id, fraction.id);
   });
 
   it("keeps ambiguous tiny operators leaf-sized instead of climbing to structural parents", () => {
@@ -591,6 +596,33 @@ describe("semanticHitboxes", () => {
     assert.equal(chooseSemanticHit(targets, 180, 54, upper).id, "integral");
     assert.equal(chooseSemanticHit(targets, 34, 8, integral).id, "upper");
     assert.equal(chooseSemanticHit(targets, 78, 44, integral).id, "sin");
+  });
+
+  it("keeps equation-side functionCall punctuation eligible without stealing its decorated head", () => {
+    const application = {
+      id: "application",
+      role: "leftSide",
+      type: "functionCall",
+      decoratedCall: true,
+      childIds: ["head", "index", "argument"],
+      depth: 1,
+      rects: [rect(34, 8, 6, 18)],
+      paintedRects: [rect(34, 8, 6, 18)],
+      ownedPrimitiveRects: [rect(34, 8, 6, 18)],
+      geometryValid: true,
+      geometryQuality: "precise_group",
+    };
+    const head = {
+      id: "head", role: "decorated", type: "decoratedAtom", parentId: "application", childIds: ["base", "index"],
+      depth: 2, rects: [rect(0, 8, 28, 18)], paintedRects: [rect(0, 8, 18, 18)], geometryValid: true,
+    };
+    const index = {
+      id: "index", role: "subscript", type: "number", parentId: "head", depth: 3,
+      rects: [rect(20, 19, 8, 9)], paintedRects: [rect(20, 19, 8, 9)], geometryValid: true,
+    };
+    assert.equal(isAggregateHoverTarget(application), true);
+    assert.equal(resolveSemanticTarget({ pointer: { x: 37, y: 15 }, candidates: [application, head, index] })?.target?.id, "application");
+    assert.equal(resolveSemanticTarget({ pointer: { x: 24, y: 23 }, candidates: [application, head, index] })?.target?.id, "index");
   });
 
   it("keeps painted descendants reachable inside a bound expression", () => {

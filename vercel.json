@@ -4,11 +4,20 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
+    "api/extract-image-problem.js": {
+      "maxDuration": 70
+    },
     "api/explain.js": {
-      "maxDuration": 60
+      "maxDuration": 100,
+      "supportsCancellation": true
     },
     "api/explain-image.js": {
-      "maxDuration": 60
+      "maxDuration": 160,
+      "supportsCancellation": true
+    },
+    "api/solve-extracted-problem.js": {
+      "maxDuration": 100,
+      "supportsCancellation": true
     }
   }
 }

@@ -1,12 +1,12 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion } from "framer-motion";
-import { GripHorizontal, Loader2, Pin, Send, X } from "lucide-react";
-import InlineMath from "./InlineMath";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { ChevronDown, ChevronUp, GripHorizontal, Loader2, MessageCircle, PanelRightOpen, Pin, X } from "lucide-react";
 import MathText from "./MathText";
-import { explainFollowup, explainPin, explainToken } from "@/api/mathClient";
+import ConversationText from "./ConversationText";
+import { explainPin, explainToken } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
-import { useHoverActions, useHoverSemanticState, useHoverTooltipState } from "@/lib/HoverContext";
+import { useHoverActions, useLensWorkspace, useHoverTooltipState } from "@/lib/HoverContext";
 import {
   getHoverTargetIdentity,
   createStableLazyPayload,
@@ -31,35 +31,16 @@ import {
 } from "@/lib/lazyExplanationLifecycle";
 import { clampTooltipPosition, getTooltipPositionFromRect } from "@/lib/tooltipPosition";
 import { cn } from "@/lib/utils";
-import {
-  buildProvenanceSnapshot,
-  buildFollowupPayload,
-  getConversationId,
-  getTargetRevision,
-} from "@/lib/explanationProvenance";
-import {
-  INITIAL_FOLLOWUP_STATE,
-  createFollowupRequestDescriptor,
-  isSameFollowupRequest,
-  recordFollowupLifecycle,
-  reduceFollowupLifecycle,
-  responseOwnsFollowupRequest,
-} from "@/lib/followupLifecycle";
+import ScopedConversation from "./ScopedConversation";
+import MathRenderer from "./MathRenderer";
+import { clampCanvasPosition, MAX_CANVAS_EXTENT, lensTargetIsCurrent, presentationDepth, resolveLensPositions } from "@/lib/lensWorkspace";
 import { classifyHoverRequestFailure, recordHoverRequestLifecycle } from "@/lib/hoverRequestLifecycle";
-
-const DEPTHS = [
-  { key: "beginner", label: "Beginner" },
-  { key: "intermediate", label: "Intermediate" },
-  { key: "advanced", label: "Advanced" },
-  { key: "exam", label: "Exam" },
-  { key: "intuition", label: "Intuition" },
-  { key: "professor", label: "Professor" },
-];
+import { endOmniMeasure, recordOmniDiagnostic, startOmniMeasure } from "@/lib/performanceDiagnostics";
 
 const HOVER_DEBOUNCE_MS = 400;
 const HOVER_RATE_LIMIT_MS = 1000;
-const FOLLOWUP_TIMEOUT_MS = 35000;
 const RATE_LIMIT_MESSAGE = "Explanation paused. Try again in a few seconds.";
+const PINNED_CARD_PADDING = 12;
 const lazyExplanationCache = new Map();
 const inFlightExplanations = new Map();
 const pinExplanationCache = new Map();
@@ -215,6 +196,7 @@ function getLazyCacheKey(item, problem, mode, explanationLevel = "default") {
   return [
     mode,
     problemId,
+    item?.targetRevision || "current",
     stepId,
     cleanKeyPart(anchorId, "anchor"),
     cleanKeyPart(selected, "selected"),
@@ -986,481 +968,174 @@ function useLazyExplanation(item, problem, mode, getToken, enabled = true, expla
   return { ...state, lifecycle: committedLifecycle };
 }
 
-let followupRequestSequence = 0;
+let lensStackSequence = 80;
 
-function nextFollowupRequestId() {
-  followupRequestSequence += 1;
-  return `followup-${Date.now().toString(36)}-${followupRequestSequence.toString(36)}`;
-}
-
-function FollowupChat({ item, problem, getToken, displayedExplanation }) {
-  const { updateExplanationWindow } = useHoverActions();
-  const provenanceSnapshot = useMemo(() => buildProvenanceSnapshot({ item, problem }), [item, problem]);
-  const targetRevision = item.targetRevision || getTargetRevision(provenanceSnapshot);
-  const conversationId = item.conversationId || getConversationId(provenanceSnapshot);
-  const followupReducer = /** @type {React.Reducer<any, any>} */ (reduceFollowupLifecycle);
-  const [state, dispatch] = useReducer(followupReducer, {
-    ...INITIAL_FOLLOWUP_STATE,
-    messages: Array.isArray(item.chatHistory) ? item.chatHistory : [],
-  });
-  const activeRequestRef = useRef(null);
-  const acceptedAnswerRef = useRef(null);
-  const chatMessagesRef = useRef(null);
-  const mountedRef = useRef(true);
-  const followupDebug = DEBUG_SOLUTION_STATE || DEBUG_MATH_HOVER;
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      const active = activeRequestRef.current;
-      if (active) {
-        recordFollowupLifecycle("owner_gone", {
-          requestId: active.requestId,
-          conversationId: active.conversationId,
-          targetRevision: active.targetRevision,
-          reason: "component-unmounted",
-        }, { debug: followupDebug });
-      }
-      activeRequestRef.current?.controller?.abort();
-    };
-  }, [followupDebug]);
-
-  useEffect(() => {
-    const previous = activeRequestRef.current;
-    if (previous) {
-      recordFollowupLifecycle("owner_gone", {
-        requestId: previous.requestId,
-        conversationId: previous.conversationId,
-        targetRevision: previous.targetRevision,
-        reason: "conversation-or-revision-changed",
-      }, { debug: followupDebug });
-    }
-    activeRequestRef.current?.controller?.abort();
-    activeRequestRef.current = null;
-    acceptedAnswerRef.current = null;
-    dispatch({ type: "reset", messages: Array.isArray(item.chatHistory) ? item.chatHistory : [] });
-  }, [conversationId, followupDebug, targetRevision]);
-
-  useLayoutEffect(() => {
-    const accepted = acceptedAnswerRef.current;
-    if (!accepted) return undefined;
-    const lastMessage = state.messages.at(-1);
-    if (lastMessage?.role !== "assistant" || lastMessage.requestId !== accepted.requestId) return undefined;
-    const messageElement = [...(chatMessagesRef.current?.querySelectorAll("[data-followup-request-id]") || [])]
-      .find((element) => element.dataset.followupRequestId === accepted.requestId);
-    if (!messageElement?.isConnected) return undefined;
-
-    recordFollowupLifecycle("committed_to_ui", {
-      ...accepted,
-      messageCount: state.messages.length,
-      domConnected: true,
-    }, { debug: followupDebug });
-
-    const frameId = window.requestAnimationFrame(() => {
-      const renderedText = String(messageElement.textContent || "").trim();
-      if (!mountedRef.current || !messageElement.isConnected || !renderedText) return;
-      recordFollowupLifecycle("rendered", {
-        ...accepted,
-        messageCount: state.messages.length,
-        renderedTextLength: renderedText.length,
-      }, { debug: followupDebug });
-      if (acceptedAnswerRef.current?.requestId === accepted.requestId) {
-        acceptedAnswerRef.current = null;
-      }
-    });
-
-    return () => window.cancelAnimationFrame(frameId);
-  }, [followupDebug, state.messages]);
-
-  useEffect(() => {
-    const correlatedRequestId = state.messages.at(-1)?.requestId || activeRequestRef.current?.requestId || null;
-    recordFollowupLifecycle("local_window_update_requested", {
-      requestId: correlatedRequestId,
-      conversationId,
-      targetRevision,
-      messageCount: state.messages.length,
-    }, { debug: followupDebug });
-    updateExplanationWindow(item.id, {
-      chatHistory: state.messages,
-      conversationId,
-      targetRevision,
-    });
-  }, [conversationId, followupDebug, item.id, state.messages, targetRevision, updateExplanationWindow]);
-
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    const trimmed = state.draft.trim();
-    if (!trimmed || activeRequestRef.current) return;
-
-    const request = createFollowupRequestDescriptor({
-      requestId: nextFollowupRequestId(),
-      conversationId,
-      targetRevision,
-    });
-    const controller = new AbortController();
-    const requestState = { ...request, controller };
-    activeRequestRef.current = requestState;
-    recordFollowupLifecycle("request_started", {
-      ...request,
-      questionLength: trimmed.length,
-    }, { debug: followupDebug });
-    dispatch({ type: "request_started", request, question: trimmed });
-    let timedOut = false;
-    const timeoutId = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, FOLLOWUP_TIMEOUT_MS);
-
-    try {
-      const data = await explainFollowup({
-        getToken,
-        signal: controller.signal,
-        payload: buildFollowupPayload({
-          request,
-          provenanceSnapshot,
-          item,
-          problem,
-          displayedExplanation,
-          question: trimmed,
-          history: state.messages,
-        }),
-      });
-      recordFollowupLifecycle("api_parsed", {
-        ...request,
-        answerLength: String(data.answer || "").length,
-      }, { debug: followupDebug });
-      if (!mountedRef.current) {
-        recordFollowupLifecycle("owner_gone", { ...request, reason: "component-unmounted-before-response" }, { debug: followupDebug });
-        return;
-      }
-      if (!isSameFollowupRequest(activeRequestRef.current, request)) {
-        recordFollowupLifecycle("stale_discarded", { ...request, reason: "request-owner-changed" }, { debug: followupDebug });
-        return;
-      }
-      if (!responseOwnsFollowupRequest(data, request)) {
-        recordFollowupLifecycle("stale_discarded", { ...request, reason: "ownership-echo-mismatch" }, { debug: followupDebug });
-        dispatch({
-          type: "request_failed",
-          request,
-          error: "The answer no longer matched this selected object. Please retry.",
-        });
-        return;
-      }
-      const answer = String(data.answer || "").trim();
-      if (!answer) {
-        recordFollowupLifecycle("response_invalid", { ...request, reason: "empty-answer" }, { debug: followupDebug });
-        dispatch({ type: "request_failed", request, error: "The follow-up returned an empty answer. Please retry." });
-        return;
-      }
-      acceptedAnswerRef.current = { ...request, answerLength: answer.length };
-      dispatch({ type: "request_succeeded", request, answer, ownsRequest: true });
-    } catch (submitError) {
-      if (!mountedRef.current) {
-        recordFollowupLifecycle("owner_gone", { ...request, reason: "component-unmounted-during-request" }, { debug: followupDebug });
-        return;
-      }
-      if (!isSameFollowupRequest(activeRequestRef.current, request)) {
-        recordFollowupLifecycle("stale_discarded", { ...request, reason: "request-owner-changed-during-error" }, { debug: followupDebug });
-        return;
-      }
-      if (submitError?.name === "AbortError" && !timedOut) {
-        recordFollowupLifecycle("aborted", { ...request, reason: "owner-aborted" }, { debug: followupDebug });
-        dispatch({ type: "request_aborted", request });
-      } else {
-        // At this boundary the browser only knows that its API request failed.
-        // It cannot attribute the failure to the upstream provider.
-        recordFollowupLifecycle(submitError?.name === "AbortError" ? "aborted" : "api_failed", {
-          ...request,
-          reason: timedOut ? "timeout" : submitError?.message || "request-failed",
-          status: submitError?.status || null,
-        }, { debug: followupDebug });
-        dispatch({
-          type: "request_failed",
-          request,
-          error: timedOut ? "The follow-up took too long. Please retry." : submitError.message || "Could not answer that follow-up.",
-        });
-      }
-    } finally {
-      window.clearTimeout(timeoutId);
-      if (isSameFollowupRequest(activeRequestRef.current, request)) activeRequestRef.current = null;
-    }
-  };
-
-  return (
-    <div className="border-t border-white/[0.055] px-3.5 py-3">
-      {state.messages.length > 0 && (
-        <div ref={chatMessagesRef} className="omni-scrollbar mb-2 max-h-36 space-y-2 overflow-y-auto pr-1">
-          {state.messages.map((message, messageIndex) => (
-            <div
-              key={`${message.role}-${messageIndex}`}
-              data-followup-request-id={message.requestId || undefined}
-              className={cn(
-                "rounded-lg px-2.5 py-2 text-xs leading-5",
-                message.role === "user"
-                  ? "bg-teal-300/[0.08] text-teal-50/90"
-                  : "bg-white/[0.045] text-slate-200/82"
-              )}
-            >
-              <MathText>{message.text}</MathText>
-            </div>
-          ))}
-        </div>
-      )}
-      {state.error && (
-        <p className="mb-2 rounded-md border border-rose-300/20 bg-rose-400/10 px-2.5 py-2 text-xs leading-5 text-rose-100/82">
-          {state.error}
-        </p>
-      )}
-      <form className="flex items-center gap-2" onSubmit={handleSubmit}>
-        <input
-          value={state.draft}
-          onChange={(event) => dispatch({ type: "draft_changed", draft: event.target.value })}
-          onPointerDown={(event) => event.stopPropagation()}
-          onMouseDown={(event) => event.stopPropagation()}
-          className="min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-black/20 px-2.5 py-2 text-xs text-slate-100/88 outline-none transition-colors placeholder:text-slate-500/70 focus:border-teal-300/38"
-          placeholder="Ask about this"
-          disabled={state.loading}
-        />
-        <button
-          type="submit"
-          disabled={state.loading || !state.draft.trim()}
-          onPointerDown={(event) => event.stopPropagation()}
-          className="rounded-lg border border-teal-300/20 bg-teal-300/10 p-2 text-teal-50 transition-colors hover:bg-teal-300/16 disabled:cursor-not-allowed disabled:opacity-45"
-          aria-label="Send follow-up"
-        >
-          {state.loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function FloatingWindow({ item, index, problem, getToken }) {
-  const { clearHoverLens, closeExplanationWindow, toggleWindowPin, setWindowDepth, moveExplanationWindow, updateExplanationWindow } = useHoverActions();
+const FloatingWindow = React.memo(/** @param {{item:any,index:number,problem:any,getToken:any,position:any,onMeasure:any,canvas:HTMLElement,presentation:string,visible:boolean,onInspectCollapse:any}} props */ function FloatingWindow({ item, index, problem, getToken, position, onMeasure, canvas, presentation, visible, onInspectCollapse }) {
+  const { clearHoverLens, closeExplanationWindow, updateExplanationWindow } = useHoverActions();
   const { settings } = useSettings();
+  const reducedMotion = useReducedMotion();
   const windowRef = useRef(null);
+  const bodyContentRef = useRef(null);
+  const [bodyHeight, setBodyHeight] = useState(null);
   const dragRef = useRef(null);
   const [dragging, setDragging] = useState(false);
-  const lazyState = useLazyExplanation(
-    item,
-    problem,
-    "pin",
-    getToken,
-    item.referenceType !== "concept",
-    item.depth || "intermediate"
-  );
-  const explanationText = lazyState.data?.explanation
-    || item.content?.[item.depth]
-    || item.content?.intermediate
-    || item.title;
-
-  useEffect(() => {
-    if (!explanationText || item.lastDisplayedExplanation === explanationText) return;
-    updateExplanationWindow(item.id, { lastDisplayedExplanation: explanationText });
-  }, [explanationText, item.id, item.lastDisplayedExplanation, updateExplanationWindow]);
-  const identity = getHoverTargetIdentity(item);
-  const displayTitle = userFacingTooltipTitle({
-    title: identity.tooltipTitle || identity.label || item.title,
-    selectedText: identity.sourceText || item.selectedText || item.display,
-    display: item.display,
-    latex: item.latex,
-    role: item.role,
+  const inspector = presentation === "inspector";
+  const collapsed = !inspector && Boolean(item.collapsed);
+  const currentTarget = lensTargetIsCurrent(item, problem);
+  useLayoutEffect(() => {
+    recordOmniDiagnostic("react.commit.lens-card", { lensId: item.id });
   });
-
-  useEffect(() => {
-    return () => {
-      const drag = dragRef.current;
-      if (drag?.frameId) cancelAnimationFrame(drag.frameId);
-      if (drag) document.body.style.userSelect = drag.previousUserSelect;
+  useLayoutEffect(() => {
+    const content = bodyContentRef.current;
+    if (!content || !visible) return undefined;
+    const measure = () => {
+      const height = content.offsetHeight;
+      if (height) setBodyHeight((previous) => previous === height ? previous : height);
     };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [visible, presentation]);
+  const lazyState = useLazyExplanation(item, problem, "pin", getToken, item.referenceType !== "concept" && currentTarget, "standard");
+  const explanationText = item.lastDisplayedExplanation || lazyState.data?.explanation
+    || item.content?.intermediate || item.title;
+  const identity = getHoverTargetIdentity(item);
+  const selectedMath = identity.sourceText || item.sourceText || item.selectedText || item.display
+    || item.provenanceSnapshot?.origin?.currentStep?.math || "";
+  useEffect(() => {
+    if (!lazyState.data?.explanation || item.lastDisplayedExplanation) return;
+    updateExplanationWindow(item.id, { lastDisplayedExplanation: lazyState.data.explanation });
+  }, [lazyState.data, item.id, item.lastDisplayedExplanation, updateExplanationWindow]);
+  const persistConversation = useCallback(({ messages, draft, status }) => {
+    updateExplanationWindow(item.id, { chatHistory: messages, conversationDraft: draft, conversationStatus: status });
+  }, [item.id, updateExplanationWindow]);
+  useLayoutEffect(() => {
+    const element = windowRef.current;
+    if (!element) return undefined;
+    const reportSize = () => {
+      if (!inspector && visible && element.offsetWidth) onMeasure(item.id, { width: element.offsetWidth, height: element.offsetHeight });
+    };
+    reportSize();
+    const observer = new ResizeObserver(reportSize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [item.id, onMeasure, inspector, visible]);
+  useEffect(() => () => {
+    const drag = dragRef.current;
+    if (drag?.frameId) cancelAnimationFrame(drag.frameId);
+    if (drag) document.body.style.userSelect = drag.previousUserSelect;
   }, []);
-
-  const queueDragMove = useCallback((event) => {
+  const applyDrag = useCallback((drag) => {
+    if (!windowRef.current || !drag) return;
+    const measurement = startOmniMeasure("lens.drag-frame", { lensId: item.id });
+    const rect = canvas.getBoundingClientRect();
+    const next = clampCanvasPosition(drag.clientX - drag.offsetX - rect.left, drag.clientY - drag.offsetY - rect.top, canvas.clientWidth, drag.size);
+    drag.x = next.x; drag.y = next.y;
+    canvas.style.setProperty("--omni-lens-extent", `${Math.min(MAX_CANVAS_EXTENT, Math.max(drag.extent, drag.y + drag.size.height + 32))}px`);
+    windowRef.current.style.transform = `translate3d(${drag.x}px, ${drag.y}px, 0)`;
+    endOmniMeasure(measurement);
+  }, [canvas, item.id]);
+  useLayoutEffect(() => { if (dragRef.current) applyDrag(dragRef.current); });
+  const savePosition = (x, y, size) => {
+    const available = Math.max(1, canvas.clientWidth - size.width - 24);
+    const next = clampCanvasPosition(x, y, canvas.clientWidth, size);
+    updateExplanationWindow(item.id, { placementMode: "manual", coordinateSpace: "canvas-v1", ...next,
+      xRatio: Math.max(0, Math.min(1, (x - 12) / available)),
+      positionAnchor: null });
+  };
+  const finishDrag = (event) => {
     const drag = dragRef.current;
     if (!drag || event.pointerId !== drag.pointerId) return;
-    event.preventDefault();
-
-    drag.nextX = event.clientX - drag.offsetX;
-    drag.nextY = event.clientY - drag.offsetY;
-
-    if (settings.interaction.lensDragSmoothness === "precise") {
-      moveExplanationWindow(item.id, drag.nextX, drag.nextY, drag.size);
-      return;
-    }
-
-    if (settings.interaction.lensDragSmoothness === "fast" && drag.frameId) {
-      cancelAnimationFrame(drag.frameId);
-      drag.frameId = null;
-    }
-
-    if (drag.frameId) return;
-    drag.frameId = requestAnimationFrame(() => {
-      const currentDrag = dragRef.current;
-      if (!currentDrag) return;
-      currentDrag.frameId = null;
-      moveExplanationWindow(item.id, currentDrag.nextX, currentDrag.nextY, currentDrag.size);
-    });
-  }, [item.id, moveExplanationWindow, settings.interaction.lensDragSmoothness]);
-
-  const finishDrag = useCallback((event) => {
-    const drag = dragRef.current;
-    if (!drag || event.pointerId !== drag.pointerId) return;
-
     if (drag.frameId) cancelAnimationFrame(drag.frameId);
-    moveExplanationWindow(item.id, event.clientX - drag.offsetX, event.clientY - drag.offsetY, drag.size);
-
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
+    drag.clientX = event.clientX; drag.clientY = event.clientY;
+    applyDrag(drag);
+    savePosition(drag.x, drag.y, drag.size);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
     document.body.style.userSelect = drag.previousUserSelect;
-    dragRef.current = null;
-    setDragging(false);
-  }, [item.id, moveExplanationWindow]);
-
-  const handleDragStart = (event) => {
-    if (event.button !== 0 || window.innerWidth < 640) return;
+    dragRef.current = null; setDragging(false);
+  };
+  const moveDrag = (event) => {
+    const drag = dragRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault(); drag.clientX = event.clientX; drag.clientY = event.clientY;
+    if (settings.interaction.lensDragSmoothness === "precise") { applyDrag(drag); return; }
+    if (drag.frameId) return;
+    drag.frameId = requestAnimationFrame(() => { drag.frameId = 0; applyDrag(drag); });
+  };
+  const startDrag = (event) => {
+    if (event.button !== 0 || inspector) return;
     const rect = windowRef.current?.getBoundingClientRect();
     if (!rect) return;
-    event.preventDefault();
-    event.stopPropagation();
-    clearHoverLens();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-
-    dragRef.current = {
-      pointerId: event.pointerId,
-      offsetX: event.clientX - rect.left,
-      offsetY: event.clientY - rect.top,
-      size: {
-        width: rect.width,
-        height: rect.height,
-      },
-      nextX: item.x,
-      nextY: item.y,
-      frameId: null,
-      previousUserSelect: document.body.style.userSelect,
-    };
-    document.body.style.userSelect = "none";
-    setDragging(true);
+    event.preventDefault(); event.stopPropagation(); clearHoverLens();
+    event.currentTarget.focus(); event.currentTarget.setPointerCapture?.(event.pointerId);
+    dragRef.current = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY,
+      offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top,
+      extent: Number.parseFloat(canvas.style.getPropertyValue("--omni-lens-extent")) || 0,
+      size: { width: rect.width, height: rect.height }, frameId: 0, previousUserSelect: document.body.style.userSelect };
+    updateExplanationWindow(item.id, { stackOrder: ++lensStackSequence });
+    document.body.style.userSelect = "none"; setDragging(true);
   };
-
+  // Canvas coordinates own the transform; layout projection must not overwrite them.
   return (
-    <motion.article
-      ref={windowRef}
-      data-semantic-id={identity.semanticId || identity.targetId || undefined}
+    <motion.article ref={windowRef} data-semantic-id={identity.semanticId || identity.targetId || undefined}
       data-tooltip-semantic-id={identity.semanticId || identity.targetId || undefined}
       data-source-range={identity.sourceRange ? `${identity.sourceRange.start}:${identity.sourceRange.end}` : undefined}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.18, ease: "easeOut" }}
-      className={cn(
-        "omni-floating-window fixed left-0 top-0 z-[70] flex w-[320px] flex-col overflow-hidden rounded-xl opacity-85 transition-opacity duration-200 will-change-transform hover:opacity-100",
-        dragging && "omni-floating-window-dragging"
-      )}
-      style={{
-        transform: `translate3d(${item.x}px, ${item.y}px, 0)`,
-        zIndex: 70 + index,
-      }}
-      
-    >
-      <div
-        className={cn(
-          "flex touch-none cursor-grab select-none items-center justify-between gap-3 border-b border-white/[0.055] px-3.5 py-3 active:cursor-grabbing",
-          dragging && "bg-teal-300/[0.06]"
-        )}
-        onPointerDown={handleDragStart}
-        onPointerMove={queueDragMove}
-        onPointerUp={finishDrag}
-        onPointerCancel={finishDrag}
-      >
-        <div className="flex min-w-0 items-center gap-2">
-          <GripHorizontal className="h-4 w-4 shrink-0 text-teal-200/55" />
-          <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold text-cyan-50/95"><MathText>{displayTitle}</MathText></h3>
-          </div>
+      data-pinned-lens={item.lensId || item.id} data-coordinate-space="canvas-v1"
+      data-lens-presentation={presentation} data-presentation-visible={visible ? "true" : "false"}
+      aria-hidden={!visible || undefined} {...(!visible ? { inert: "" } : {})}
+      data-placement-mode={item.placementMode === "manual" ? "manual" : "stacked"}
+      data-spawn-state={position.spawnState || "organized"} data-collapsed={collapsed ? "true" : "false"}
+      layout={false}
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, scale: reducedMotion ? 1 : .98 }}
+      transition={{ duration: reducedMotion ? 0 : .18, ease: "easeOut" }}
+      className={cn("omni-floating-window omni-pinned-card absolute left-0 top-0 flex flex-col overflow-hidden rounded-xl", dragging && "omni-floating-window-dragging")}
+      style={{ transform: inspector ? "none" : `translate3d(${position.x}px, ${position.y}px, 0)`, zIndex: item.stackOrder || 70 + index }}>
+      <div className="omni-lens-header flex shrink-0 items-center justify-between gap-2 border-b border-neutral-200 px-3 py-2.5">
+        <div data-pinned-drag-handle role={inspector ? undefined : "button"} tabIndex={inspector ? undefined : 0} aria-label={inspector ? undefined : "Move explanation with arrow keys"} className="flex min-w-0 flex-1 touch-none cursor-grab items-center gap-2"
+          onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={finishDrag}
+          onKeyDown={(event) => {
+            const direction = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+            if (!direction || inspector) return;
+            event.preventDefault(); const rect = windowRef.current.getBoundingClientRect();
+            savePosition(Math.max(12, position.x + direction[0] * (event.shiftKey ? 40 : 10)), Math.max(12, position.y + direction[1] * (event.shiftKey ? 40 : 10)), { width: rect.width, height: rect.height });
+          }}>
+          {!inspector && <GripHorizontal className="h-3.5 w-3.5 shrink-0 text-neutral-400" />}
+          <h3 data-lens-target-preview className="omni-lens-target-preview" aria-label={selectedMath}>
+            <MathRenderer math={selectedMath} displayMode={false} />
+          </h3>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <button
-            type="button"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => toggleWindowPin(item.id)}
-            className="rounded-lg p-1.5 text-slate-300/60 transition-colors hover:bg-white/[0.06] hover:text-teal-100"
-            aria-label="Unpin explanation"
-          >
-            <Pin className="h-3.5 w-3.5" />
+          <button type="button" onClick={() => inspector ? onInspectCollapse() : updateExplanationWindow(item.id, { collapsed: !collapsed })} aria-label={inspector ? "Collapse inspector" : collapsed ? "Expand explanation" : "Collapse explanation"} aria-expanded={!collapsed} aria-controls={`lens-body-${item.id}`} className="rounded-lg p-1.5 text-neutral-500 hover:bg-neutral-100">
+            {collapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
           </button>
-          <button
-            type="button"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => closeExplanationWindow(item.id)}
-            className="rounded-lg p-1.5 text-slate-300/60 transition-colors hover:bg-rose-400/10 hover:text-rose-100"
-            aria-label="Close explanation"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+          <button type="button" onClick={() => closeExplanationWindow(item.id)} aria-label="Unpin explanation" className="rounded-lg p-1.5 text-neutral-500 hover:bg-neutral-100"><Pin className="h-3.5 w-3.5" /></button>
+          <button type="button" onClick={() => closeExplanationWindow(item.id)} aria-label="Close explanation" className="rounded-lg p-1.5 text-neutral-500 hover:bg-rose-50"><X className="h-3.5 w-3.5" /></button>
         </div>
       </div>
-
-      <div className="border-b border-white/[0.055] px-3.5 py-2">
-        <div className="grid grid-cols-3 gap-1">
-          {DEPTHS.map((depth) => (
-            <button
-              key={depth.key}
-              type="button"
-              aria-pressed={item.depth === depth.key}
-              onClick={() => setWindowDepth(item.id, depth.key)}
-              className={cn(
-                "rounded-md px-1.5 py-1 text-center text-[10px] font-medium transition-all duration-200",
-                item.depth === depth.key
-                  ? "bg-teal-300/[0.11] text-teal-50 shadow-[0_0_14px_rgba(45,212,191,0.12)]"
-                  : "text-slate-400/70 hover:bg-white/[0.045] hover:text-slate-200"
-              )}
-            >
-              {depth.label}
-            </button>
-          ))}
+      <motion.div id={`lens-body-${item.id}`} className="omni-lens-body" initial={false}
+        animate={{ height: collapsed ? 0 : bodyHeight ?? "auto", opacity: collapsed ? 0 : 1 }} transition={{ duration: reducedMotion ? 0 : .2, ease: [.2, .8, .2, 1] }}
+        aria-hidden={collapsed || undefined} {...(collapsed ? { inert: "" } : {})}>
+        <div ref={bodyContentRef}>
+        <div className="flex items-center justify-between gap-2 px-3 pt-2">
+          <select value={presentationDepth(item.depth)} onChange={(event) => updateExplanationWindow(item.id, { depth: event.target.value })} aria-label="Response detail" className="omni-lens-depth">
+            <option value="concise">Concise</option><option value="standard">Standard</option><option value="detailed">Detailed</option>
+          </select>
+          <button type="button" aria-label="Ask follow-up" title="Ask about this mathematics" onClick={() => windowRef.current?.querySelector("input")?.focus()} className="rounded-lg p-1.5 text-neutral-500 hover:bg-neutral-100"><MessageCircle className="h-3.5 w-3.5" /></button>
         </div>
-      </div>
-
-      <div className="omni-scrollbar max-h-[330px] space-y-3 overflow-y-auto overflow-x-hidden px-3.5 py-3.5">
-        {item.display && (
-          <div className="omni-math-block border-l border-teal-300/25 py-1 pl-3 font-serif text-lg italic leading-8 text-teal-50 omni-scrollbar">
-            <InlineMath math={item.display} />
-          </div>
-        )}
-        {lazyState.loading && !lazyState.data ? (
-          <div className="flex items-center gap-2 text-sm leading-6 text-slate-200/72">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-teal-100/80" />
-            Loading explanation...
-          </div>
-        ) : lazyState.error ? (
-          <p className="rounded-lg border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs leading-5 text-rose-100/82">
-            {lazyState.error}
-          </p>
-        ) : (
-          <>
-            {lazyState.loading && lazyState.data && (
-              <div className="flex items-center gap-2 text-[11px] leading-5 text-teal-100/62">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Refreshing pinned explanation...
-              </div>
-            )}
-            <div className="omni-math-text text-sm leading-6 text-slate-200/82">
-              <MathText>{explanationText}</MathText>
-            </div>
-          </>
-        )}
-      </div>
-      <FollowupChat
-        item={item}
-        problem={problem}
-        getToken={getToken}
-        displayedExplanation={lazyState.data?.explanation || item.lastDisplayedExplanation || explanationText}
-      />
+        <div className="omni-lens-explanation omni-scrollbar px-3 py-3 text-sm leading-6 text-neutral-800">
+          {lazyState.loading && !item.lastDisplayedExplanation && !lazyState.data ? <div role="status" className="flex items-center gap-2"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading explanation…</div>
+            : <ConversationText>{explanationText}</ConversationText>}
+          {lazyState.error && <p role="alert" className="omni-conversation-error">{lazyState.error}</p>}
+          {!currentTarget && <p role="status" className="text-xs text-amber-700">The source solution changed. This conversation remains bound to its original object.</p>}
+        </div>
+        <ScopedConversation item={item} problem={problem} getToken={getToken} displayedExplanation={explanationText}
+          presentationDepth={presentationDepth(item.depth)} onConversationChange={persistConversation} disabled={!currentTarget} />
+        </div>
+      </motion.div>
     </motion.article>
   );
-}
+});
 
 export function ExplanationPopover() {
   const {
@@ -1475,8 +1150,10 @@ export function ExplanationPopover() {
   } = useHoverActions();
   const { getToken } = useAuthToken();
   const tooltipRef = useRef(null);
+  const tooltipPointerInsideRef = useRef(false);
   const tooltipDomInstanceRef = useRef({ lensId: null, identity: "" });
   if (hoverLens?.id && tooltipDomInstanceRef.current.lensId !== hoverLens.id) {
+    tooltipPointerInsideRef.current = false;
     tooltipDomInstanceSequence += 1;
     tooltipDomInstanceRef.current = {
       lensId: hoverLens.id,
@@ -1646,6 +1323,7 @@ export function ExplanationPopover() {
       width: window.visualViewport?.width || window.innerWidth,
       height: window.visualViewport?.height || window.innerHeight,
     };
+    if (tooltipPointerInsideRef.current) return;
     const padding = 12;
     const tooltipRect = tooltip.getBoundingClientRect();
     const size = {
@@ -1695,6 +1373,21 @@ export function ExplanationPopover() {
     });
     requestAnimationFrame(() => reconcileHoverOwnership("tooltip-resized-or-repositioned"));
   }, [hoverLens?.anchor, identity.semanticId, identity.targetId, lazyState.data?.explanation, reconcileHoverOwnership, reportHoverLifecycle]);
+
+  const handleTooltipPointerEnter = useCallback((event) => {
+    tooltipPointerInsideRef.current = true;
+    holdHoverLens(event);
+  }, [holdHoverLens]);
+
+  const handleTooltipPointerMove = useCallback((event) => {
+    tooltipPointerInsideRef.current = true;
+    holdHoverLens(event);
+  }, [holdHoverLens]);
+
+  const handleTooltipPointerLeave = useCallback((event) => {
+    tooltipPointerInsideRef.current = false;
+    releaseHoverLens(event);
+  }, [releaseHoverLens]);
 
   useLayoutEffect(() => {
     if (!hoverLens) return undefined;
@@ -1752,24 +1445,24 @@ export function ExplanationPopover() {
         top: initialPosition.y,
         maxHeight: maxTooltipHeight ? `${maxTooltipHeight}px` : "calc(100vh - 24px)",
       }}
-      onMouseEnter={holdHoverLens}
-      onMouseMove={holdHoverLens}
-      onMouseLeave={releaseHoverLens}
+      onMouseEnter={handleTooltipPointerEnter}
+      onMouseMove={handleTooltipPointerMove}
+      onMouseLeave={handleTooltipPointerLeave}
     >
-      <h3 className="mb-1 text-xs font-semibold text-cyan-50/95"><MathText>{displayTitle}</MathText></h3>
+      <h3 className="mb-1 text-xs font-semibold text-neutral-900"><MathText>{displayTitle}</MathText></h3>
       {lazyState.error ? (
-        <div className="text-xs leading-5 text-rose-100/82">
+        <div className="text-xs leading-5 text-rose-700">
           {lazyState.error}
         </div>
       ) : lazyState.loading && loadingMessage ? (
-        <div className="flex items-center gap-2 text-xs leading-5 text-slate-100/75">
-          <Loader2 className="h-3 w-3 animate-spin text-teal-100/80" />
+        <div className="flex items-center gap-2 text-xs leading-5 text-neutral-600">
+          <Loader2 className="h-3 w-3 animate-spin text-neutral-500" />
           {loadingMessage}
         </div>
       ) : (
         <div
           data-hover-provider-explanation={lazyState.data?.explanation ? "true" : undefined}
-          className="omni-math-text max-w-full overflow-x-hidden break-words text-xs leading-5 text-slate-100/80 omni-scrollbar"
+          className="omni-math-text max-w-full overflow-x-hidden break-words text-xs leading-5 text-neutral-700 omni-scrollbar"
         >
           <MathText>{lazyContent}</MathText>
         </div>
@@ -1780,21 +1473,92 @@ export function ExplanationPopover() {
 }
 
 export function PinnedLensLayer({ problem }) {
-  const { pinnedLenses } = useHoverSemanticState();
+  const { lenses: pinnedLenses, selectedLensId, inspectorOpen, selectLens, collapseInspector } = useLensWorkspace();
+  const { settings } = useSettings();
+  const presentation = settings.interaction.explanationWorkspace;
   const { getToken } = useAuthToken();
-
-  return (
-    <>
-      <AnimatePresence>
-        {pinnedLenses.map((item, index) => (
-          <FloatingWindow key={item.id} item={item} index={index} problem={problem} getToken={getToken} />
-        ))}
-      </AnimatePresence>
-      <AnimatePresence>
-        <ExplanationPopover />
-      </AnimatePresence>
-    </>
-  );
+  const [canvas, setCanvas] = useState(null);
+  const [cardSizes, setCardSizes] = useState({});
+  const [geometry, setGeometry] = useState({ width: 800, targetTops: {} });
+  const membership = pinnedLenses.map((item) => `${item.id}:${item.stepId}`).join("|");
+  const lensesRef = useRef(pinnedLenses);
+  lensesRef.current = pinnedLenses;
+  const handleMeasure = useCallback((id, size) => {
+    const next = { width: Math.round(size.width), height: Math.round(size.height) };
+    setCardSizes((current) => current[id]?.width === next.width && current[id]?.height === next.height ? current : { ...current, [id]: next });
+  }, []);
+  useLayoutEffect(() => { setCanvas(document.querySelector("[data-lens-canvas]")); }, []);
+  useLayoutEffect(() => {
+    if (!canvas) return undefined;
+    let frame = 0;
+    let previousWidth = -1;
+    let previousContentWidth = -1;
+    const content = canvas.firstElementChild;
+    const measure = () => {
+      const measurement = startOmniMeasure("lens.workspace-geometry");
+      frame = 0;
+      const rect = canvas.getBoundingClientRect();
+      const targetTops = {};
+      const steps = [...canvas.querySelectorAll("[data-step-id]")];
+      for (const item of lensesRef.current) {
+        const step = steps.find((node) => node.getAttribute("data-step-id") === item.stepId);
+        if (step) targetTops[item.id] = step.getBoundingClientRect().top - rect.top;
+      }
+      previousWidth = canvas.clientWidth;
+      previousContentWidth = content?.clientWidth ?? previousWidth;
+      setGeometry({ width: previousWidth, targetTops });
+      endOmniMeasure(measurement, { lenses: lensesRef.current.length });
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
+    const observer = new ResizeObserver(() => {
+      // A streamed note changing paper height does not invalidate unchanged math.
+      if (canvas.clientWidth !== previousWidth || (content?.clientWidth ?? canvas.clientWidth) !== previousContentWidth) schedule();
+    });
+    observer.observe(canvas);
+    if (content) observer.observe(content);
+    measure();
+    window.addEventListener("resize", schedule);
+    return () => { observer.disconnect(); window.removeEventListener("resize", schedule); cancelAnimationFrame(frame); };
+  }, [canvas, membership, problem.id, problem.steps]);
+  const spatialKey = pinnedLenses.map((item) => [item.id, item.collapsed, item.placementMode, item.x, item.y, item.xRatio, item.positionAnchor?.offsetY].join(":")).join("|");
+  const previousPositionsRef = useRef({});
+  const positions = useMemo(() => {
+    const measurement = startOmniMeasure("lens.position-reflow");
+    const resolved = resolveLensPositions(lensesRef.current, cardSizes, geometry.width, geometry.targetTops);
+    Object.keys(resolved).forEach((id) => {
+      resolved[id].targetTop = geometry.targetTops[id];
+      const previous = previousPositionsRef.current[id];
+      if (previous && Object.keys(resolved[id]).every((key) => previous[key] === resolved[id][key])) resolved[id] = previous;
+    });
+    previousPositionsRef.current = resolved;
+    endOmniMeasure(measurement, { lenses: lensesRef.current.length });
+    return resolved;
+  }, [spatialKey, cardSizes, geometry]);
+  useLayoutEffect(() => {
+    if (!canvas) return;
+    let timer;
+    const desired = presentation === "canvas"
+      ? Math.min(MAX_CANVAS_EXTENT, Math.max(0, ...Object.values(positions).map((point) => point.y + point.height + 32))) : 0;
+    const apply = () => {
+      const origin = canvas.getBoundingClientRect().top + window.scrollY;
+      const visibleFloor = Math.max(0, window.scrollY - origin + window.innerHeight);
+      const next = Math.min(MAX_CANVAS_EXTENT, Math.max(desired, visibleFloor));
+      canvas.style.setProperty("--omni-lens-extent", `${next}px`);
+      canvas.dataset.logicalCanvasExtent = String(Math.round(next));
+    };
+    const previous = Number.parseFloat(canvas.style.getPropertyValue("--omni-lens-extent")) || 0;
+    if (desired >= previous) apply();
+    else timer = window.setTimeout(apply, 240);
+    window.addEventListener("scroll", apply, { passive: true });
+    return () => { clearTimeout(timer); window.removeEventListener("scroll", apply); };
+  }, [canvas, positions, presentation]);
+  const notes = <div className={cn("omni-lens-layer", presentation === "inspector" && "omni-inspector-panel")} data-pinned-lens-layer data-explanation-workspace={presentation}>
+    <AnimatePresence>{pinnedLenses.map((item, index) => <FloatingWindow key={item.lensId || item.id} item={item} index={index} problem={problem} getToken={getToken}
+      canvas={canvas} position={positions[item.id] || { x: 12, y: 12 }} onMeasure={handleMeasure}
+      presentation={presentation} visible={presentation === "canvas" || (inspectorOpen && item.id === selectedLensId)} onInspectCollapse={collapseInspector} />)}</AnimatePresence>
+    {presentation === "inspector" && !inspectorOpen && selectedLensId && <button type="button" className="omni-inspector-reopen" aria-label="Open inspector" onClick={() => selectLens(selectedLensId)}><PanelRightOpen className="h-4 w-4" /></button>}
+  </div>;
+  return <>{canvas && createPortal(notes, canvas)}<AnimatePresence><ExplanationPopover /></AnimatePresence></>;
 }
 
 export default function ExplanationPanel({ problem }) {

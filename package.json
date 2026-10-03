@@ -24,6 +24,7 @@
   "dependencies": {
     "@clerk/backend": "^3.4.8",
     "@clerk/react": "^6.6.3",
+    "@vercel/functions": "^3.9.9",
     "clsx": "^2.1.1",
     "framer-motion": "^11.16.4",
     "html2canvas": "^1.4.1",

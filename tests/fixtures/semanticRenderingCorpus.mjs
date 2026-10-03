@@ -36,3 +36,32 @@ export const semanticRenderingCorpus = [
   ["optional-arrow", String.raw`\xrightarrow[n+1]{x^2}y`],
   ["long-scroll", Array.from({ length: 24 }, (_, i) => String.raw`\frac{x_{${i}}+\sqrt{x}}{1+x^2}`).join("+")],
 ].map(([name, latex]) => ({ name, latex }));
+
+export const mastersNotationCorpus = [
+  ["variational-calculus", String.raw`J'+J''+DJ+D^2J+\delta J+\delta^2J+u_*+u^*+\lambda_1+\lambda_{\min}`],
+  ["functional-analysis", String.raw`H_0^1+W^{1,p}+X^*+T^*+A^{-1}+\lVert u\rVert_{H^1}+\left\langle Au,v\right\rangle`],
+  ["pde", String.raw`\partial_\nu u+\Delta u+\nabla\cdot F+\nabla\times u+u_t+u_{tt}+D^\alpha u+(-\Delta)^s`],
+  ["linear-algebra-spectral", String.raw`\lambda_i(A)+\sigma(A)+A^T+A^*+A^{-1}+\ker A+\operatorname{im}A+\operatorname{tr}A+\det A`],
+  ["probability-statistics", String.raw`X_n+X^{(k)}+E[X]+\operatorname{Var}(X)+\hat\theta+\theta_0+\mu_i+\sigma^2`],
+  ["tensor-physics", String.raw`F^{-T}+C_{ij}+T^{\mu\nu}+\varepsilon_{ijk}+\partial_\mu+A_\mu^a`],
+  ["accents-derivatives", String.raw`\hat u+\bar u+\tilde u+\dot u+\ddot u+u'+u''+u'''+u^{(n)}+u_i'+u_*''+u_i^{*}`],
+  ["large-operators-bounds", String.raw`\inf_{v\in X}f(v)+\sup_{u\ne0}g(u)+\lim_{n\to\infty}a_n+\sum_{i=1}^n x_i+\prod_{k=1}^m y_k+\int_0^1\frac{u_*''}{1+u^2}\,du`],
+  ["production-decorated-context", String.raw`\lambda_1(L_*)=\inf_{v\in X,\,v\ne0}\frac{J''[u_*](v,v)}{\lVert v\rVert^2}`],
+].map(([name, latex]) => ({ name, latex }));
+
+const GENERATED_BASES = ["x", "u", "v", "J", "L", "A", "T", "F", "\\lambda", "\\beta", "\\mu", "\\phi", "\\psi", "\\theta", "\\xi", "\\alpha"];
+const GENERATED_DECORATIONS = ["_1", "_2", "_i", "_j", "_*", "_{ij}", "_{\\min}", "_{\\max}", "^2", "^*", "^{-1}", "^T", "^{(k)}", "'", "''", "'''"];
+const GENERATED_ACCENTS = ["hat", "bar", "tilde", "dot", "ddot"];
+
+// Deterministic valid compositions. The pairwise cases deliberately exercise
+// the script-then-prime boundary that previously split a single atom.
+export const generatedDecoratedNotationCorpus = [
+  ...GENERATED_BASES.flatMap((base) => GENERATED_DECORATIONS.map((decoration) => `${base}${decoration}`)),
+  ...GENERATED_BASES.flatMap((base) => GENERATED_ACCENTS.map((accent) => `\\${accent}{${base}}`)),
+  String.raw`\beta_1`, String.raw`\lambda_*`, String.raw`\mu_i'`, String.raw`\psi_*''`,
+  String.raw`J_i''`, String.raw`L_*'`, String.raw`A_i^{-1}`, String.raw`A_*^T`,
+  String.raw`T_\mu^{*}`, String.raw`u_*''`, String.raw`\phi_{ij}^{-1}`,
+  String.raw`\hat{u}_i`, String.raw`\bar{\psi}^{*}`, String.raw`\tilde{\phi}_k`,
+  String.raw`\dot{u}_i`, String.raw`\ddot{u}_*`,
+].filter((latex, index, all) => all.indexOf(latex) === index)
+  .map((latex, index) => ({ name: `generated-decorated-${index + 1}`, latex }));

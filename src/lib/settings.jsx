@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { presentationDepth } from "./lensWorkspace.js";
+import React, { createContext, useContext, useEffect, useLayoutEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "omnimath.settings.v1";
 
@@ -12,12 +13,13 @@ const ACCENTS = {
 
 export const DEFAULT_SETTINGS = {
   appearance: {
-    theme: "midnight",
+    theme: "dark",
     accentColor: "teal",
     fontSize: 100,
     equationScale: 100,
   },
   interaction: {
+    explanationWorkspace: "canvas",
     hoverLens: true,
     hoverDelay: 125,
     lensDragSmoothness: "balanced",
@@ -25,14 +27,12 @@ export const DEFAULT_SETTINGS = {
     debugSemanticHitboxes: false,
   },
   learning: {
-    explanationDepth: "intermediate",
-    defaultLensLevel: "intermediate",
-    socraticMode: false,
+    explanationDepth: "standard",
+    defaultLensLevel: "standard",
   },
   mathRendering: {
     animateEquationTransitions: true,
     equationDensity: "comfortable",
-    coordinateVisuals: true,
   },
   productivity: {
     autosave: true,
@@ -41,10 +41,16 @@ export const DEFAULT_SETTINGS = {
 };
 
 function mergeSettings(value) {
+  const storedTheme = value?.appearance?.theme;
+  const theme = storedTheme === "dark" || storedTheme === "light"
+    ? storedTheme
+    : storedTheme
+      ? "light"
+      : DEFAULT_SETTINGS.appearance.theme;
   return {
-    appearance: { ...DEFAULT_SETTINGS.appearance, ...value?.appearance },
-    interaction: { ...DEFAULT_SETTINGS.interaction, ...value?.interaction },
-    learning: { ...DEFAULT_SETTINGS.learning, ...value?.learning },
+    appearance: { ...DEFAULT_SETTINGS.appearance, ...value?.appearance, theme },
+    interaction: { ...DEFAULT_SETTINGS.interaction, ...value?.interaction, explanationWorkspace: value?.interaction?.explanationWorkspace === "inspector" ? "inspector" : "canvas", lensDragSmoothness: value?.interaction?.lensDragSmoothness === "precise" ? "precise" : "balanced" },
+    learning: { explanationDepth: presentationDepth(value?.learning?.explanationDepth), defaultLensLevel: presentationDepth(value?.learning?.defaultLensLevel) },
     mathRendering: { ...DEFAULT_SETTINGS.mathRendering, ...value?.mathRendering },
     productivity: { ...DEFAULT_SETTINGS.productivity, ...value?.productivity },
   };
@@ -70,7 +76,7 @@ export function SettingsProvider({ children }) {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   }, [settings]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.documentElement;
     root.dataset.omniTheme = settings.appearance.theme;
     root.dataset.omniAccent = settings.appearance.accentColor;

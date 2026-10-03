@@ -1,10 +1,19 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, CheckCircle2, FileText, ImagePlus, Loader2, Pencil, RotateCcw, Sparkles, X, XCircle } from "lucide-react";
-import { buildExtractionSubmissionPayload, extractImageProblem, solveExtractedProblem } from "@/api/mathClient";
+import { buildExtractionSubmissionPayload, extractImageProblem, normalizeOcrTextForSubmission, solveExtractedProblem } from "@/api/mathClient";
 import { useAuthToken } from "@/lib/auth";
 import { canonicalProblemFromExtraction, logCanonicalProblem } from "@/lib/canonicalProblem";
 import { logSessionOperation } from "@/lib/sessionOperations";
+import { progressiveIdentityForOperation, providerStreamingEnabled } from "@/lib/progressiveProviderMode";
+import {
+  IMAGE_INGESTION_STATES,
+  assertImageIngestionTransition,
+  createImageLifecycleId,
+  createImageUploadIdentity,
+  createReviewRevisionId,
+  imageSolveFailureMessage,
+} from "@/lib/imageIngestionLifecycle";
 import { cn } from "@/lib/utils";
 import {
   analyzeImageQuality,
@@ -14,17 +23,25 @@ import {
 
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
+function withImageInstructions(history, instructions) {
+  const instruction = String(instructions || "").trim();
+  return [
+    ...(Array.isArray(history) ? history : []),
+    ...(instruction ? [{ role: "user", text: instruction }] : []),
+  ];
+}
+
 function getScoreTone(score) {
-  if (score >= 85) return "text-emerald-100";
-  if (score >= 70) return "text-teal-100";
-  if (score >= 50) return "text-amber-100";
-  return "text-rose-100";
+  if (score >= 85) return "text-emerald-700";
+  if (score >= 70) return "text-neutral-700";
+  if (score >= 50) return "text-amber-700";
+  return "text-rose-700";
 }
 
 function QualityIcon({ status }) {
-  if (status === "pass") return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-200/85" />;
-  if (status === "warn") return <AlertTriangle className="h-3.5 w-3.5 text-amber-200/85" />;
-  return <XCircle className="h-3.5 w-3.5 text-rose-200/85" />;
+  if (status === "pass") return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />;
+  if (status === "warn") return <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />;
+  return <XCircle className="h-3.5 w-3.5 text-rose-600" />;
 }
 
 function QualityChecklist({ quality }) {
@@ -38,16 +55,16 @@ function QualityChecklist({ quality }) {
           className={cn(
             "flex items-start gap-2 rounded-lg border px-2.5 py-1.5",
             check.status === "fail"
-              ? "border-rose-300/[0.16] bg-rose-400/[0.055]"
+              ? "border-rose-200 bg-rose-50"
               : check.status === "warn"
-                ? "border-amber-300/[0.16] bg-amber-300/[0.055]"
-                : "border-teal-300/[0.14] bg-teal-300/[0.045]"
+                ? "border-amber-200 bg-amber-50"
+                : "border-emerald-200 bg-emerald-50"
           )}
         >
           <QualityIcon status={check.status} />
           <div className="min-w-0">
-            <p className="text-xs font-medium text-slate-100/85">{check.label}</p>
-            <p className="text-[11px] leading-4 text-slate-300/58">{check.detail}</p>
+            <p className="text-xs font-medium text-neutral-900">{check.label}</p>
+            <p className="text-[11px] leading-4 text-neutral-500">{check.detail}</p>
           </div>
         </div>
       ))}
@@ -72,11 +89,11 @@ function QualityDiagnostics({ quality }) {
   return (
     <div className="grid grid-cols-2 gap-1.5">
       {metrics.map((metric) => (
-        <div key={metric.label} className="rounded-lg border border-white/[0.08] bg-white/[0.035] px-2.5 py-1.5">
-          <p className="font-mono text-[9px] font-medium uppercase tracking-[0.12em] text-slate-300/50">
+        <div key={metric.label} className="rounded-lg bg-neutral-50 px-2.5 py-1.5">
+          <p className="font-mono text-[9px] font-medium uppercase tracking-[0.12em] text-neutral-500">
             {metric.label}
           </p>
-          <p className="mt-1 text-xs font-semibold text-slate-100/82">{metric.value}</p>
+          <p className="mt-1 text-xs font-semibold text-neutral-800">{metric.value}</p>
         </div>
       ))}
     </div>
@@ -100,50 +117,51 @@ function ExtractionReviewPanel({
   const integrity = Number(extraction.mathIntegrityScore ?? extraction.extractionValidation?.mathIntegrityScore ?? extraction.confidence ?? extraction.extractionValidation?.confidence ?? 0);
   const ocrConfidence = Number(extraction.ocrConfidence ?? extraction.extractionValidation?.ocrConfidence ?? extraction.extractionValidation?.metrics?.ocrConfidence ?? 0);
   const isLow = tier === "low";
-  const isMedium = tier === "medium";
   const canContinue = !solving && Boolean(editedText.trim());
   const primaryLabel = solveError ? "Retry solve" : "Continue with reviewed text";
-  const statusText = isLow
-    ? "Review the extracted text, then continue when it looks correct."
-    : isMedium
-      ? "Review highlighted parts before solving"
-      : "Extraction looks good";
+  const reviewRequired = extraction.ingestion?.state === IMAGE_INGESTION_STATES.REVIEW_REQUIRED
+    || extraction.ocrSolveDecision?.reviewRequired === true
+    || editedText.trim() !== String(extraction.extractedProblemText || "").trim();
+  const statusText = reviewRequired
+    ? "Review required. Confirm or correct the extracted text before solving."
+    : "Ready to solve from the extracted text.";
 
   return (
     <div className="grid gap-3">
       <div className={cn(
         "rounded-xl border px-3 py-2.5",
-        isLow ? "border-amber-300/24 bg-amber-300/[0.07]" : "border-teal-300/[0.18] bg-teal-300/[0.055]"
+        isLow ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50"
       )}>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-100/80">
+          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-neutral-600">
             Image extraction
           </p>
           <div className="flex flex-wrap gap-1.5">
             {ocrConfidence > 0 && (
-              <span className="rounded-full border border-white/[0.09] bg-white/[0.045] px-2 py-0.5 font-mono text-[10px] text-slate-200/70">
+              <span className="rounded-full bg-neutral-200/70 px-2 py-0.5 font-mono text-[10px] text-neutral-600">
                 OCR {ocrConfidence}%
               </span>
             )}
-            <span className="rounded-full border border-white/[0.09] bg-white/[0.045] px-2 py-0.5 font-mono text-[10px] text-slate-200/70">
+            <span className="rounded-full bg-neutral-200/70 px-2 py-0.5 font-mono text-[10px] text-neutral-600">
               Math {integrity}% · {tier}
             </span>
           </div>
         </div>
-        <p className="mt-1.5 text-xs leading-4 text-slate-200/72">
+        <p className="mt-1.5 text-xs leading-4 text-neutral-600">
           {statusText}
         </p>
       </div>
 
       <label className="grid gap-1.5">
-        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+        <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-neutral-500">
           Extracted problem
         </span>
         <textarea
           value={editedText}
           onChange={(event) => onTextChange(event.target.value)}
+          disabled={solving}
           rows={8}
-          className="omni-text-wrap-safe min-h-40 resize-y whitespace-pre-wrap rounded-xl border border-teal-300/[0.16] bg-teal-300/[0.045] px-3 py-2 text-sm leading-6 text-slate-100 outline-none transition-colors focus:border-teal-200/35"
+          className="omni-text-wrap-safe min-h-40 resize-y whitespace-pre-wrap rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm leading-6 text-neutral-900 outline-none transition-colors focus:border-neutral-400"
           spellCheck={false}
         />
       </label>
@@ -156,8 +174,8 @@ function ExtractionReviewPanel({
               className={cn(
                 "rounded-full border px-2 py-1 text-[11px] leading-4",
                 issue.severity === "high"
-                  ? "border-rose-300/22 bg-rose-400/10 text-rose-50/86"
-                  : "border-amber-300/22 bg-amber-300/10 text-amber-50/86"
+                  ? "border-rose-200 bg-rose-50 text-rose-700"
+                  : "border-amber-200 bg-amber-50 text-amber-800"
               )}
               title={issue.message || "Review this extraction."}
             >
@@ -168,30 +186,30 @@ function ExtractionReviewPanel({
       )}
 
       {solveError && (
-        <div className="rounded-lg border border-amber-300/[0.16] bg-amber-300/[0.06] px-2.5 py-1.5 text-xs leading-4 text-amber-50/82">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs leading-4 text-amber-800">
           {solveError}
         </div>
       )}
 
-      <details className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2">
-        <summary className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-200/75">
-          <FileText className="h-3.5 w-3.5 text-teal-100/70" />
+      <details className="rounded-xl bg-neutral-50 px-3 py-2">
+        <summary className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-neutral-700">
+          <FileText className="h-3.5 w-3.5 text-neutral-500" />
           OCR Details
         </summary>
         <div className="mt-2 grid gap-2">
-          <div className="rounded-lg border border-white/[0.08] bg-black/20 p-2">
-            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-300/55">
+          <div className="rounded-lg bg-white p-2">
+            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-neutral-500">
               Raw extracted LaTeX
             </p>
-            <pre className="omni-text-wrap-safe mt-1 max-h-24 overflow-auto whitespace-pre-wrap text-xs leading-5 text-cyan-50/82 omni-scrollbar">
+            <pre className="omni-text-wrap-safe mt-1 max-h-24 overflow-auto whitespace-pre-wrap text-xs leading-5 text-neutral-800 omni-scrollbar">
               {extraction.extractedProblemLatex || ""}
             </pre>
           </div>
           {issues.length > 0 && (
-            <ul className="grid gap-1 text-xs leading-4 text-amber-50/82">
+            <ul className="grid gap-1 text-xs leading-4 text-amber-800">
               {issues.map((issue, index) => (
                 <li key={`${issue.type || "issue-detail"}-${index}`} className="flex gap-2">
-                  <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-amber-200/75" />
+                  <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-amber-500" />
                   <span>{issue.message || "Review this extraction."}</span>
                 </li>
               ))}
@@ -200,12 +218,12 @@ function ExtractionReviewPanel({
         </div>
       </details>
 
-      <div className="sticky bottom-0 z-20 grid gap-2 border-t border-white/[0.07] bg-[#061116]/95 pt-2 sm:grid-cols-2">
+      <div className="sticky bottom-0 z-20 grid gap-2 border-t border-neutral-200 bg-white/95 pt-2 sm:grid-cols-2">
         <button
           type="button"
           disabled={!canContinue}
           onClick={() => onSolve()}
-          className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+          className="omni-button flex min-h-10 items-center justify-center gap-2 rounded-xl border-neutral-900 bg-neutral-900 px-3 text-sm font-semibold text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-45"
         >
           {solving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
           {solving ? "Solving..." : primaryLabel}
@@ -214,7 +232,7 @@ function ExtractionReviewPanel({
           type="button"
           disabled={solving}
           onClick={isLow ? onCancel : () => setEditing(true)}
-          className="flex min-h-10 items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 text-sm font-semibold text-slate-200/78 transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-45"
+          className="flex min-h-10 items-center justify-center gap-2 rounded-xl border border-neutral-200 bg-white px-3 text-sm font-semibold text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-45"
         >
           {isLow ? <RotateCcw className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
           {isLow ? "Re-upload Image" : "Edit Extraction"}
@@ -242,19 +260,19 @@ function QualityPanel({
   const canSubmit = quality?.passes && !analyzing && !submitting && !extraction;
 
   return createPortal(
-    <div data-testid="image-review-panel" className="omni-panel fixed right-3 top-20 z-[95] flex max-h-[calc(100dvh-6rem)] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl p-2.5 shadow-[0_22px_60px_rgba(0,0,0,0.35)]">
+    <div data-testid="image-review-panel" className="omni-panel fixed right-3 top-20 z-[95] flex max-h-[calc(100dvh-6rem)] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl p-2.5 shadow-lg">
       <div className="min-h-0 flex-1 overflow-y-auto pr-1 omni-scrollbar">
         <div className="flex items-start gap-2.5">
           <img src={preview} alt="Uploaded problem preview" className="h-20 w-20 rounded-lg object-cover" />
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-2">
-              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-teal-200/70">
+              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-neutral-500">
                 Image quality
               </p>
               <button
                 type="button"
                 onClick={() => onCancel()}
-                className="rounded-lg p-1 text-slate-300/60 transition-colors hover:bg-white/[0.06] hover:text-slate-100"
+                className="rounded-lg p-1 text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-900"
                 aria-label="Clear selected image"
               >
                 <X className="h-4 w-4" />
@@ -262,7 +280,7 @@ function QualityPanel({
             </div>
 
             {analyzing ? (
-              <div className="mt-2 flex items-center gap-2 text-xs font-medium text-teal-100/80">
+              <div className="mt-2 flex items-center gap-2 text-xs font-medium text-neutral-600">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 Checking image...
               </div>
@@ -272,12 +290,12 @@ function QualityPanel({
                   <span className={cn("text-2xl font-semibold", getScoreTone(quality.score))}>
                     {quality.score}
                   </span>
-                  <span className="pb-1 font-mono text-[10px] uppercase tracking-[0.12em] text-slate-300/55">
+                  <span className="pb-1 font-mono text-[10px] uppercase tracking-[0.12em] text-neutral-500">
                     /100
                   </span>
                 </div>
-                <p className="text-sm font-medium text-slate-100/85">{quality.label}</p>
-                <p className="mt-0.5 text-xs leading-4 text-slate-300/58">
+                <p className="text-sm font-medium text-neutral-900">{quality.label}</p>
+                <p className="mt-0.5 text-xs leading-4 text-neutral-500">
                   {!quality.passes
                     ? "Strict readability check needs a better image."
                     : quality.score < quality.warningThreshold
@@ -310,14 +328,14 @@ function QualityPanel({
             <div className={cn(
               "rounded-lg border p-2.5",
               quality.passes
-                ? "border-teal-300/[0.14] bg-teal-300/[0.045]"
-                : "border-amber-300/[0.16] bg-amber-300/[0.06]"
+                ? "border-emerald-200 bg-emerald-50"
+                : "border-amber-200 bg-amber-50"
             )}
             >
-              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-slate-200/65">
+              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-neutral-600">
                 Hints
               </p>
-              <ul className="mt-1.5 space-y-1 text-xs leading-4 text-slate-200/72">
+              <ul className="mt-1.5 space-y-1 text-xs leading-4 text-neutral-600">
                 {quality.hints.map((hint) => (
                   <li key={hint}>{hint}</li>
                 ))}
@@ -326,13 +344,13 @@ function QualityPanel({
           )}
 
           {quality?.warning && (
-            <div className="rounded-lg border border-amber-300/[0.16] bg-amber-300/[0.06] px-2.5 py-1.5 text-xs leading-4 text-amber-50/82">
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs leading-4 text-amber-800">
               Math is small in frame. AI can still attempt to solve it.
             </div>
           )}
 
           {quality && !quality.passes && (
-            <div className="rounded-lg border border-rose-300/[0.16] bg-rose-400/[0.055] px-2.5 py-1.5 text-xs leading-4 text-rose-100/82">
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs leading-4 text-rose-700">
               {quality.strictIssues?.[0] || "This image looks unreadable. Try a sharper, upright, higher-resolution image."}
             </div>
           )}
@@ -342,7 +360,7 @@ function QualityPanel({
       </div>
 
       {!extraction && (
-      <div className="sticky bottom-0 z-10 mt-2 border-t border-white/[0.07] bg-[#061116]/95 pt-2">
+      <div className="sticky bottom-0 z-10 mt-2 border-t border-neutral-200 bg-white/95 pt-2">
         <button
           type="button"
           disabled={!canSubmit}
@@ -369,9 +387,13 @@ export default function ImageUpload({
   onProblemGenerated,
   onGenerationStart,
   onGenerationError,
+  onGenerationCancelled,
+  onProgressiveEvent,
   onExtractionReview,
   onUsageUpdate,
   onReviewedProblemSubmitted,
+  onWorkspaceStateChange,
+  instructions = "",
 }) {
   const emptyWorkflow = {
     preview: null,
@@ -385,10 +407,17 @@ export default function ImageUpload({
     operationContext: null,
     abortController: null,
     solveHistory: [],
+    lifecycleState: "",
+    ingestion: null,
+    reviewRevision: 0,
+    reviewRevisionId: "",
   };
   const [workflowBySession, setWorkflowBySession] = useState({});
   const workflowBySessionRef = useRef(workflowBySession);
   const fileRef = useRef(null);
+  const scopeInstanceRef = useRef("");
+  const uploadRevisionBySessionRef = useRef(new Map());
+  if (!scopeInstanceRef.current) scopeInstanceRef.current = createImageLifecycleId("image-scope");
   const { getToken } = useAuthToken();
   const workflow = workflowBySession[activeSessionId] || emptyWorkflow;
   const {
@@ -404,6 +433,14 @@ export default function ImageUpload({
   useEffect(() => {
     workflowBySessionRef.current = workflowBySession;
   }, [workflowBySession]);
+
+  useEffect(() => {
+    onWorkspaceStateChange?.({
+      sessionId: activeSessionId,
+      active: Boolean(preview),
+      lifecycleState: workflow.lifecycleState || "",
+    });
+  }, [activeSessionId, onWorkspaceStateChange, preview, workflow.lifecycleState]);
 
   useEffect(() => () => {
     Object.values(workflowBySessionRef.current).forEach((item) => {
@@ -429,14 +466,33 @@ export default function ImageUpload({
     });
   };
 
+  const updateLifecycle = (sessionId, lifecycleState, patch = {}) => {
+    updateWorkflow(sessionId, (current) => ({
+      ...patch,
+      lifecycleState: assertImageIngestionTransition(current.lifecycleState || "", lifecycleState),
+    }));
+  };
+
   const resetSelection = (sessionId = activeSessionId) => {
     const current = workflowBySessionRef.current[sessionId];
+    if (current?.submitting && current?.abortController) onGenerationCancelled?.(current.operationContext);
     current?.abortController?.abort();
     if (current?.preview) URL.revokeObjectURL(current.preview);
     updateWorkflow(sessionId, {
       ...emptyWorkflow,
     });
     if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const isCurrentIngestion = (sessionId, ingestion) => {
+    const current = workflowBySessionRef.current[sessionId]?.ingestion;
+    return Boolean(
+      ingestion?.ingestionRequestId
+      && current?.ingestionRequestId === ingestion.ingestionRequestId
+      && current?.uploadId === ingestion.uploadId
+      && current?.ingestionScopeId === ingestion.ingestionScopeId
+      && current?.uploadRevision === ingestion.uploadRevision
+    );
   };
 
   const isCurrentOperation = (sessionId, operationContext) => {
@@ -479,16 +535,23 @@ export default function ImageUpload({
     }
 
     const localUrl = URL.createObjectURL(file);
-    updateWorkflow(originSessionId, {
+    const uploadRevision = (uploadRevisionBySessionRef.current.get(originSessionId) || 0) + 1;
+    uploadRevisionBySessionRef.current.set(originSessionId, uploadRevision);
+    const ingestion = createImageUploadIdentity({
+      ingestionScopeId: `${scopeInstanceRef.current}:${originSessionId || "session"}`,
+      uploadRevision,
+    });
+    updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.CHECKING, {
       preview: localUrl,
       selectedFile: file,
       analyzing: true,
+      ingestion,
     });
 
     try {
       const result = await analyzeImageQuality(file);
-      if (workflowBySessionRef.current[originSessionId]?.selectedFile !== file) return;
-      updateWorkflow(originSessionId, {
+      if (workflowBySessionRef.current[originSessionId]?.selectedFile !== file || !isCurrentIngestion(originSessionId, ingestion)) return;
+      updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.READY_TO_EXTRACT, {
         quality: result,
       });
     } catch (error) {
@@ -497,7 +560,7 @@ export default function ImageUpload({
         resetSelection(originSessionId);
       }
     } finally {
-      if (workflowBySessionRef.current[originSessionId]?.selectedFile !== file) return;
+      if (workflowBySessionRef.current[originSessionId]?.selectedFile !== file || !isCurrentIngestion(originSessionId, ingestion)) return;
       updateWorkflow(originSessionId, {
         analyzing: false,
       });
@@ -509,12 +572,21 @@ export default function ImageUpload({
     const workflowSnapshot = workflowBySessionRef.current[originSessionId] || emptyWorkflow;
     const originFile = workflowSnapshot.selectedFile;
     const originQuality = workflowSnapshot.quality;
-    if (!originFile || !originQuality || workflowSnapshot.submitting) return;
+    let originIngestion = workflowSnapshot.ingestion;
+    if (!originFile || !originQuality || !originIngestion || workflowSnapshot.submitting) return;
 
     // Cost-control guard: failed client-side quality checks return here, before
     // Image extraction is the first network stage; solving begins only after it
     // has produced reviewed canonical problem text.
     if (!canSubmitImageForAi(originQuality)) return;
+
+    // A deliberate new Analyze action after a terminal failure is a new
+    // logical request. HTTP duplicates of the previous action still replay it.
+    if (workflowSnapshot.lifecycleState === IMAGE_INGESTION_STATES.EXTRACTION_FAILED) {
+      const uploadRevision = (uploadRevisionBySessionRef.current.get(originSessionId) || originIngestion.uploadRevision) + 1;
+      uploadRevisionBySessionRef.current.set(originSessionId, uploadRevision);
+      originIngestion = createImageUploadIdentity({ ingestionScopeId: originIngestion.ingestionScopeId, uploadRevision });
+    }
 
     const imageHash = getImageHash(originFile, originQuality);
     const operationContext = onCreateOperation?.({
@@ -525,12 +597,13 @@ export default function ImageUpload({
     }) || onGenerationStart?.({ source: "image", requestSessionId: originSessionId, imageHash });
     const abortController = new AbortController();
     const solveHistory = Array.isArray(history) ? history : [];
-    updateWorkflow(originSessionId, {
+    updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.EXTRACTING, {
       submitting: true,
       solveError: "",
       operationContext,
       abortController,
       solveHistory,
+      ingestion: originIngestion,
     });
     onGenerationStart?.({ source: "image", requestSessionId: originSessionId, imageHash, operationContext });
     logSessionOperation("extraction-started", {
@@ -549,9 +622,10 @@ export default function ImageUpload({
         getToken,
         quality: originQuality,
         signal: abortController.signal,
+        ingestion: originIngestion,
       });
 
-      if (!isCurrentOperation(originSessionId, operationContext)) {
+      if (!isCurrentOperation(originSessionId, operationContext) || !isCurrentIngestion(originSessionId, originIngestion)) {
         logSessionOperation("operation-result-discarded", {
           operationContext,
           originSessionId,
@@ -565,28 +639,40 @@ export default function ImageUpload({
 
       onUsageUpdate?.(result.usage);
       extractionSucceeded = true;
-      const directSolveAllowed = result.ocrSolveDecision?.allowed === true;
+      const authoritativeExtractionState = result.ingestion?.state;
+      const directSolveAllowed = authoritativeExtractionState
+        ? authoritativeExtractionState === IMAGE_INGESTION_STATES.READY
+        : result.ocrSolveDecision?.allowed === true;
+      const initialReviewedText = normalizeOcrTextForSubmission(result.extractedProblemText || result.rawExtractedText || "");
       const canonicalProblem = canonicalProblemFromExtraction({
         extraction: result,
-        canonicalText: result.extractedProblemText || result.rawExtractedText || "",
+        canonicalText: initialReviewedText,
         source: directSolveAllowed ? "ocr-direct" : "ocr-reviewed",
       });
+      const extractionId = result.ingestion?.extractionId || result.extractionId || "";
+      const reviewRevisionId = createReviewRevisionId(extractionId, 0);
       logCanonicalProblem("OCR extraction", canonicalProblem, { path: "ImageUpload.handleSubmit" });
-      updateWorkflow(originSessionId, {
+      updateLifecycle(originSessionId, directSolveAllowed
+        ? IMAGE_INGESTION_STATES.READY
+        : IMAGE_INGESTION_STATES.REVIEW_REQUIRED, {
         extraction: { ...result, canonicalProblem, _operationContext: operationContext },
-        editedText: result.extractedProblemText || result.rawExtractedText || "",
+        editedText: initialReviewedText,
+        reviewRevision: 0,
+        reviewRevisionId,
       });
 
       if (directSolveAllowed) {
         const payload = buildExtractionSubmissionPayload({
           extraction: { ...result, canonicalProblem },
-          displayText: result.extractedProblemText || result.rawExtractedText || "",
+          displayText: initialReviewedText,
           rawText: result.rawExtractedText || result.rawOcrText || result.extractedProblemText || "",
           solveDecision: "direct",
           source: "ocr-direct",
+          reviewRevision: 0,
+          reviewRevisionId,
         });
         const requestSessionId = onReviewedProblemSubmitted?.(payload, operationContext);
-        if (!requestSessionId || !isCurrentOperation(originSessionId, operationContext)) {
+        if (!requestSessionId || !isCurrentOperation(originSessionId, operationContext) || !isCurrentIngestion(originSessionId, originIngestion)) {
           logSessionOperation("operation-result-discarded", {
             operationContext,
             originSessionId,
@@ -605,13 +691,21 @@ export default function ImageUpload({
           problemHash: canonicalProblem.hash,
           reason: "ocr-direct",
         });
+        updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.SOLVING);
         const solved = await solveExtractedProblem({
           ...payload,
-          history: solveHistory,
+          history: withImageInstructions(solveHistory, instructions),
           getToken,
           signal: abortController.signal,
+          progressive: providerStreamingEnabled() ? {
+            identity: progressiveIdentityForOperation(operationContext, requestSessionId),
+            onEvent: (event) => {
+              const decision = onProgressiveEvent?.(event);
+              if (!decision?.accepted) throw new Error(`Progressive solve event rejected: ${decision?.reason || "missing owner"}`);
+            },
+          } : null,
         });
-        if (!isCurrentOperation(originSessionId, operationContext)) {
+        if (!isCurrentOperation(originSessionId, operationContext) || !isCurrentIngestion(originSessionId, originIngestion)) {
           logSessionOperation("operation-result-discarded", {
             operationContext,
             originSessionId,
@@ -631,7 +725,14 @@ export default function ImageUpload({
           problemHash: canonicalProblem.hash,
           reason: "ocr-direct",
         });
-        onProblemGenerated({ ...solved, _requestSessionId: requestSessionId, _operationContext: operationContext }, operationContext);
+        if (solved.progressiveStream && solved.status !== "solve_completed") {
+          updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.SOLVE_FAILED, {
+            submitting: false,
+            solveError: "Generation stopped after completed steps. Retry from the reviewed text.",
+          });
+          return;
+        }
+        if (!solved.progressiveStream) onProblemGenerated({ ...solved, _requestSessionId: requestSessionId, _operationContext: operationContext }, operationContext);
         resetSelection(originSessionId);
         return;
       }
@@ -643,7 +744,7 @@ export default function ImageUpload({
     } catch (error) {
       if (error?.name === "AbortError") return;
       console.error("Image problem generation failed:", error);
-      if (!isCurrentOperation(originSessionId, operationContext)) {
+      if (!isCurrentOperation(originSessionId, operationContext) || !isCurrentIngestion(originSessionId, originIngestion)) {
         logSessionOperation("operation-error-discarded", {
           operationContext,
           originSessionId,
@@ -664,12 +765,10 @@ export default function ImageUpload({
         retryable: error.body?.retryable,
         operationContext,
       });
-      if (extractionSucceeded && error.body?.code === "AI_SERVICE_UNAVAILABLE") {
-        updateWorkflow(originSessionId, { solveError: "AI service timed out or connection dropped. Try again." });
-      } else if (extractionSucceeded && error.body?.code === "AI_SOLUTION_QUALITY_INVALID") {
-        updateWorkflow(originSessionId, { solveError: "The generated solution failed mathematical validation. Retry from the reviewed text." });
-      }
-      updateWorkflow(originSessionId, {
+      if (extractionSucceeded) updateWorkflow(originSessionId, { solveError: imageSolveFailureMessage(error) });
+      updateLifecycle(originSessionId, extractionSucceeded
+        ? IMAGE_INGESTION_STATES.SOLVE_FAILED
+        : IMAGE_INGESTION_STATES.EXTRACTION_FAILED, {
         submitting: false,
       });
     }
@@ -679,17 +778,35 @@ export default function ImageUpload({
     const originSessionId = activeSessionId;
     const workflowSnapshot = workflowBySessionRef.current[originSessionId] || emptyWorkflow;
     const originExtraction = workflowSnapshot.extraction;
+    const originIngestion = workflowSnapshot.ingestion;
     const originEditedText = workflowSnapshot.editedText;
-    const operationContext = workflowSnapshot.operationContext || originExtraction?._operationContext;
-    if (workflowSnapshot.submitting || !originExtraction || !originEditedText.trim()) return;
-    if (!isCurrentOperation(originSessionId, operationContext)) return;
-    updateWorkflow(originSessionId, {
+    const reviewRevision = workflowSnapshot.reviewRevision || 0;
+    const reviewRevisionId = workflowSnapshot.reviewRevisionId || createReviewRevisionId(
+      originExtraction?.ingestion?.extractionId || originExtraction?.extractionId || "",
+      reviewRevision,
+    );
+    const previousOperation = workflowSnapshot.operationContext || originExtraction?._operationContext;
+    if (workflowSnapshot.submitting || !originExtraction || !originIngestion || !originEditedText.trim()) return;
+    if (!isCurrentOperation(originSessionId, previousOperation)) return;
+    if (!isCurrentIngestion(originSessionId, originIngestion)) return;
+    const operationContext = workflowSnapshot.solveError
+      ? onCreateOperation?.({ originSessionId, workflowType: "image-ocr-solve", source: "image",
+        problemHash: originExtraction.canonicalProblem?.hash || "" }) || previousOperation
+      : previousOperation;
+    const abortController = new AbortController();
+    // Retry identity must be visible to the existing workflow guard before
+    // React applies the state update below.
+    workflowBySessionRef.current = {
+      ...workflowBySessionRef.current,
+      [originSessionId]: { ...workflowSnapshot, operationContext, abortController },
+    };
+    updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.SOLVING, {
       submitting: true,
       solveError: "",
+      operationContext,
+      abortController,
     });
     onGenerationStart?.({ source: "image", requestSessionId: originSessionId, operationContext });
-    const abortController = workflowSnapshot.abortController || new AbortController();
-    updateWorkflow(originSessionId, { abortController });
 
     try {
       const rawText = originExtraction.extractedProblemText || "";
@@ -700,9 +817,11 @@ export default function ImageUpload({
         rawText: originExtraction.rawExtractedText || originExtraction.rawOcrText || rawText,
         solveDecision: edited ? "edited" : "confirmed",
         source: "ocr-reviewed",
+        reviewRevision,
+        reviewRevisionId,
       });
       const requestSessionId = onReviewedProblemSubmitted?.(payload, operationContext);
-      if (!requestSessionId || !isCurrentOperation(originSessionId, operationContext)) return;
+      if (!requestSessionId || !isCurrentOperation(originSessionId, operationContext) || !isCurrentIngestion(originSessionId, originIngestion)) return;
       logSessionOperation("solve-started", {
         operationContext,
         originSessionId,
@@ -712,11 +831,18 @@ export default function ImageUpload({
       });
       const solved = await solveExtractedProblem({
         ...payload,
-        history: workflowSnapshot.solveHistory || [],
+        history: withImageInstructions(workflowSnapshot.solveHistory, instructions),
         getToken,
         signal: abortController.signal,
+        progressive: providerStreamingEnabled() ? {
+          identity: progressiveIdentityForOperation(operationContext, requestSessionId),
+          onEvent: (event) => {
+            const decision = onProgressiveEvent?.(event);
+            if (!decision?.accepted) throw new Error(`Progressive solve event rejected: ${decision?.reason || "missing owner"}`);
+          },
+        } : null,
       });
-      if (!isCurrentOperation(originSessionId, operationContext)) {
+      if (!isCurrentOperation(originSessionId, operationContext) || !isCurrentIngestion(originSessionId, originIngestion)) {
         logSessionOperation("operation-result-discarded", {
           operationContext,
           originSessionId,
@@ -734,12 +860,19 @@ export default function ImageUpload({
         problemHash: payload.canonicalProblem?.hash || "",
         reason: "ocr-reviewed",
       });
-      onProblemGenerated({ ...solved, _requestSessionId: requestSessionId, _operationContext: operationContext }, operationContext);
+      if (solved.progressiveStream && solved.status !== "solve_completed") {
+        updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.SOLVE_FAILED, {
+          submitting: false,
+          solveError: "Generation stopped after completed steps. Retry from the reviewed text.",
+        });
+        return;
+      }
+      if (!solved.progressiveStream) onProblemGenerated({ ...solved, _requestSessionId: requestSessionId, _operationContext: operationContext }, operationContext);
       resetSelection(originSessionId);
     } catch (error) {
       if (error?.name === "AbortError") return;
       console.error("Confirmed image problem solve failed:", error);
-      if (!isCurrentOperation(originSessionId, operationContext)) {
+      if (!isCurrentOperation(originSessionId, operationContext) || !isCurrentIngestion(originSessionId, originIngestion)) {
         logSessionOperation("operation-error-discarded", {
           operationContext,
           originSessionId,
@@ -759,12 +892,8 @@ export default function ImageUpload({
         retryable: error.body?.retryable,
         operationContext,
       });
-      if (error.body?.code === "AI_SERVICE_UNAVAILABLE") {
-        updateWorkflow(originSessionId, { solveError: "AI service timed out or connection dropped. Try again." });
-      } else if (error.body?.code === "AI_SOLUTION_QUALITY_INVALID") {
-        updateWorkflow(originSessionId, { solveError: "The generated solution failed mathematical validation. Retry from the reviewed text." });
-      }
-      updateWorkflow(originSessionId, {
+      updateWorkflow(originSessionId, { solveError: imageSolveFailureMessage(error) });
+      updateLifecycle(originSessionId, IMAGE_INGESTION_STATES.SOLVE_FAILED, {
         submitting: false,
       });
     }
@@ -792,7 +921,8 @@ export default function ImageUpload({
         onClick={() => fileRef.current.click()}
         onDragOver={(event) => event.preventDefault()}
         onDrop={handleDrop}
-        className="omni-button flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl px-4 text-sm font-semibold transition-all duration-200 xl:w-auto xl:min-w-[150px]"
+        className="omni-image-upload-trigger flex min-h-9 min-w-9 items-center justify-center rounded-xl text-neutral-500 transition-colors duration-200 hover:bg-neutral-100 hover:text-neutral-900 disabled:cursor-not-allowed disabled:opacity-45"
+        aria-label={preview ? "Replace selected image" : "Upload an image"}
         title="Upload a photo of a blackboard or handwritten problem"
       >
         {analyzing || submitting ? (
@@ -800,7 +930,7 @@ export default function ImageUpload({
         ) : (
           <ImagePlus className="h-4 w-4" />
         )}
-        {submitting ? "Analyzing..." : analyzing ? "Checking..." : "Upload image"}
+        <span className="sr-only">{submitting ? "Analyzing image" : analyzing ? "Checking image" : preview ? "Replace selected image" : "Upload image"}</span>
       </button>
 
       <QualityPanel
@@ -810,7 +940,21 @@ export default function ImageUpload({
         submitting={submitting}
         extraction={extraction}
         editedText={editedText}
-        onTextChange={(value) => updateWorkflow(activeSessionId, { editedText: value })}
+        onTextChange={(value) => updateWorkflow(activeSessionId, (current) => {
+          if (current.submitting || !current.extraction) return {};
+          const reviewRevision = (current.reviewRevision || 0) + 1;
+          const extractionId = current.extraction.ingestion?.extractionId || current.extraction.extractionId || "";
+          return {
+            editedText: value,
+            solveError: "",
+            reviewRevision,
+            reviewRevisionId: createReviewRevisionId(extractionId, reviewRevision),
+            lifecycleState: assertImageIngestionTransition(
+              current.lifecycleState || IMAGE_INGESTION_STATES.REVIEW_REQUIRED,
+              IMAGE_INGESTION_STATES.REVIEW_REQUIRED,
+            ),
+          };
+        })}
         onCancel={() => resetSelection(activeSessionId)}
         onSubmit={handleSubmit}
         onSolve={solveReviewedExtraction}

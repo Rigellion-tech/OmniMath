@@ -273,7 +273,6 @@ const STRUCTURAL_ONLY_TYPES = new Set([
   "product",
   "fraction",
   "integral",
-  "functionCall",
   "vector",
 ]);
 
@@ -298,6 +297,7 @@ const HOVER_PENALIZED_ROLES = new Set([
 
 export const AGGREGATE_HOVER_ROLES = new Set([
   "absoluteValue",
+  "decorated",
   "integral",
   "integral-expression",
   "integralExpression",
@@ -307,6 +307,7 @@ export const AGGREGATE_HOVER_ROLES = new Set([
   "bound",
   "fraction",
   "function",
+  "functionCall",
   "argument",
   "power",
   "root",
@@ -363,7 +364,9 @@ export function isAggregateHoverTarget(target = {}) {
   if (!hasChildren) return false;
   const role = target.role || target.kind || target.type || "";
   const type = target.type || target.kind || "";
-  return AGGREGATE_HOVER_ROLES.has(role) || AGGREGATE_HOVER_ROLES.has(type);
+  return Boolean(target.decoratedCall)
+    || AGGREGATE_HOVER_ROLES.has(role)
+    || AGGREGATE_HOVER_ROLES.has(type);
 }
 
 export function isHoverEligibleTarget(target = {}) {
@@ -595,6 +598,10 @@ export function isHighlightableHoverTarget(target = {}, options = {}) {
 function isPenalizedHoverTarget(target = {}) {
   const role = target.role || target.kind || target.type || "";
   const type = target.type || target.kind || "";
+  // A parser context can relabel these compact semantic envelopes as a
+  // left/right side. Their directly owned punctuation/residual ink remains a
+  // legitimate smallest target and must not inherit the equation-side ban.
+  if (type === "decoratedAtom" || (target.decoratedCall && ["leftSide", "rightSide"].includes(role))) return false;
   return HOVER_PENALIZED_ROLES.has(role) || HOVER_PENALIZED_ROLES.has(type);
 }
 
@@ -1072,7 +1079,7 @@ export function resolveSemanticTarget({
     const deterministicOwnedPrimitiveHits = preciseDeterministicHits.filter((hit) => (
       hit.ownedPrimitiveExact
       && isAggregateHoverTarget(hit.target)
-      && isExplicitAggregateHoverTarget(hit.target)
+      && (isExplicitAggregateHoverTarget(hit.target) || (hit.target.type || hit.target.kind) === "fraction")
     ));
     const deterministicOwnedGapHits = preciseDeterministicHits.filter((hit) => (
       hit.gapExact

@@ -6,6 +6,7 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { it } from "node:test";
 import pg from "pg";
 import { buildExtractionSubmissionPayload } from "../src/api/mathClient.js";
+import { productionClerkOwner, recordExtraction, recordedSolvePayload } from "./helpers/recordedExtraction.mjs";
 
 // Clerk caches verification keys by kid; use one generated key for this fixture.
 const fixtureKeyPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -60,11 +61,21 @@ async function fixture(t) {
   t.mock.method(console, "error", (...args) => events.push(args));
   let providerCalls = 0;
   const counters = new Map();
+  const lifecycle = new Map();
   t.mock.method(globalThis, "fetch", async (url, options = {}) => {
     const target = String(url);
     const json = (value) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
     if (target.startsWith("https://offline-kv.invalid/get/")) return json({ result: counters.get(decodeURIComponent(target.split("/get/")[1])) || 0 });
-    if (target === "https://offline-kv.invalid/pipeline") return json(JSON.parse(options.body).map(([verb, key, count]) => {
+    if (target === "https://offline-kv.invalid/pipeline") return json(JSON.parse(options.body).map((command) => {
+      const [verb, key, count] = command;
+      if (verb === "GET") return { result: lifecycle.get(key) || null };
+      if (verb === "EVAL") {
+        const slotKey = command[3];
+        const expected = command[4] || "";
+        if ((lifecycle.get(slotKey) || "") !== expected) return { result: 0 };
+        lifecycle.set(slotKey, command[5]);
+        return { result: 1 };
+      }
       if (verb === "INCRBY" || verb === "DECRBY") counters.set(key, (counters.get(key) || 0) + (verb === "INCRBY" ? count : -count));
       return { result: verb === "EXPIRE" ? 1 : counters.get(key) || 0 };
     }));
@@ -81,18 +92,23 @@ async function fixture(t) {
     });
   });
   const app = await import(`../server/app.js?incident-boundary-${Math.random()}`);
-  return { app, session, events, providerCalls: () => providerCalls };
+  const identitySalt = process.env.USAGE_IDENTITY_HMAC_SECRET
+    || process.env.CLERK_SECRET_KEY
+    || session.jwtKey;
+  return { app, session, events, providerCalls: () => providerCalls,
+    owner: productionClerkOwner("user_incident_regression", identitySalt) };
 }
 
 it("production image solve preserves a real IncomingMessage's auth through provider, save and response", async (t) => {
-  const { app, session, events, providerCalls } = await fixture(t);
+  const { app, session, events, providerCalls, owner } = await fixture(t);
   const userIds = [];
   t.mock.method(pg.Pool.prototype, "query", async (sql, params) => {
     if (/insert into app_users/iu.test(sql)) { userIds.push(params[0]); return { rows: [{ id: "offline-user-row" }] }; }
     if (/insert into user_explanations/iu.test(sql)) return { rows: [{ id: "offline-save-row" }] };
     throw new Error("Unexpected SQL in incident regression");
   });
-  const req = request({ problem: "x+7=9", extraction: {}, debugRequestId: "incident-auth-real" }, session.token);
+  const extraction = await recordExtraction({ owner, problem: "x+7=9", latex: "x+7=9" });
+  const req = request(recordedSolvePayload(extraction, { body: { debugRequestId: "incident-auth-real" } }), session.token);
   assert.equal(({ ...req }).headers, undefined, "the old adapter demonstrably drops real Node headers");
   const res = recorder();
   await app.handleSolveExtractedProblemRequest(req, res);
@@ -119,10 +135,11 @@ it("production image solve with missing auth fails closed before any provider ca
 });
 
 it("provider success reaches HTTP before the actual DB save settles, and a later reset cannot revoke it", async (t) => {
-  const { app, session, events, providerCalls } = await fixture(t);
+  const { app, session, events, providerCalls, owner } = await fixture(t);
   let rejectSave;
   t.mock.method(pg.Pool.prototype, "query", () => new Promise((_, reject) => { rejectSave = reject; }));
-  const req = request({ problem: "x+7=9", extraction: { imageHash: "db-reset-fixture" }, debugRequestId: "incident-db-reset" }, session.token);
+  const extraction = await recordExtraction({ owner, problem: "x+7=9", latex: "x+7=9", imageHash: "db-reset-fixture" });
+  const req = request(recordedSolvePayload(extraction, { body: { debugRequestId: "incident-db-reset" } }), session.token);
   const res = recorder();
   const handling = app.handleSolveExtractedProblemRequest(req, res);
   // The deadline is an assertion, not the simulated failure. The unresolved PG
@@ -151,7 +168,7 @@ it("provider success reaches HTTP before the actual DB save settles, and a later
 });
 
 it("the extraction-submit contract preserves canonical review issues and metrics over conflicting top-level summaries", async (t) => {
-  const { app, session, providerCalls } = await fixture(t);
+  const { app, session, providerCalls, owner } = await fixture(t);
   const review = {
     confidence: 64, tier: "medium", critical: false,
     issues: [{ type: "ocr_text_cleanup_review", severity: "medium" }, { type: "text_latex_mismatch", severity: "medium" }],
@@ -164,7 +181,19 @@ it("the extraction-submit contract preserves canonical review issues and metrics
     displayText: "x+7=9", rawText: "x+7=9", solveDecision: "direct", source: "ocr-direct",
   });
   assert.deepEqual(payload.extraction.extractionValidation, review);
-  const req = request(JSON.parse(JSON.stringify(payload)), session.token);
+  const extraction = await recordExtraction({
+    owner,
+    problem: "x+7=9",
+    latex: "x+7=9",
+    extractionValidation: review,
+  });
+  const req = request(recordedSolvePayload(extraction, {
+    problem: "x+7=9",
+    latex: "x+7=9",
+    solveDecision: "direct",
+    canonicalProblem: payload.canonicalProblem,
+    body: JSON.parse(JSON.stringify(payload)),
+  }), session.token);
   const res = recorder();
   await app.handleSolveExtractedProblemRequest(req, res);
   assert.equal(res.statusCode, 409);

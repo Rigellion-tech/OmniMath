@@ -331,12 +331,12 @@ describe("solver benchmark suite", () => {
 });
 
 describe("solver routing", () => {
-  it("routes simple algebra to the standard tier", () => {
+  it("routes simple algebra to the simple tier", () => {
     const route = chooseSolverRoleForProblem({ canonicalLatex: "x+1=2" });
 
-    assert.equal(route.tier, "standard");
+    assert.equal(route.tier, "simple");
     assert.equal(route.role, "solver");
-    assert.equal(route.reason, "default_standard");
+    assert.equal(route.reason, "elementary_linear_equation");
   });
 
   it("keeps ordinary one-dimensional calculus on the standard tier", () => {
@@ -360,10 +360,10 @@ describe("solver routing", () => {
     );
   });
 
-  it("preserves direct repair routing for infinite series", () => {
+  it("keeps a routine infinite series on the standard route", () => {
     assert.deepEqual(
       classifyProblemComplexity({ canonicalLatex: "\\sum_{n=1}^\\infty\\frac{1}{n^2}" }),
-      { tier: "repair", reason: "infinite_series" }
+      { tier: "standard", reason: "infinite_series" }
     );
   });
 
@@ -373,8 +373,8 @@ describe("solver routing", () => {
       priorIssues: ["numerical_final_answer_mismatch"],
     });
 
-    assert.equal(route.role, "repair");
-    assert.equal(route.tier, "escalation");
+    assert.equal(route.role, "hardSolve");
+    assert.equal(route.tier, "advanced");
     assert.equal(route.reason, "prior_mathematical_validation_failure");
   });
 
@@ -390,11 +390,11 @@ describe("solver routing", () => {
     });
   });
 
-  it("uses a materially stronger initial route for recognized higher-complexity notation", () => {
+  it("does not escalate routine vector-calculus notation alone", () => {
     const route = chooseSolverRoleForProblem({ canonicalLatex: "\\oint_C F\\cdot dr" });
 
-    assert.equal(route.role, "repair");
-    assert.equal(route.tier, "escalation");
+    assert.equal(route.role, "solver");
+    assert.equal(route.tier, "standard");
     assert.equal(route.reason, "vector_or_multivariable_calculus");
   });
 
@@ -403,6 +403,6 @@ describe("solver routing", () => {
 
     assert.equal(route.role, "solver");
     assert.equal(route.tier, "standard");
-    assert.equal(route.reason, "long_context_standard_first");
+    assert.equal(route.reason, "default_standard");
   });
 });

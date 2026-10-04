@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "node scripts/dev.js",
     "dev:client": "vite",
-    "dev:server": "node server/index.js",
+    "dev:server": "node scripts/dev-server.js",
     "build": "vite build",
     "lint": "eslint . --quiet",
     "lint:fix": "eslint . --fix",

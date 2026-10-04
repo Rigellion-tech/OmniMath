@@ -866,7 +866,7 @@ describe("common mathematical evidence through HTTP solve routes", () => {
     });
   });
 
-  it("typed and reviewed OCR reject the same invalid provider response with the same compact retry policy", async () => {
+  it("typed and reviewed OCR reject the same invalid provider response after one structured recovery", async () => {
     await withRuntime({ capture: false }, async ({ handleExplainRequest, handleSolveExtractedProblemRequest }) => {
       process.env.OMNIMATH_ESCALATION_MODEL = "gpt-5.6-sol";
       const requests = [];
@@ -889,15 +889,13 @@ describe("common mathematical evidence through HTTP solve routes", () => {
       assert.equal(typed.statusCode, ocr.statusCode);
       assert.equal(typed.json().code, ocr.json().code);
       assert.equal(typed.json().code, "AI_RESPONSE_INVALID");
-      assert.equal(requests.length, 6);
-      for (const routeRequests of [requests.slice(0, 3), requests.slice(3, 6)]) {
+      assert.equal(requests.length, 4);
+      for (const routeRequests of [requests.slice(0, 2), requests.slice(2, 4)]) {
         assert.deepEqual(routeRequests.map((request) => request.text.format.name), [
           "math_fast_solve",
-          "math_compact_solve",
           "math_fast_solve",
         ]);
         assert.deepEqual(routeRequests.map((request) => request.reasoning?.effort || null), [
-          "medium",
           "medium",
           "high",
         ]);
@@ -3473,9 +3471,12 @@ describe("structural solve acceptance diagnostics", () => {
         assert.equal(routing.selectedInitialModel, "gpt-5.6-sol");
         assert.equal(routing.selectedInitialReasoningEffort, "medium");
       }
-      for (const canonicalLatex of ["\\oint_C F\\cdot dr", "\\sum_{n=1}^{\\infty}n^{-2}"]) {
+      for (const canonicalLatex of [
+        "Prove the spectral theorem for compact self-adjoint operators.",
+        "Derive the Euler-Lagrange equation for this constrained variational functional.",
+      ]) {
         const routing = resolveInitialSolveRouting({ canonicalLatex });
-        assert.equal(routing.selectedInitialModelRole, "repair");
+        assert.equal(routing.selectedInitialModelRole, "hardSolve");
         assert.equal(routing.selectedInitialModel, "gpt-5.6-sol");
         assert.equal(routing.selectedInitialReasoningEffort, "high");
         assert.equal(routing.routeSource, "difficulty-based");

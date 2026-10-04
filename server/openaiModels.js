@@ -6,6 +6,7 @@ export const MODEL_ROLES = Object.freeze({
   IMAGE_EXTRACTION: "extraction",
   EXTRACTION_REVIEW: "extractionReview",
   SOLVER: "standardSolve",
+  HARD_SOLVE: "hardSolve",
   REPAIR: "repair",
   ESCALATION: "escalation",
   PREMIUM_ESCALATION: "premiumEscalation",
@@ -17,6 +18,7 @@ export const DEFAULT_OPENAI_MODELS = {
   imageExtraction: "gpt-4.1",
   extractionReview: "gpt-4.1-mini",
   solver: "gpt-5.6-sol",
+  hardSolve: "gpt-5.6-sol",
   repair: "gpt-5.6-sol",
   escalation: "gpt-5.6-sol",
   premiumEscalation: "gpt-5.6-sol",
@@ -29,6 +31,10 @@ export const CANONICAL_SOLVE_MODEL = "gpt-5.6-sol";
 
 export const DEFAULT_OPENAI_SAMPLING = {
   solver: {
+    temperature: 0,
+    top_p: 1,
+  },
+  hardSolve: {
     temperature: 0,
     top_p: 1,
   },
@@ -67,6 +73,7 @@ export const DEFAULT_OPENAI_TIMEOUTS_MS = Object.freeze({
   imageExtraction: 60000,
   extractionReview: 60000,
   solver: DEFAULT_CANONICAL_SOLVE_TIMEOUT_MS,
+  hardSolve: 180000,
   repair: 120000,
   escalation: 180000,
   premiumEscalation: 180000,
@@ -78,6 +85,7 @@ const ROLE_TIMEOUT_ENV = Object.freeze({
   imageExtraction: "OMNIMATH_OPENAI_IMAGE_EXTRACTION_TIMEOUT_MS",
   extractionReview: "OMNIMATH_OPENAI_EXTRACTION_REVIEW_TIMEOUT_MS",
   solver: "OMNIMATH_OPENAI_SOLVER_TIMEOUT_MS",
+  hardSolve: "OMNIMATH_OPENAI_HARD_SOLVE_TIMEOUT_MS",
   repair: "OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS",
   escalation: "OMNIMATH_OPENAI_ESCALATION_TIMEOUT_MS",
   premiumEscalation: "OMNIMATH_OPENAI_PREMIUM_ESCALATION_TIMEOUT_MS",
@@ -87,6 +95,7 @@ const ROLE_TIMEOUT_ENV = Object.freeze({
 
 const ROLE_DEFAULT_REASONING_EFFORT = {
   solver: "medium",
+  hardSolve: "high",
   repair: "high",
   escalation: "high",
   premiumEscalation: "high",
@@ -96,6 +105,7 @@ const ROLE_MODEL_ENV = {
   imageExtraction: ["OMNIMATH_IMAGE_EXTRACTION_MODEL", "OPENAI_IMAGE_EXTRACTION_MODEL"],
   extractionReview: ["OMNIMATH_EXTRACTION_REVIEW_MODEL", "OPENAI_EXTRACTION_REVIEW_MODEL"],
   solver: ["OMNIMATH_SOLVER_MODEL", "OPENAI_SOLVER_MODEL"],
+  hardSolve: ["OMNIMATH_HARD_SOLVE_MODEL", "OPENAI_HARD_SOLVE_MODEL", "OMNIMATH_REPAIR_MODEL", "OPENAI_REPAIR_MODEL"],
   repair: ["OMNIMATH_REPAIR_MODEL", "OPENAI_REPAIR_MODEL"],
   escalation: ["OMNIMATH_ESCALATION_MODEL", "OPENAI_ESCALATION_MODEL"],
   premiumEscalation: ["OMNIMATH_PREMIUM_ESCALATION_MODEL", "OPENAI_PREMIUM_ESCALATION_MODEL", "OMNIMATH_ESCALATION_MODEL", "OPENAI_ESCALATION_MODEL"],
@@ -104,11 +114,13 @@ const ROLE_MODEL_ENV = {
 };
 
 const ROLE_MODEL_FALLBACK_ENV = {
+  hardSolve: ["OMNIMATH_SOLVER_MODEL", "OPENAI_SOLVER_MODEL"],
   repair: ["OMNIMATH_SOLVER_MODEL", "OPENAI_SOLVER_MODEL"],
 };
 
 const ROLE_EFFORT_ENV = {
   solver: ["OMNIMATH_SOLVER_REASONING_EFFORT"],
+  hardSolve: ["OMNIMATH_HARD_SOLVE_REASONING_EFFORT", "OMNIMATH_REPAIR_REASONING_EFFORT", "OMNIMATH_SOLVER_REASONING_EFFORT"],
   repair: ["OMNIMATH_REPAIR_REASONING_EFFORT", "OMNIMATH_SOLVER_REASONING_EFFORT"],
   escalation: ["OMNIMATH_ESCALATION_REASONING_EFFORT"],
   premiumEscalation: ["OMNIMATH_PREMIUM_ESCALATION_REASONING_EFFORT", "OMNIMATH_ESCALATION_REASONING_EFFORT"],
@@ -247,7 +259,9 @@ function resolveRoleModel(role = "solver") {
 
 function readNumberEnv(names = [], fallback = null) {
   for (const name of names) {
-    const value = Number(process.env[name]);
+    const raw = process.env[name];
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const value = Number(raw);
     if (Number.isFinite(value) && value >= 0) {
       return {
         value,
@@ -263,6 +277,7 @@ function roleFromPath(path = "solver", debugContext = {}) {
   if (path === "extractionReview") return "extractionReview";
   if (path === "hover") return "hover";
   if (path === "pinned") return "pinned";
+  if (path === "hardSolve") return "hardSolve";
   if (path === "repair") return "repair";
   if (path === "premiumEscalation") return "premiumEscalation";
   if (path === "escalation") return "escalation";
@@ -276,7 +291,10 @@ export function resolveOpenAiRequestTimeout(role = "solver") {
   const resolvedRole = Object.hasOwn(DEFAULT_OPENAI_TIMEOUTS_MS, role)
     ? role
     : "solver";
-  const envName = ROLE_TIMEOUT_ENV[resolvedRole];
+  const envName = resolvedRole === "hardSolve"
+    && !process.env.OMNIMATH_OPENAI_HARD_SOLVE_TIMEOUT_MS?.trim()
+    && process.env.OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS?.trim()
+    ? "OMNIMATH_OPENAI_REPAIR_TIMEOUT_MS" : ROLE_TIMEOUT_ENV[resolvedRole];
   const defaultTimeoutMs = DEFAULT_OPENAI_TIMEOUTS_MS[resolvedRole];
   const rawValue = process.env[envName];
   const configuredValue = typeof rawValue === "string" && rawValue.trim()
@@ -440,7 +458,7 @@ function resolveReasoningEffort(role = "solver", capability = {}, debugContext =
   const defaultEffort = ROLE_DEFAULT_REASONING_EFFORT[role] || "medium";
   const candidate = requested.value || defaultEffort;
   if (debugContext.retryPurpose === "compact" && capability.reasoning) {
-    const difficultRole = role === "repair" || role === "escalation" || role === "premiumEscalation";
+    const difficultRole = role === "hardSolve" || role === "repair" || role === "escalation" || role === "premiumEscalation";
     if (difficultRole && candidate !== "none") {
       const preferredEfforts = candidate === "low" || candidate === "minimal"
         ? [candidate, "low", "minimal"]
@@ -508,6 +526,7 @@ export function getOpenAiModels() {
     imageExtraction: resolveRoleModel("imageExtraction").value,
     extractionReview: resolveRoleModel("extractionReview").value,
     solver: resolveRoleModel("solver").value,
+    hardSolve: resolveRoleModel("hardSolve").value,
     repair: resolveRoleModel("repair").value,
     escalation: resolveRoleModel("escalation").value,
     premiumEscalation: resolveRoleModel("premiumEscalation").value,
@@ -533,7 +552,7 @@ export function getOpenAiModelResolutions() {
 
 export function getOpenAiModelForPath(path, debugContext = {}) {
   if (path === "canonicalSolve" && roleFromPath(path, debugContext) === "solver") {
-    return CANONICAL_SOLVE_MODEL;
+    return process.env.OMNIMATH_CANONICAL_SOLVE_MODEL?.trim() || CANONICAL_SOLVE_MODEL;
   }
   const role = roleFromPath(path, debugContext);
   return getOpenAiModels()[role] || getOpenAiModels().solver;
@@ -544,14 +563,35 @@ export function getOpenAiSamplingForPath(path, debugContext = {}) {
   return DEFAULT_OPENAI_SAMPLING[role] ? { ...DEFAULT_OPENAI_SAMPLING[role] } : {};
 }
 
+// A selected solve policy is a server-owned snapshot. Transport and execution
+// telemetry consume it without independently re-routing or re-reading role settings.
+export function getSolvePolicySelection(modelPath = "solver", debugContext = {}) {
+  const policy = debugContext.solvePolicy || debugContext.initialRouting?.solvePolicy;
+  if (!policy) return null;
+  if (debugContext.retryPurpose === "compact") return policy.initialSelection;
+  if (debugContext.solveBudgetStage === "recovery") {
+    if (debugContext.recoverySelection) return policy.recoverySelections[debugContext.recoverySelection];
+    if (modelPath === "repair") return policy.recoverySelections.repair;
+    if (modelPath === "escalation") return policy.recoverySelections.structured;
+    return policy.recoverySelections.timeout;
+  }
+  return policy.initialSelection;
+}
+
 export function selectOpenAiModel({
   modelPath = "solver",
   model = "",
   debugContext = {},
 } = {}) {
+  const policySelection = getSolvePolicySelection(modelPath, debugContext);
+  if (policySelection) {
+    return { ...policySelection,
+      solveMode: debugContext.attemptType || debugContext.retryPurpose || "initial" };
+  }
   const role = roleFromPath(modelPath, debugContext);
   const modelSelection = modelPath === "canonicalSolve" && role === "solver"
-    ? { value: CANONICAL_SOLVE_MODEL, source: "canonical_solve_policy" }
+    ? { value: process.env.OMNIMATH_CANONICAL_SOLVE_MODEL?.trim() || CANONICAL_SOLVE_MODEL,
+        source: process.env.OMNIMATH_CANONICAL_SOLVE_MODEL?.trim() ? "OMNIMATH_CANONICAL_SOLVE_MODEL" : "canonical_solve_policy" }
     : model
     ? { value: model, source: "explicit_override" }
     : resolveRoleModel(role);
@@ -588,7 +628,7 @@ export function selectOpenAiModel({
     timeoutEnv: timeout.timeoutEnv,
     timeoutConfigStatus: timeout.timeoutConfigStatus,
     solveMode: debugContext.attemptType || debugContext.retryPurpose || "initial",
-    freshSolve: role === "escalation" || role === "premiumEscalation",
+    freshSolve: role === "hardSolve" || role === "escalation" || role === "premiumEscalation",
     ...pricing,
   };
 }

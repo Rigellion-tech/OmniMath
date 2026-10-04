@@ -37,11 +37,11 @@ export function classifyProgressiveFailure(error, { cancelled = false, disconnec
 export function decideProgressiveRecovery({
   classification, authoritativePrefixPublished, retryAttempted,
   repairAttempted, escalationAttempted, repairCandidateAvailable,
-  escalationModelAvailable, deadlineRemaining, providerAttemptCount,
+  escalationModelAvailable, deadlineRemaining, providerAttemptCount, maxRouteAttempts = 2,
 } = {}) {
   if (authoritativePrefixPublished) return { action: "fail", reason: "authoritative_prefix_published" };
   if (!deadlineRemaining || ["user_cancellation", "total_solve_deadline", "refusal"].includes(classification)) return { action: "fail", reason: classification };
-  if (escalationAttempted || providerAttemptCount >= 4) return { action: "fail", reason: "recovery_attempt_limit" };
+  if (escalationAttempted || providerAttemptCount >= maxRouteAttempts) return { action: "fail", reason: "recovery_attempt_limit" };
   if (["authentication_configuration_error", "usage_rate_limit_error", "bad_request"].includes(classification)) {
     return { action: "fail", reason: classification };
   }

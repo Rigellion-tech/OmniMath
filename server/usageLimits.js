@@ -42,6 +42,35 @@ function readPositiveNumber(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function readPositiveNumberFromEnv(env, name, fallback) {
+  const value = Number(env?.[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function resolveSpendLimitsUsd(env = process.env) {
+  const productionLimits = {
+    daily: readPositiveNumberFromEnv(env, "DAILY_SPEND_LIMIT_USD", DEFAULT_DAILY_SPEND_LIMIT_USD),
+    monthly: readPositiveNumberFromEnv(env, "MONTHLY_SPEND_LIMIT_USD", DEFAULT_MONTHLY_SPEND_LIMIT_USD),
+  };
+  const localMode = env?.NODE_ENV === "development" || env?.NODE_ENV === "test";
+  const hostedRuntime = env?.VERCEL === "1"
+    || Object.prototype.hasOwnProperty.call(env || {}, "VERCEL_ENV");
+  if (!localMode || hostedRuntime) return productionLimits;
+
+  return {
+    daily: readPositiveNumberFromEnv(
+      env,
+      "OMNIMATH_DEV_DAILY_SPEND_LIMIT_USD",
+      productionLimits.daily,
+    ),
+    monthly: readPositiveNumberFromEnv(
+      env,
+      "OMNIMATH_DEV_MONTHLY_SPEND_LIMIT_USD",
+      productionLimits.monthly,
+    ),
+  };
+}
+
 function dollarsToMicros(value) {
   return Math.ceil(value * MICROS_PER_USD);
 }
@@ -74,6 +103,7 @@ function getRequestLimits(identity = {}) {
 }
 
 function getConfiguredLimits(identity = {}) {
+  const spendLimitsUsd = resolveSpendLimitsUsd();
   return {
     requests: getRequestLimits(identity),
     tokens: {
@@ -81,8 +111,8 @@ function getConfiguredLimits(identity = {}) {
       monthly: readPositiveInteger("MONTHLY_TOKEN_LIMIT", DEFAULT_MONTHLY_TOKEN_LIMIT),
     },
     spendMicros: {
-      daily: dollarsToMicros(readPositiveNumber("DAILY_SPEND_LIMIT_USD", DEFAULT_DAILY_SPEND_LIMIT_USD)),
-      monthly: dollarsToMicros(readPositiveNumber("MONTHLY_SPEND_LIMIT_USD", DEFAULT_MONTHLY_SPEND_LIMIT_USD)),
+      daily: dollarsToMicros(spendLimitsUsd.daily),
+      monthly: dollarsToMicros(spendLimitsUsd.monthly),
     },
   };
 }

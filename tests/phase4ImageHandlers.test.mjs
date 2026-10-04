@@ -82,8 +82,17 @@ async function fixture(t) {
     return provider(payload, options);
   });
   const app = await import(`../server/app.js?phase4-handlers-${sequence}`);
-  const invoke = async (handler, body, { contentType = "application/json", requestToken = token } = {}) => {
-    const req = { method: "POST", url: "/api/phase4-fixture", headers: { host: "localhost:8787", "content-type": contentType, authorization: `Bearer ${requestToken}` },
+  const invoke = async (handler, body, { contentType = "application/json", requestToken = token, url = null } = {}) => {
+    const requestUrl = url || (handler === app.handleExtractImageProblemRequest
+      ? "/api/extract-image-problem"
+      : handler === app.handleSolveExtractedProblemRequest
+        ? "/api/solve-extracted-problem"
+        : handler === app.handleExplainRequest
+          ? "/api/explain"
+          : handler === app.handleExplainImageRequest
+            ? "/api/explain-image"
+            : "/api/phase4-fixture");
+    const req = { method: "POST", url: requestUrl, headers: { host: "localhost:8787", "content-type": contentType, authorization: `Bearer ${requestToken}` },
       socket: { remoteAddress: clientIp }, body };
     const res = recorder();
     await handler(req, res);
@@ -114,7 +123,7 @@ it("actual extraction and canonical solve preserve authenticated identity, provi
   assert.equal(selected.ingestion.state, "ready");
   const solved = await f.invoke(f.app.handleSolveExtractedProblemRequest, f.solvePayload(selected, { requestId: "phase4-continuity-solve" }));
   assert.equal(solved.statusCode, 200, solved.body);
-  assert.deepEqual(f.calls.map((call) => [call.text.format.name, call.max_output_tokens]), [["math_image_extract", 3200], ["math_fast_solve", 6500]]);
+  assert.deepEqual(f.calls.map((call) => [call.text.format.name, call.max_output_tokens]), [["math_image_extract", 3200], ["math_fast_solve", 3200]]);
   const body = solved.json();
   assert.equal(body.ingestion.state, "solved");
   assert.equal(body.canonicalProblem.canonicalText, selected.extractedProblemText);
@@ -356,9 +365,11 @@ it("extraction finishing just before its deadline leaves a fresh canonical solve
   const timeouts = f.events.filter(([name]) => name === "[omnimath:openai-timeout]").map(([, event]) => event);
   assert.equal(timeouts[0].configuredRoleTimeoutMs, 60000);
   assert.equal(timeouts[0].effectiveAttemptTimeoutMs, 60000);
-  assert.equal(timeouts[1].remainingLogicalBudgetMs, 90000);
-  assert.equal(timeouts[1].effectiveAttemptTimeoutMs, 65500);
-  assert.equal(timeouts[1].remainingAttemptBudgetMs, 65500);
+  // The extracted equation receives the same simple policy as typed input;
+  // extraction time belongs to its separate request and does not consume it.
+  assert.equal(timeouts[1].remainingLogicalBudgetMs, 45000);
+  assert.equal(timeouts[1].effectiveAttemptTimeoutMs, 35000);
+  assert.equal(timeouts[1].remainingAttemptBudgetMs, 35000);
   assert.equal(timeouts[1].budgetLimitReason, "primary_stage_budget");
 });
 
@@ -438,4 +449,44 @@ it("a newer upload while extraction is pending discards the old result and accou
   const solved = await f.invoke(f.app.handleSolveExtractedProblemRequest, f.solvePayload(current.json()));
   assert.equal(solved.statusCode, 200, solved.body);
   assert.equal(solved.json().ingestion.extractionId, current.json().ingestion.extractionId);
+});
+
+
+it("legacy adapter carries its hosting lifetime through extraction into the shared hard solve", async (t) => {
+  let clock = Date.now();
+  t.mock.method(Date, "now", () => clock);
+  const f = await fixture(t);
+  const problem = "Derive the second variation of this nonlinear functional and prove coercivity in a Sobolev space.";
+  f.setProvider((payload) => {
+    if (payload.text.format.name === "math_image_extract") {
+      clock += 60_000;
+      return extractionResponse(problem);
+    }
+    return solveResponse(problem);
+  });
+  const boundary = "policy-legacy-runtime";
+  const image = Buffer.from("89504e470d0a1a0a000000000000", "hex");
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="fixture.png"\r\nContent-Type: image/png\r\n\r\n`),
+    image, Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  const res = await f.invoke(f.app.handleExplainImageRequest, body, {
+    contentType: `multipart/form-data; boundary=${boundary}`, url: "/api/explain-image",
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const routing = f.events.find(([name]) => name === "[omnimath:solve-routing]")[1];
+  assert.equal(routing.difficultyTier, "elite");
+  assert.equal(routing.selectedPolicyBudgetMs, 240_000);
+  assert.equal(routing.requestedCanonicalBudgetMs, 240_000);
+  assert.equal(routing.deploymentMaxDurationMs, 300_000);
+  assert.equal(routing.deploymentHeadroomMs, 5_000);
+  assert.equal(routing.elapsedPreSolveWorkMs, 60_000);
+  assert.equal(routing.runtimeAvailableBudgetMs, 235_000);
+  assert.equal(routing.effectiveCanonicalBudgetMs, 235_000);
+  assert.equal(routing.runtimeLimitMs, 300_000);
+  assert.equal(routing.canonicalBudgetMs, 235_000);
+  assert.equal(routing.budgetCappedByRuntime, true);
+  assert.equal(routing.runtimeCapReason, "deployment_max_duration");
+  assert.equal(routing.runtimeCapApplied, true);
+  assert.equal(f.calls.length, 2, "extraction and shared solve retain their existing boundary");
 });

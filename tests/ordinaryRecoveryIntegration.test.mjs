@@ -163,12 +163,12 @@ for (const scenario of [
     failure: () => providerResponse({ outputText: JSON.stringify({ title: "Missing required fields" }) }),
   },
 ]) {
-  test(`${scenario.label} full and compact output reach one bounded high-reasoning escalation`, async () => {
+  test(`${scenario.label} output reaches one bounded high-reasoning escalation`, async () => {
     const calls = [];
     globalThis.fetch = async (_url, options) => {
       const payload = JSON.parse(options.body);
       calls.push(payload);
-      return calls.length < 3
+      return calls.length < 2
         ? scenario.failure()
         : providerResponse({ outputText: validSolveOutput(`3x+7=25`) });
     };
@@ -176,16 +176,14 @@ for (const scenario of [
 
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(res.json().finalAnswerLatex, "x=6");
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 2);
     assert.deepEqual(calls.map((call) => call.model), [
       "gpt-5.6-sol",
       "gpt-5.6-sol",
-      "gpt-5.6-sol",
     ]);
-    assert.deepEqual(calls.map((call) => call.reasoning?.effort || null), ["medium", "medium", "high"]);
+    assert.deepEqual(calls.map((call) => call.reasoning?.effort || null), ["medium", "high"]);
     assert.deepEqual(calls.map((call) => call.text.format.name), [
       "math_fast_solve",
-      "math_compact_solve",
       "math_fast_solve",
     ]);
 
@@ -215,6 +213,27 @@ for (const scenario of [
     assert.equal(aiRequest.reasoningEffort, "high");
   });
 }
+
+test("repeated invalid structured output stops after the single recovery attempt", async () => {
+  const calls = [];
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return providerResponse({ outputText: '{"title":}' });
+  };
+
+  const { res } = await solve("repeated-invalid");
+  assert.ok(res.statusCode >= 400, res.body);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.text.format.name), ["math_fast_solve", "math_fast_solve"]);
+  assert.deepEqual(calls.map((call) => call.reasoning?.effort || null), ["medium", "high"]);
+  const requestId = "ordinary-recovery-repeated-invalid";
+  const failures = logs.filter(([marker, details]) => marker === "[omnimath:solve-recovery]"
+    && details?.requestId === requestId && details?.event === "attempt_failed")
+    .map(([, details]) => details);
+  assert.equal(failures.length, 2);
+  assert.equal(failures[1].recoveryDecision, "fail");
+  assert.equal(failures[1].recoveryReason, "recovery_attempt_limit");
+});
 
 test("provider refusal is explicit and does not start semantic recovery", async () => {
   let calls = 0;

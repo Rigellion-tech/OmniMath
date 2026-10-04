@@ -45,6 +45,7 @@ async function assertPortAvailable({ name, port }) {
 }
 
 const env = { ...readDotEnv(), ...process.env };
+if (!env.NODE_ENV) env.NODE_ENV = "development";
 const apiPort = Number(env.PORT || 8787);
 const vitePort = Number(env.VITE_PORT || 5173);
 let shuttingDown = false;

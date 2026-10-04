@@ -25,7 +25,6 @@ import {
   normalizeOpenAiUsage,
   getSolveMaxOutputTokens,
   getSolveOutputTokenBudget,
-  getSolveTotalTimeoutMs,
   logSolveCandidateOutcome,
   normalizeProviderSolveCandidate,
   streamMathExplanation,
@@ -65,7 +64,7 @@ import {
   createGeneralFollowupFallback,
   followupCorrelation,
 } from "./followupProvenance.js";
-import { chooseSolverRoleForProblem } from "./solverRouting.js";
+import { selectSolvePolicy, estimateSolvePolicyReservation, policyTelemetry } from "./solvePolicy.js";
 import { buildExtractedProblemDisplay, normalizeExtractedProblemText } from "./ocrTextNormalization.js";
 import { createMethodFingerprint } from "./mathValidationAnalysis.js";
 import { analyzeSymbolOrigins } from "./symbolInventory.js";
@@ -120,6 +119,17 @@ const ALLOWED_IMAGE_TYPES = new Set([
 // Private, server-owned context used by source adapters. Public request fields
 // cannot select quota or persistence policy.
 const canonicalSolveRequestContexts = new WeakMap();
+// Runtime ownership follows internal adapters without accepting client overrides.
+const solveRuntimeRequestContexts = new WeakMap();
+function solveRuntimeContext(req) {
+  if (!solveRuntimeRequestContexts.has(req)) {
+    solveRuntimeRequestContexts.set(req, {
+      endpoint: String(req.url || "/api/explain").split("?")[0],
+      startedAt: Date.now(),
+    });
+  }
+  return solveRuntimeRequestContexts.get(req);
+}
 const activeFollowupStreams = new Set();
 
 function imageSolveTelemetry(sourceMetadata) {
@@ -171,12 +181,14 @@ export function copyInternalRequest(req, overrides = {}) {
     ...(req?.headers || {}),
     ...(overrides.headers || {}),
   };
-  return {
+  const internal = {
     ...req,
     ...overrides,
     method: overrides.method || req?.method,
     headers,
   };
+  solveRuntimeRequestContexts.set(internal, solveRuntimeContext(req));
+  return internal;
 }
 
 function hashDebugText(value = "") {
@@ -214,26 +226,24 @@ function logAssuranceChecks({ requestId, endpoint, assurance, attemptId = null }
   }
 }
 
-export function resolveInitialSolveRouting(input = {}) {
-  const decision = chooseSolverRoleForProblem(input);
-  const routeSource = decision.role === "solver" ? "default" : "difficulty-based";
-  const selectedInitialModelPath = decision.role === "solver" ? "canonicalSolve" : decision.role;
-  const selection = selectOpenAiModel({
-    modelPath: selectedInitialModelPath,
-    debugContext: { attemptType: "initial" },
-  });
-  return {
-    routingDecision: decision.tier,
-    routingReason: decision.reason,
-    selectedInitialModelRole: decision.role,
-    selectedInitialModelPath,
+export function resolveInitialSolveRouting(input = {}, runtime = {}) {
+  const solvePolicy = selectSolvePolicy(input, runtime);
+  const selection = solvePolicy.initialSelection;
+  const routing = {
+    ...policyTelemetry(solvePolicy),
+    routingDecision: solvePolicy.difficultyTier,
+    routingReason: solvePolicy.routingReason,
+    selectedInitialModelRole: selection.role,
+    selectedInitialModelPath: selection.modelPath,
     selectedInitialModel: selection.modelId,
     selectedInitialReasoningEffort: selection.reasoningEffort,
     selectedInitialTimeoutMs: selection.timeoutMs,
     structuredOutputPolicy: selection.structuredOutput ? "strict_json_schema" : "provider_default",
-    recoveryEligible: decision.tier !== "standard",
-    routeSource,
+    recoveryEligible: solvePolicy.recoveryEligible,
+    routeSource: solvePolicy.role === "solver" ? "default" : "difficulty-based",
   };
+  Object.defineProperty(routing, "solvePolicy", { value: solvePolicy, enumerable: false });
+  return routing;
 }
 
 function solveExecutionConfig({
@@ -243,8 +253,12 @@ function solveExecutionConfig({
   promptStrategy = "canonical_problem",
   responseMode = "full_response_json",
   compact = false,
+  solvePolicy = null,
+  recovery = false,
+  recoverySelection = null,
 } = {}) {
-  const debugContext = { attemptType, retryPurpose: compact ? "compact" : recoveryPurpose };
+  const debugContext = { attemptType, retryPurpose: compact ? "compact" : recoveryPurpose,
+    solvePolicy, recoverySelection, solveBudgetStage: recovery ? "recovery" : "primary" };
   return buildModelExecutionConfig({
     modelPath,
     debugContext,
@@ -274,6 +288,7 @@ function logInitialSolveRouting({ requestId = "", endpoint = "", routing = {} } 
     structuredOutputPolicy: routing.structuredOutputPolicy || null,
     recoveryEligible: Boolean(routing.recoveryEligible),
     routeSource: routing.routeSource || null,
+    ...policyTelemetry(routing.solvePolicy),
   });
 }
 
@@ -2548,6 +2563,10 @@ async function handleProgressiveProviderSolve({
   let settlementDone = false;
   let settlementSucceeded = false;
   let settlementStatus = "pending";
+  let lastSettlement = null;
+  let progressiveOutcome = "failed";
+  let progressiveFailureCode = null;
+  let progressiveTimeoutSource = null;
   let providerResult = null;
   const completedSteps = [];
   let authoritativePrefixPublished = false;
@@ -2555,6 +2574,7 @@ async function handleProgressiveProviderSolve({
   let providerCallCount = 0;
   const recoveryAttempts = [];
   const initialExecutionConfig = solveExecutionConfig({
+    solvePolicy: initialRouting.solvePolicy,
     modelPath: initialRouting.selectedInitialModelPath,
     attemptType: "initial",
     recoveryPurpose: "progressive_initial",
@@ -2562,7 +2582,8 @@ async function handleProgressiveProviderSolve({
     responseMode: "provider_stream_json",
   });
   const escalationExecutionConfig = solveExecutionConfig({
-    modelPath: "escalation",
+    solvePolicy: initialRouting.solvePolicy,
+    modelPath: "escalation", recovery: true,
     attemptType: "escalation",
     recoveryPurpose: "progressive_escalation",
     promptStrategy: "canonical_problem",
@@ -2597,6 +2618,7 @@ async function handleProgressiveProviderSolve({
           providerAttempts: solveBudget.providerAttempts,
         })
         : await releaseTokenReservation(reservation, { providerCalls: 0, settlementReason: "failure-before-provider" });
+      lastSettlement = result;
       settlementSucceeded = true;
       settlementStatus = "settled";
       for (const attempt of recoveryAttempts) attempt.usageSettlementStatus = "settled";
@@ -2626,12 +2648,7 @@ async function handleProgressiveProviderSolve({
     let normalized;
     while (true) {
       if (abortController.signal.aborted) throw abortController.signal.reason;
-      if (Date.now() >= solveDeadlineAt) {
-        throw Object.assign(new Error("Interactive solve deadline exceeded."), {
-          code: "AI_SERVICE_UNAVAILABLE", responseFailureType: "interactive_deadline_exceeded",
-          publicMessage: "The AI service did not complete the explanation in time.",
-        });
-      }
+      solveBudget.throwIfExpired();
       const providerAttemptIndex = recoveryAttempts.length + 1;
       const routeAttemptId = `${eventIdentity.attemptId}:route:${providerAttemptIndex}`;
       const attemptStartedAt = Date.now();
@@ -2655,7 +2672,9 @@ async function handleProgressiveProviderSolve({
         ? "repair"
         : attemptType === "escalation"
           ? "escalation"
-          : initialRouting.selectedInitialModelPath;
+          : retryAttempted
+            ? initialRouting.solvePolicy.recoverySelections.timeout.modelPath
+            : initialRouting.selectedInitialModelPath;
       const attemptRecoveryPurpose = attemptType === "repair"
         ? "progressive_structured_repair"
         : attemptType === "escalation"
@@ -2667,7 +2686,10 @@ async function handleProgressiveProviderSolve({
         ? "repair_complete_candidate"
         : "canonical_problem";
       const attemptExecutionConfig = solveExecutionConfig({
+        solvePolicy: initialRouting.solvePolicy,
         modelPath: attemptModelPath,
+        recovery: providerAttemptIndex > 1,
+        recoverySelection: attemptType === "repair" ? "repair" : attemptType === "escalation" ? "structured" : "timeout",
         attemptType,
         recoveryPurpose: attemptRecoveryPurpose,
         promptStrategy: attemptPromptStrategy,
@@ -2701,7 +2723,9 @@ async function handleProgressiveProviderSolve({
             recoveryPurpose: attemptRecoveryPurpose,
             attemptType, endpoint, inputSource, normalizedProblem: problem,
             promptHash: hashDebugText(activePrompt), solveDeadlineAt, solveBudget,
-            solveBudgetStage: providerAttemptIndex === 1 ? "primary" : "recovery", initialRouting,
+            solveBudgetStage: providerAttemptIndex === 1 ? "primary" : "recovery",
+            recoverySelection: attemptType === "repair" ? "repair" : attemptType === "escalation" ? "structured" : "timeout",
+            initialRouting,
           },
           signal: abortController.signal,
           onTextDelta: async (delta, providerEvent) => {
@@ -2908,6 +2932,7 @@ async function handleProgressiveProviderSolve({
           repairCandidateAvailable: Boolean(repairCandidate), escalationModelAvailable,
           deadlineRemaining: solveBudget.canStartRecovery() && !abortController.signal.aborted,
           providerAttemptCount: providerAttemptIndex,
+          maxRouteAttempts: initialRouting.solvePolicy.maxRouteAttempts,
         });
         if (!solveBudget.canStartRecovery() && !abortController.signal.aborted) {
           decision.reason = "insufficient_recovery_budget";
@@ -3051,6 +3076,7 @@ async function handleProgressiveProviderSolve({
       effectiveModel: providerResult.effectiveModel || null,
       providerResponseId: providerResult.responseId,
     });
+    progressiveOutcome = "success";
     const recoverySummary = progressiveRecoverySummary(recoveryAttempts, accumulatedUsage, providerCallCount);
     console.info(`[omnimath:progressive-terminal] ${JSON.stringify({
       eventTimestamp: new Date().toISOString(), requestId, attemptId: eventIdentity.attemptId,
@@ -3079,6 +3105,9 @@ async function handleProgressiveProviderSolve({
     })}`);
   } catch (error) {
     const cancelled = abortController.signal.aborted;
+    progressiveOutcome = cancelled ? "cancelled" : "failed";
+    progressiveFailureCode = error?.code || error?.name || "unknown_failure";
+    progressiveTimeoutSource = error?.timeoutSource || null;
     try {
       await settle(accumulatedUsage || error?._aiUsage || providerResult?.usage || null,
         providerCallCount || error?._aiCallCount || providerResult?.providerCallCount || 0,
@@ -3163,9 +3192,12 @@ async function handleProgressiveProviderSolve({
     req.off?.("error", onRequestError);
     if (!res.destroyed && !res.writableEnded) res.end();
   }
+  return { outcome: progressiveOutcome, failureCode: progressiveFailureCode,
+    timeoutSource: progressiveTimeoutSource, settlement: lastSettlement?.settlement || null };
 }
 
 export async function handleExplainRequest(req, res) {
+  const runtimeContext = solveRuntimeContext(req);
   if (req.method !== "POST") {
     sendMethodNotAllowed(res, ["POST"]);
     return;
@@ -3268,7 +3300,14 @@ export async function handleExplainRequest(req, res) {
 
     const prompt = buildMathExplanationPrompt({ problem, history });
     const promptHash = hashDebugText(prompt);
-    const solveTimeoutMs = getSolveTotalTimeoutMs();
+    const initialRouting = resolveInitialSolveRouting({ problem, canonicalLatex: problem }, {
+      endpoint: runtimeContext.endpoint,
+      runtimeStartedAt: runtimeContext.startedAt,
+      recoveryMode: body.progressiveMode === "provider-stream" ? "progressive" : "ordinary",
+    });
+    const solvePolicy = initialRouting.solvePolicy;
+    const solveTimeoutMs = solvePolicy.canonicalBudgetMs;
+    const reservationEnvelope = estimateSolvePolicyReservation({ policy: solvePolicy, prompt });
     const cancellationRequest = solveContext.originalRequest || req;
     const cancellationResponse = solveContext.originalResponse || res;
     const requestAbortController = new AbortController();
@@ -3289,19 +3328,35 @@ export async function handleExplainRequest(req, res) {
     cancellationRequest.signal?.addEventListener?.("abort", onRequestSignalAbort, { once: true });
     if (cancellationRequest.aborted || cancellationRequest.signal?.aborted) abortForClientDisconnect();
     const solveBudget = createSolveBudget({
+      deadlineAt: solvePolicy.canonicalDeadlineAt,
       totalTimeoutMs: solveTimeoutMs,
+      recoveryReserveMs: solvePolicy.recoveryBudgetMs,
+      completionReserveMs: solvePolicy.responseReserveMs,
       signal: requestAbortController.signal,
     });
     const solveDeadlineAt = solveBudget.deadlineAt;
+    let solveOutcome = "failed";
+    let solveSettlement = null;
+    let solveFailureCode = null;
+    let solveTimeoutSource = null;
     try {
-    const initialRouting = resolveInitialSolveRouting({
-      problem,
-      // Routing consumes the same canonical solver text as the prompt. OCR-only
-      // display LaTeX remains provenance and must not create a second policy.
-      canonicalLatex: problem,
-    });
     const solverSampling = getOpenAiSamplingForPath(initialRouting.selectedInitialModelRole);
     logInitialSolveRouting({ requestId, endpoint, routing: initialRouting });
+    console.info("[omnimath:solve-reservation]", {
+      requestId, endpoint,
+      estimatedTokens: reservationEnvelope.estimatedTokens,
+      estimatedInputTokens: reservationEnvelope.estimatedInputTokens,
+      estimatedMaxOutputTokens: reservationEnvelope.estimatedMaxOutputTokens,
+      estimatedCostMicros: reservationEnvelope.estimatedCostMicros,
+      estimatedPrimaryCostMicros: reservationEnvelope.primary.estimatedCostMicros,
+      estimatedRecoveryCostMicros: reservationEnvelope.recovery?.estimatedCostMicros ?? 0,
+      reservedRecoveryModel: reservationEnvelope.recovery?.model || null,
+      estimateKind: reservationEnvelope.estimateKind,
+      pricingSource: solvePolicy.initialSelection.pricingSource,
+      pricingSources: reservationEnvelope.pricingSources,
+      pricingFallbackUsed: reservationEnvelope.pricingFallbackUsed,
+      recoveryEstimateKind: reservationEnvelope.recoveryEstimateKind,
+    });
     logSolveDebug("request_received", {
       requestId,
       endpoint,
@@ -3326,12 +3381,8 @@ export async function handleExplainRequest(req, res) {
       promptProblemText: problem,
       promptChars: prompt.length,
     });
-    const initialMaxOutputTokens = getSolveOutputTokenBudget({
-      modelPath: initialRouting.selectedInitialModelPath,
-      debugContext: { attemptType: "initial", initialRouting },
-    });
-    const estimatedTokens = estimateOpenAiTokenBudget({ prompt, maxOutputTokens: initialMaxOutputTokens });
-    const estimatedCostMicros = dollarsToMicros(estimateOpenAiCostBudget({ prompt, maxOutputTokens: initialMaxOutputTokens }));
+    const estimatedTokens = reservationEnvelope.estimatedTokens;
+    const estimatedCostMicros = reservationEnvelope.estimatedCostMicros;
     if (body.progressiveMode === "provider-stream") {
       if (!progressiveProviderEnabled()) {
         throw Object.assign(new Error("Provider streaming is not enabled."), {
@@ -3339,11 +3390,15 @@ export async function handleExplainRequest(req, res) {
           publicMessage: "Progressive solving is not available.",
         });
       }
-      await handleProgressiveProviderSolve({
+      const progressive = await handleProgressiveProviderSolve({
         req, res, body, requestId, prompt, problem, canonicalProblem,
         initialRouting, solveDeadlineAt, solveBudget, usageKind, persistenceSource, identity,
         estimatedTokens, estimatedCostMicros, endpoint, inputSource, cacheKey, sourceMetadata,
       });
+      solveOutcome = progressive.outcome;
+      solveSettlement = progressive.settlement;
+      solveFailureCode = progressive.failureCode;
+      solveTimeoutSource = progressive.timeoutSource;
       return;
     }
     const { duplicate, value } = await runDeduplicatedRequest(cacheKey, () => withSolveDiagnosticContext({ requestId, endpoint }, async () => {
@@ -3372,19 +3427,22 @@ export async function handleExplainRequest(req, res) {
       let accumulatedAiUsage = null;
       let accumulatedAiCallCount = 0;
       const initialExecutionConfig = solveExecutionConfig({
+        solvePolicy: initialRouting.solvePolicy,
         modelPath: initialRouting.selectedInitialModelPath,
         attemptType: "initial",
         recoveryPurpose: "initial_generation",
         promptStrategy: "canonical_problem",
       });
       const escalationExecutionConfig = solveExecutionConfig({
-        modelPath: "escalation",
+        solvePolicy: initialRouting.solvePolicy,
+        modelPath: "escalation", recovery: true,
         attemptType: "escalation",
         recoveryPurpose: "structured_output_recovery",
         promptStrategy: "fresh_from_canonical_problem",
       });
       const assuranceExecutionConfig = solveExecutionConfig({
-        modelPath: "escalation", attemptType: "escalation",
+        solvePolicy: initialRouting.solvePolicy,
+        modelPath: "escalation", recovery: true, attemptType: "escalation",
         recoveryPurpose: "mathematical_assurance_recovery",
         promptStrategy: "fresh_from_canonical_problem",
       });
@@ -3424,6 +3482,7 @@ export async function handleExplainRequest(req, res) {
                 prompt,
                 originalProblem: problem,
                 modelPath: initialRouting.selectedInitialModelPath,
+                allowCompactRetry: solvePolicy.recoveryPolicy.allowCompactRetry,
                 debugContext: {
                   ...imageSolveTelemetry(sourceMetadata),
                   requestId,
@@ -3538,7 +3597,10 @@ export async function handleExplainRequest(req, res) {
                 : "structured_output_recovery";
               const recoveryExecutionConfig = timeoutRecovery
                 ? solveExecutionConfig({
-                    modelPath: initialRouting.selectedInitialModelPath,
+                    solvePolicy: initialRouting.solvePolicy,
+                    modelPath: solvePolicy.recoverySelections.timeout.modelPath,
+                    recovery: true,
+                    recoverySelection: "timeout",
                     attemptType: "recovery",
                     recoveryPurpose,
                     promptStrategy: "canonical_problem",
@@ -3568,7 +3630,7 @@ export async function handleExplainRequest(req, res) {
                 result = await createMathExplanation({
                   prompt: escalationPrompt,
                   originalProblem: problem,
-                  modelPath: timeoutRecovery ? initialRouting.selectedInitialModelPath : "escalation",
+                  modelPath: timeoutRecovery ? solvePolicy.recoverySelections.timeout.modelPath : "escalation",
                   allowCompactRetry: false,
                   debugContext: {
                   ...imageSolveTelemetry(sourceMetadata),
@@ -3584,6 +3646,7 @@ export async function handleExplainRequest(req, res) {
                     solveDeadlineAt,
                     solveBudget,
                     solveBudgetStage: "recovery",
+                    recoverySelection: timeoutRecovery ? "timeout" : "structured",
                     retryPurpose: timeoutRecovery
                       ? "provider-attempt-timeout-recovery"
                       : "structured-output-recovery",
@@ -3863,6 +3926,7 @@ export async function handleExplainRequest(req, res) {
               providerAttempts: solveBudget.providerAttempts,
             })
           : await getUsageForKind(req, usageKind, identity);
+        solveSettlement = usage?.settlement || null;
       } catch (error) {
         logSolveDebug("candidate_boundary_failure", {
           requestId,
@@ -3875,6 +3939,7 @@ export async function handleExplainRequest(req, res) {
         });
         try {
           usage = await settleFailureUsageOrRelease(reservation, error, result, solveBudget.providerAttempts);
+          solveSettlement = usage?.settlement || null;
           if (usage) error.usage = usage;
         } catch (releaseError) {
           console.warn("Could not settle failed token reservation:", releaseError.message);
@@ -3954,6 +4019,7 @@ export async function handleExplainRequest(req, res) {
       };
     }));
 
+    solveOutcome = "success";
     const { result, usage, saved, saveStatus, source } = value;
     const responseResult = sourceMetadata ? { ...result, ...structuredClone(sourceMetadata) } : result;
     sendJson(
@@ -3980,7 +4046,30 @@ export async function handleExplainRequest(req, res) {
       finalUiState: "success-response-sent",
       stepCount: Array.isArray(result?.steps) ? result.steps.length : 0,
     });
+    } catch (error) {
+      solveFailureCode = error?.code || error?.name || "unknown_failure";
+      solveTimeoutSource = error?.timeoutSource || null;
+      throw error;
     } finally {
+      const primaryAttempts = solveBudget.providerAttempts.filter((attempt) => attempt.stage === "primary");
+      const recoveryAttempts = solveBudget.providerAttempts.filter((attempt) => attempt.stage === "recovery");
+      console.info("[omnimath:solve-policy-outcome]", {
+        requestId, endpoint, difficultyTier: solvePolicy.difficultyTier,
+        budgetProfile: solvePolicy.budgetProfile, outcome: solveOutcome,
+        failureCode: solveFailureCode,
+        timeoutSource: solveTimeoutSource || solveBudget.signal.reason?.timeoutSource || null,
+        durationMs: Date.now() - startedAt,
+        primaryProviderDurationMs: primaryAttempts.reduce((sum, attempt) => sum + (attempt.durationMs || 0), 0),
+        recoveryProviderDurationMs: recoveryAttempts.reduce((sum, attempt) => sum + (attempt.durationMs || 0), 0),
+        recoveryUsed: recoveryAttempts.length > 0,
+        providerCalls: solveBudget.providerAttempts.length,
+        estimatedCostMicros: reservationEnvelope.estimatedCostMicros,
+        observedCostMicros: solveSettlement?.actualCostMicros ?? solveSettlement?.observedCostMicros ?? null,
+        observedTotalTokens: solveSettlement?.actualTotalTokens ?? solveSettlement?.observedTotalTokens ?? null,
+        settledCostMicros: solveSettlement?.settledCostMicros ?? solveSettlement?.actualCostMicros ?? null,
+        costStatus: solveSettlement?.costStatus || (solveSettlement ? "observed" : "not_settled"),
+        usageStatuses: [...new Set(solveBudget.providerAttempts.map((attempt) => attempt.usageStatus))],
+      });
       solveBudget.cleanup();
       cancellationResponse.off?.("close", abortForClientDisconnect);
       cancellationRequest.off?.("aborted", abortForClientDisconnect);
@@ -4177,6 +4266,7 @@ export async function handleExtractImageProblemRequest(req, res) {
 }
 
 export async function handleSolveExtractedProblemRequest(req, res) {
+  solveRuntimeContext(req);
   if (req.method !== "POST") {
     sendMethodNotAllowed(res, ["POST"]);
     return;
@@ -4411,6 +4501,7 @@ export async function handleSolveExtractedProblemRequest(req, res) {
 }
 
 export async function handleExplainImageRequest(req, res) {
+  solveRuntimeContext(req);
   if (req.method !== "POST") {
     sendMethodNotAllowed(res, ["POST"]);
     return;

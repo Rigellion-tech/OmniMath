@@ -8,15 +8,15 @@
       "maxDuration": 70
     },
     "api/explain.js": {
-      "maxDuration": 100,
+      "maxDuration": 300,
       "supportsCancellation": true
     },
     "api/explain-image.js": {
-      "maxDuration": 160,
+      "maxDuration": 300,
       "supportsCancellation": true
     },
     "api/solve-extracted-problem.js": {
-      "maxDuration": 100,
+      "maxDuration": 300,
       "supportsCancellation": true
     }
   }

@@ -51,8 +51,8 @@ export function createSolveBudget({
     Math.max(1, Math.floor(resolvedTotalMs * 0.1)),
   );
   const recoveryReserve = Math.min(
-    positiveMs(recoveryReserveMs, Math.floor(resolvedTotalMs * 0.25)),
-    MAX_RECOVERY_RESERVE_MS,
+    recoveryReserveMs === 0 ? 0 : positiveMs(recoveryReserveMs, Math.floor(resolvedTotalMs * 0.25)),
+    recoveryReserveMs === null ? MAX_RECOVERY_RESERVE_MS : resolvedTotalMs,
     Math.max(0, resolvedTotalMs - completionReserve - 1),
   );
   const primaryDeadlineAt = resolvedDeadlineAt - completionReserve - recoveryReserve;
@@ -141,6 +141,9 @@ export function createSolveBudget({
       attempt: fields.attempt ?? providerAttempts.length + 1,
       dispatchAt: fields.dispatchAt || new Date(now()).toISOString(),
       abortAt: null,
+      outcomeAt: null,
+      durationMs: null,
+      stage: fields.stage || null,
       timeoutSource: fields.timeoutSource || null,
       budgetLimitReason: fields.budgetLimitReason || null,
       providerRequestId: fields.providerRequestId || null,
@@ -165,6 +168,8 @@ export function createSolveBudget({
     if (fields.aborted || fields.abortAt) {
       entry.abortAt = fields.abortAt || new Date(now()).toISOString();
     }
+    entry.outcomeAt = new Date(now()).toISOString();
+    entry.durationMs = Math.max(0, now() - Date.parse(entry.dispatchAt));
     entry.usageStatus = fields.usageStatus
       || (fields.usage ? "observed" : entry.abortAt ? "unknown_due_to_abort" : "unknown_unreconciled");
     console.info("[omnimath:provider-outcome]", entry);
@@ -183,6 +188,9 @@ export function createSolveBudget({
     primaryDeadlineAt,
     recoveryDeadlineAt,
     totalTimeoutMs: resolvedTotalMs,
+    primaryBudgetMs: Math.max(0, primaryDeadlineAt - createdAt),
+    recoveryBudgetMs: recoveryReserve,
+    responseReserveMs: completionReserve,
     signal: controller.signal,
     providerAttempts,
     attemptBudget,

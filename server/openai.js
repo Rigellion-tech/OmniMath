@@ -37,6 +37,7 @@ import {
   resolveImageExtractionOutputTokenBudget,
   resolveOpenAiRequestTimeout,
   selectOpenAiModel,
+  getSolvePolicySelection,
 } from "./openaiModels.js";
 
 loadEnvFiles();
@@ -65,6 +66,7 @@ const DEFAULT_OPENAI_RETRY_BASE_DELAY_MS = 500;
 const MIN_IMAGE_EXTRACTION_COMPACT_RETRY_MS = 5000;
 const DEFAULT_SOLVE_OUTPUT_BUDGETS = Object.freeze({
   solver: Object.freeze({ full: 6500, compact: 3200 }),
+  hardSolve: Object.freeze({ full: 24000, compact: 12000 }),
   repair: Object.freeze({ full: 16000, compact: 8000 }),
   escalation: Object.freeze({ full: 24000, compact: 12000 }),
   premiumEscalation: Object.freeze({ full: 24000, compact: 12000 }),
@@ -73,6 +75,10 @@ const SOLVE_OUTPUT_BUDGET_ENV = Object.freeze({
   solver: Object.freeze({
     full: "OMNIMATH_SOLVER_MAX_OUTPUT_TOKENS",
     compact: "OMNIMATH_SOLVER_COMPACT_MAX_OUTPUT_TOKENS",
+  }),
+  hardSolve: Object.freeze({
+    full: "OMNIMATH_HARD_SOLVE_MAX_OUTPUT_TOKENS",
+    compact: "OMNIMATH_HARD_SOLVE_COMPACT_MAX_OUTPUT_TOKENS",
   }),
   repair: Object.freeze({
     full: "OMNIMATH_REPAIR_MAX_OUTPUT_TOKENS",
@@ -347,7 +353,9 @@ export function assertOpenAiConfigured() {
 }
 
 function readPositiveNumber(name, fallback) {
-  const value = Number(process.env[name]);
+  const raw = process.env[name];
+  if (typeof raw !== "string" || !raw.trim()) return fallback;
+  const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
@@ -397,6 +405,8 @@ export function getSolveOutputTokenBudget({
   modelPath = "solver",
   debugContext = {},
 } = {}) {
+  const policySelection = getSolvePolicySelection(modelPath, debugContext);
+  if (policySelection) return compact ? policySelection.compactMaxOutputTokens : policySelection.maxOutputTokens;
   const selection = selectOpenAiModel({ modelPath, debugContext });
   const role = Object.hasOwn(DEFAULT_SOLVE_OUTPUT_BUDGETS, selection.role)
     ? selection.role
@@ -405,10 +415,11 @@ export function getSolveOutputTokenBudget({
   const defaultBudget = role === "solver" && stage === "full"
     ? getSolveMaxOutputTokens()
     : DEFAULT_SOLVE_OUTPUT_BUDGETS[role][stage];
-  const requestedBudget = readPositiveNumber(
-    SOLVE_OUTPUT_BUDGET_ENV[role][stage],
-    defaultBudget,
-  );
+  const budgetEnv = role === "hardSolve"
+    && !process.env[SOLVE_OUTPUT_BUDGET_ENV.hardSolve[stage]]?.trim()
+    && process.env[SOLVE_OUTPUT_BUDGET_ENV.repair[stage]]?.trim()
+    ? SOLVE_OUTPUT_BUDGET_ENV.repair[stage] : SOLVE_OUTPUT_BUDGET_ENV[role][stage];
+  const requestedBudget = readPositiveNumber(budgetEnv, defaultBudget);
   const capabilityLimit = Number(
     selection.maxOutputTokenCapability ?? selection.maxOutputTokens,
   );
@@ -1084,7 +1095,8 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
     debugContext,
   }).role;
   const solveMode = debugContext.solveMode || debugAttemptType(debugContext);
-  const timeoutResolution = resolveOpenAiRequestTimeout(modelRole);
+  const timeoutResolution = getSolvePolicySelection(modelPath, debugContext)
+    || resolveOpenAiRequestTimeout(modelRole);
   const maxAttempts = getOpenAiMaxAttempts(modelRole);
   const configuredTimeoutMs = timeoutResolution.timeoutMs;
   const solveBudget = debugContext.solveBudget || null;
@@ -1183,6 +1195,7 @@ async function fetchOpenAiWithRetry({ purpose, modelPath, payload, debugContext 
       const headers = createOpenAiHeaders();
       const body = JSON.stringify(payload);
       providerAttempt = solveBudget?.recordProviderDispatch({
+        stage: recoveryStage ? "recovery" : "primary",
         model,
         requestId: debugContext.requestId || null,
         attemptId: debugContext.attemptId || null,
@@ -1632,7 +1645,8 @@ async function streamOpenAiTextResponse({
     throw Object.assign(new Error("A prompt is required."), { statusCode: 400, code: "INVALID_INPUT" });
   }
   const selection = selectOpenAiModel({ modelPath, debugContext });
-  const timeoutResolution = resolveOpenAiRequestTimeout(timeoutRole || selection.role);
+  const timeoutResolution = timeoutRole
+    ? resolveOpenAiRequestTimeout(timeoutRole) : selection;
   const startedAt = Date.now();
   const solveBudget = debugContext.solveBudget || null;
   const recoveryStage = debugContext.solveBudgetStage === "recovery"
@@ -1727,6 +1741,7 @@ async function streamOpenAiTextResponse({
       const headers = createOpenAiHeaders();
       const body = JSON.stringify(payload);
       providerAttempt = solveBudget?.recordProviderDispatch({
+        stage: recoveryStage ? "recovery" : "primary",
         model: selection.modelId,
         requestId: debugContext.requestId || null,
         attemptId: debugContext.attemptId || null,
